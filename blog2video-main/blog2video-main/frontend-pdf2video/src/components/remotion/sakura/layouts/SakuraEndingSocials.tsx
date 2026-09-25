@@ -1,0 +1,503 @@
+import React from "react";
+import { useVideoConfig, interpolate, spring } from "remotion";
+import { SceneLayoutProps } from "../types";
+import { SocialIcons } from "../../SocialIcons";
+import { useFitText } from "../components/useFitText";
+// NOTE for the render tree: resolveCtas lives at ../../shared/resolveCtas there.
+// This is the ONLY line that differs between the two copies of this file.
+import { resolveCtas } from "../../../../utils/resolveCtas";
+import {
+  SAKURA,
+  SAKURA_DISPLAY_FONT,
+  SAKURA_BODY_FONT,
+  SAKURA_DETAIL_FONT,
+  SakuraScene,
+  useSakuraFrame,
+  KamonWatermark,
+  CornerBlossoms,
+  SoftPetal,
+  hexToRgba,
+  readableTextColor,
+  deriveLightWash,
+} from "../sakuraStyle";
+
+export const SakuraEndingSocials: React.FC<SceneLayoutProps> = (props) => {
+  const {
+    title,
+    narration,
+    accentColor,
+    bgColor,
+    textColor,
+    aspectRatio,
+    sceneDurationInFrames,
+    titleFontSize,
+    descriptionFontSize,
+    titleFontSizeIsUserSet,
+    descriptionFontSizeIsUserSet,
+    fontFamily,
+    socials,
+  } = props;
+
+  const p = aspectRatio === "portrait";
+  const frame = useSakuraFrame();
+  const { fps, width, height } = useVideoConfig();
+  const dur = sceneDurationInFrames ?? 150;
+
+  // Dark backdrop: accent drives the frame/blossom marks; text drives the brand +
+  // copy, but a near-black text color would vanish on dark, so readableTextColor
+  // falls back to light washi. Matches the other dark Sakura scenes.
+  const crimson = accentColor || SAKURA.crimson;
+  const ink = readableTextColor(textColor, "dark");
+  // Tagline uses a lighter shade of the user's background color (pale tint of the
+  // bg hue), so it recolors with the bg instead of the fixed blush.
+  const taglineColor = deriveLightWash(bgColor).center;
+
+  const brandName = (props as any).brandName ?? title ?? "";
+  const tagline = (props as any).tagline ?? narration ?? "";
+  // Prefer the Studio-authored Sakura prop names, then fall back to the canonical
+  // ending_socials descriptor names the backend pipeline emits (ctaButtonText /
+  // websiteLink) so the CTA box and website line populate on generated videos.
+  const ctaText = (props as any).ctaText ?? (props as any).ctaButtonText ?? "";
+  const websiteUrl = (props as any).websiteUrl ?? (props as any).websiteLink ?? "";
+  /**
+   * Up to three CTAs. This scene used to read ONLY the single `ctaText` above, so
+   * a `ctas` array silently rendered just its first entry. `resolveCtas` reads the
+   * array when present and falls back to the legacy single-CTA fields.
+   * A lone legacy CTA is honoured even with no link, since that is what the sakura
+   * pipeline has always emitted here; in the multi case a card needs a label or a
+   * link and must be toggled on.
+   */
+  const ctaCards = resolveCtas({
+    ctas: (props as any).ctas,
+    ctaButtonText: ctaText,
+    websiteLink: websiteUrl,
+    showWebsiteButton: (props as any).showWebsiteButton,
+  }).filter((c, _i, arr) =>
+    arr.length === 1
+      ? c.ctaButtonText.trim().length > 0
+      : c.showWebsiteButton && (c.ctaButtonText.trim().length > 0 || c.websiteLink.length > 0),
+  );
+  const socialHandles: string[] = (props as any).socialHandles ?? [];
+
+  const titleTargetPx = titleFontSize ?? (p ? 80 : 64);
+  const taglineTargetPx = descriptionFontSize ?? (p ? 26 : 20);
+  const titleRef = React.useRef<HTMLDivElement>(null);
+  const taglineRef = React.useRef<HTMLDivElement>(null);
+  const { px: titlePx } = useFitText(
+    titleRef,
+    titleTargetPx,
+    Math.max(28, Math.round(titleTargetPx * 0.55)),
+    [brandName, titleTargetPx, titleFontSizeIsUserSet, p, height],
+    Math.round(height * (p ? 0.22 : 0.26)),
+  );
+  const { px: taglinePx } = useFitText(
+    taglineRef,
+    taglineTargetPx,
+    Math.max(18, Math.round(taglineTargetPx * 0.58)),
+    [tagline, taglineTargetPx, descriptionFontSizeIsUserSet, titlePx, p, height],
+    Math.round(height * (p ? 0.2 : 0.24)),
+  );
+  // CTA line, website URL and social handles all scale off the tagline size so
+  // they track the display-text slider.
+  const ctaPx = Math.max(15, Math.round(taglinePx * 0.95));
+  const websitePx = Math.max(13, Math.round(taglinePx * 0.88));
+  const handlePx = Math.max(12, Math.round(taglinePx * 0.8));
+
+  const cx = width / 2;
+  const cy = height / 2;
+
+  // ── Petal burst (Easing.back flavor, frames 0–24) ─────────────────────────
+  const burst = interpolate(frame, [0, 24], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+    easing: (t) => 1 + 2.2 * Math.pow(t - 1, 3) + 1.2 * Math.pow(t - 1, 2),
+  });
+
+  // ── Reveals ───────────────────────────────────────────────────────────────
+  const brandScale = spring({ frame, fps, from: 0.9, to: 1, config: { damping: 18, stiffness: 60 } });
+  const brandOpacity = interpolate(frame, [0, 16], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const taglineReveal = interpolate(frame, [12, 26], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+    easing: (t) => 1 - Math.pow(1 - t, 2),
+  });
+  const dividerReveal = interpolate(frame, [20, 32], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const ctaReveal = spring({
+    frame: Math.max(0, frame - 26),
+    fps,
+    from: 0,
+    to: 1,
+    config: { damping: 20, stiffness: 55 },
+  });
+  const websiteReveal = interpolate(frame, [42, 56], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const socialsReveal = interpolate(frame, [50, 64], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  const cornerPetalScale = (idx: number) =>
+    spring({
+      frame: Math.max(0, frame - 30 - idx * 3),
+      fps,
+      from: 0,
+      to: 1,
+      config: { damping: 14, stiffness: 90 },
+    });
+
+  // ── Concentric counter-rotating petal rings ───────────────────────────────
+  const outerR = p ? 330 : 280;
+  const innerR = p ? 180 : 150;
+  const ringSpin = frame * 0.06;
+
+  const hasSocials =
+    socials &&
+    (Array.isArray(socials) ? socials.length > 0 : Object.keys(socials).length > 0);
+
+  const boxW = p ? 480 : 420;
+
+  return (
+    <SakuraScene
+      backdrop="celebration"
+      entranceLayout="sakura_ending_socials"
+      bgColor={bgColor}
+      dur={dur}
+      petals={p ? 24 : 35}
+      petalIntensity={1.4}
+      petalSeed={99}
+      petalMode="settle"
+      chrome={
+        <>
+          {/* Kamon watermark rings */}
+          <KamonWatermark cx={cx} cy={cy} r={p ? 420 : 300} color={SAKURA.gold} opacity={0.06} />
+          <KamonWatermark cx={cx} cy={cy} r={p ? 310 : 225} color={SAKURA.blush} opacity={0.04} spin={-0.02} />
+          <CornerBlossoms scale={p ? 0.85 : 0.95} />
+          {/* Petal burst + counter-rotating rings */}
+          <svg
+            width={width}
+            height={height}
+            viewBox={`0 0 ${width} ${height}`}
+            style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+          >
+            {/* Burst */}
+            {Array.from({ length: 16 }, (_, i) => {
+              const a = ((i * 22.5 - 90) * Math.PI) / 180;
+              const dist = (outerR + 60) * burst;
+              return (
+                <SoftPetal
+                  key={`b-${i}`}
+                  cx={cx + Math.cos(a) * dist}
+                  cy={cy + Math.sin(a) * dist}
+                  r={[16, 12, 14][i % 3]}
+                  rotation={i * 30}
+                  color={i % 2 === 0 ? SAKURA.blush : SAKURA.mist}
+                  opacity={interpolate(burst, [0.6, 1], [0.9, 0.25], {
+                    extrapolateLeft: "clamp",
+                    extrapolateRight: "clamp",
+                  })}
+                />
+              );
+            })}
+            {/* Outer ring — 18 petals, slow clockwise */}
+            {Array.from({ length: 18 }, (_, i) => {
+              const a = ((i * 20 - 90 + ringSpin) * Math.PI) / 180;
+              return (
+                <SoftPetal
+                  key={`o-${i}`}
+                  cx={cx + Math.cos(a) * outerR}
+                  cy={cy + Math.sin(a) * outerR}
+                  r={[16, 12, 14][i % 3]}
+                  rotation={i * 30 + ringSpin}
+                  color={i % 2 === 0 ? SAKURA.blush : SAKURA.mist}
+                  opacity={0.32}
+                />
+              );
+            })}
+            {/* Inner ring — 12 petals, slow counter-clockwise */}
+            {Array.from({ length: 12 }, (_, i) => {
+              const a = ((i * 30 - 90 - ringSpin * 1.4) * Math.PI) / 180;
+              return (
+                <SoftPetal
+                  key={`i-${i}`}
+                  cx={cx + Math.cos(a) * innerR}
+                  cy={cy + Math.sin(a) * innerR}
+                  r={[10, 8][i % 2]}
+                  rotation={i * 40 - ringSpin}
+                  color={i % 2 === 0 ? SAKURA.deepBlush : SAKURA.blush}
+                  opacity={0.25}
+                />
+              );
+            })}
+          </svg>
+        </>
+      }
+    >
+      {/* Content stack */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          textAlign: "center",
+          padding: p ? "140px 70px" : "60px 160px",
+        }}
+      >
+        {/* Brand */}
+        <div
+          ref={titleRef}
+          style={{
+            fontFamily: fontFamily ?? SAKURA_DISPLAY_FONT,
+            fontWeight: 700,
+            fontSize: titlePx,
+            color: ink,
+            letterSpacing: "0.08em",
+            lineHeight: 1.15,
+            opacity: brandOpacity,
+            transform: `scale(${brandScale})`,
+            marginBottom: 14,
+          }}
+        >
+          {brandName}
+        </div>
+
+        {/* Tagline */}
+        {tagline ? (
+          <div
+            ref={taglineRef}
+            style={{
+              fontFamily: fontFamily ?? SAKURA_BODY_FONT,
+              fontSize: taglinePx,
+              color: taglineColor,
+              letterSpacing: "0.45em",
+              textTransform: "uppercase",
+              textIndent: "0.45em",
+              maxWidth: p ? 820 : 980,
+              overflowWrap: "anywhere",
+              opacity: taglineReveal,
+              transform: `translateY(${(1 - taglineReveal) * 12}px)`,
+              marginBottom: 34,
+            }}
+          >
+            {tagline}
+          </div>
+        ) : null}
+
+        {/* Five-petal divider row (center largest) */}
+        <svg
+          width={220}
+          height={34}
+          viewBox="0 0 220 34"
+          style={{ marginBottom: 34, opacity: dividerReveal, overflow: "visible" }}
+        >
+          {[-90, -54, -18, 18, 54].map((x, i) => (
+            <SoftPetal
+              key={i}
+              cx={110 + x + 18}
+              cy={17}
+              r={[12, 10, 14, 10, 12][i]}
+              rotation={i * 36}
+              color={SAKURA.deepBlush}
+              opacity={[0.45, 0.5, 1, 0.5, 0.45][i]}
+            />
+          ))}
+        </svg>
+
+        {/* CTA box with corner blossoms — auto-sizes to hug the text so the
+            crimson border always contains it, capped so it can't run off-frame */}
+        {ctaCards.length > 0 ? (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "stretch",
+              justifyContent: "center",
+              // The boxes carry corner blossoms that overhang by 12px on each
+              // side, so adjacent boxes need >24px of gap or the petals collide.
+              gap: p ? 30 : 40,
+              maxWidth: p ? "92%" : "94%",
+              marginBottom: 34,
+            }}
+          >
+            {ctaCards.map((card, ci) => (
+              <div
+                key={ci}
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 10,
+                  minWidth: 0,
+                }}
+              >
+                <div
+                  style={{
+                    position: "relative",
+                    width: "auto",
+                    height: "auto",
+                    // Several boxes share the row, so the generous single-CTA
+                    // minWidth would push them off-frame.
+                    minWidth: ctaCards.length > 1 ? (p ? 180 : 200) : p ? 320 : 300,
+                    maxWidth: p ? "82%" : boxW,
+                    padding:
+                      ctaCards.length > 1
+                        ? p
+                          ? "16px 26px"
+                          : "14px 26px"
+                        : p
+                          ? "20px 34px"
+                          : "16px 30px",
+                    boxSizing: "border-box",
+                    border: `1.8px solid ${crimson}`,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    opacity: ctaReveal,
+                    transform: `scale(${0.9 + 0.1 * ctaReveal})`,
+                  }}
+                >
+                  {[
+                    { pos: { left: -12, top: -12 }, rot: 0 },
+                    { pos: { right: -12, top: -12 }, rot: 90 },
+                    { pos: { left: -12, bottom: -12 }, rot: -90 },
+                    { pos: { right: -12, bottom: -12 }, rot: 180 },
+                  ].map((c, i) => (
+                    <svg
+                      key={i}
+                      width={22}
+                      height={22}
+                      viewBox="0 0 22 22"
+                      style={{
+                        position: "absolute",
+                        ...c.pos,
+                        overflow: "visible",
+                        transform: `scale(${cornerPetalScale(i)})`,
+                      }}
+                    >
+                      <SoftPetal cx={11} cy={11} r={9} rotation={c.rot} color={crimson} centerColor={SAKURA.gold} />
+                    </svg>
+                  ))}
+                  <div
+                    style={{
+                      fontFamily: fontFamily ?? SAKURA_BODY_FONT,
+                      // The wide letter-spacing is the look here, so shrink the
+                      // type rather than the tracking when boxes share a row.
+                      fontSize: ctaCards.length > 1 ? ctaPx * 0.82 : ctaPx,
+                      color: ink,
+                      // Ease the tracking when boxes share a row — at 0.5em three
+                      // labels run tight against their borders.
+                      letterSpacing: ctaCards.length > 1 ? "0.3em" : "0.5em",
+                      textTransform: "uppercase",
+                      textIndent: ctaCards.length > 1 ? "0.3em" : "0.5em",
+                      textAlign: "center",
+                      lineHeight: 1.25,
+                    }}
+                  >
+                    {card.ctaButtonText.trim() || "Get started"}
+                  </div>
+                </div>
+                {/* Each CTA has its own link, so with several of them the single
+                    website line below cannot say where any one of them goes. */}
+                {ctaCards.length > 1 && card.websiteLink ? (
+                  <div
+                    style={{
+                      fontFamily: fontFamily ?? SAKURA_DETAIL_FONT,
+                      fontSize: websitePx * 0.92,
+                      color: SAKURA.gold,
+                      letterSpacing: "0.12em",
+                      maxWidth: "100%",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      opacity: ctaReveal,
+                    }}
+                  >
+                    {card.websiteLink}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {/* Website — constrained + wrapping so a long URL stays in-frame */}
+        {/* Suppressed when several CTAs are shown — each carries its own link
+            above, so a single shared line would be ambiguous. */}
+        {websiteUrl && ctaCards.length <= 1 ? (
+          <div
+            style={{
+              fontFamily: fontFamily ?? SAKURA_DETAIL_FONT,
+              fontSize: websitePx,
+              color: SAKURA.gold,
+              letterSpacing: "0.35em",
+              maxWidth: p ? "88%" : "70%",
+              textAlign: "center",
+              overflowWrap: "anywhere",
+              wordBreak: "break-word",
+              opacity: websiteReveal,
+              marginBottom: hasSocials || socialHandles.length ? 30 : 0,
+            }}
+          >
+            {websiteUrl}
+          </div>
+        ) : null}
+
+        {/* Shared social icons */}
+        {hasSocials ? (
+          <div
+            style={{
+              width: "100%",
+              display: "flex",
+              justifyContent: "center",
+              opacity: socialsReveal,
+            }}
+          >
+            <SocialIcons
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              socials={socials as any}
+              accentColor={crimson}
+              textColor={ink}
+              maxPerRow={p ? 3 : 5}
+              fontFamily={fontFamily ?? SAKURA_BODY_FONT}
+              aspectRatio={aspectRatio}
+            />
+          </div>
+        ) : socialHandles.length > 0 ? (
+          <div
+            style={{
+              display: "flex",
+              gap: 28,
+              justifyContent: "center",
+              flexWrap: "wrap",
+              opacity: socialsReveal,
+            }}
+          >
+            {socialHandles.map((handle, i) => (
+              <span
+                key={i}
+                style={{
+                  fontFamily: fontFamily ?? SAKURA_BODY_FONT,
+                  fontSize: handlePx,
+                  color: hexToRgba(ink, 0.5),
+                  letterSpacing: "0.2em",
+                }}
+              >
+                {handle}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </SakuraScene>
+  );
+};

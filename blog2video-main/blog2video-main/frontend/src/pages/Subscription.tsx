@@ -1,0 +1,1106 @@
+import { useState, useEffect, useRef } from "react";
+import ReactDOM from "react-dom";
+import { useNavigate } from "react-router-dom";
+import {
+  getBillingStatus,
+  getSubscriptionDetail,
+  getInvoices,
+  getDataSummary,
+  createCheckoutSession,
+  createPerVideoCheckout,
+  createBulkCreditsCheckout,
+  createPortalSession,
+  cancelSubscription,
+  acceptRetentionOffer,
+  resumeSubscription,
+  cancelScheduledPlanChange,
+  deleteAccount,
+  BillingStatus,
+  SubscriptionDetail,
+  Invoice,
+  DataSummary,
+} from "../api/client";
+import { AUTH_PROVIDER_LABELS } from "../api/types";
+import type { BillingCycle, PlanKey } from "../api/billing";
+import { useAuth } from "../hooks/useAuth";
+import { useErrorModal, getErrorMessage } from "../contexts/ErrorModalContext";
+import ConfirmDeleteModal from "../components/ConfirmDeleteModal";
+import PerVideoSliderCard from "../components/PerVideoSliderCard";
+import LimitedSeatsBar from "../components/LimitedSeatsBar";
+import PlanSwitchConfirmModal from "../components/PlanSwitchConfirmModal";
+import PlanCardCTA from "../components/PlanCardCTA";
+import BillingCycleTabs from "../components/BillingCycleTabs";
+import CustomPlanSalesFooter from "../components/CustomPlanSalesFooter";
+import { isPaidSlug, type CurrentSlug } from "../lib/planSwitch";
+import { isPaidPlan } from "../lib/plan";
+import {
+  LITE_MONTHLY_PRICE,
+  LITE_ANNUAL_MONTHLY_PRICE,
+  LITE_ANNUAL_TOTAL_PRICE,
+  FREE_CUSTOM_TEMPLATE_COUNT,
+  LITE_CUSTOM_TEMPLATE_COUNT,
+  STANDARD_CUSTOM_TEMPLATE_COUNT,
+  PRO_CUSTOM_TEMPLATE_COUNT,
+  LITE_AI_EDIT_ALLOWANCE,
+  STANDARD_AI_EDIT_ALLOWANCE,
+  PRO_AI_EDIT_ALLOWANCE,
+} from "../content/pricingContent";
+
+export default function Subscription() {
+  const { user, refreshUser, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [subscription, setSubscription] = useState<SubscriptionDetail | null>(null);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [dataSummary, setDataSummary] = useState<DataSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [showRetentionOfferInCancel, setShowRetentionOfferInCancel] = useState(false);
+  const [retentionFeedback, setRetentionFeedback] = useState<{
+    kind: "success" | "warning";
+    message: string;
+  } | null>(null);
+  const [retentionErrorMessage, setRetentionErrorMessage] = useState<string | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [billingCycle, setBillingCycle] = useState<BillingCycle>("monthly");
+  // Default the monthly/annual toggle to the user's current plan cycle, but only
+  // once — after that the user's manual toggling wins.
+  const cycleInitRef = useRef(false);
+  const [pendingSwitch, setPendingSwitch] = useState<{
+    plan: PlanKey;
+    billing_cycle: BillingCycle;
+  } | null>(null);
+  const { showError } = useErrorModal();
+
+  useEffect(() => {
+    loadAll();
+  }, []);
+
+  const loadAll = async () => {
+    setLoading(true);
+    try {
+      const [billingRes, subRes, invoicesRes, dataRes] = await Promise.all([
+        getBillingStatus(),
+        getSubscriptionDetail(),
+        getInvoices(),
+        getDataSummary(),
+      ]);
+      setBilling(billingRes.data);
+      setSubscription(subRes.data);
+      setInvoices(invoicesRes.data);
+      setDataSummary(dataRes.data);
+      if (!cycleInitRef.current && subRes.data?.plan_slug) {
+        cycleInitRef.current = true;
+        setBillingCycle(
+          subRes.data.plan_slug.endsWith("annual") ? "annual" : "monthly"
+        );
+      }
+    } catch (err) {
+      console.error("Failed to load billing data:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUpgrade = async (cycle?: "monthly" | "annual") => {
+    setActionLoading("upgrade");
+    try {
+      const res = await createCheckoutSession({ plan: "pro", billing_cycle: cycle || billingCycle });
+      window.location.href = res.data.checkout_url;
+    } catch (err) {
+      console.error("Failed to start checkout:", err);
+      setActionLoading(null);
+    }
+  };
+
+  const handleStandardUpgrade = async () => {
+    setActionLoading("standard");
+    try {
+      const res = await createCheckoutSession({ plan: "standard", billing_cycle: billingCycle });
+      window.location.href = res.data.checkout_url;
+    } catch (err) {
+      console.error("Failed to start Standard checkout:", err);
+      setActionLoading(null);
+    }
+  };
+
+  const handleLiteUpgrade = async () => {
+    setActionLoading("lite");
+    try {
+      const res = await createCheckoutSession({ plan: "lite", billing_cycle: billingCycle === "lifetime" ? "monthly" : billingCycle });
+      window.location.href = res.data.checkout_url;
+    } catch (err) {
+      console.error("Failed to start Lite checkout:", err);
+      setActionLoading(null);
+    }
+  };
+
+  // One-time lifetime purchase (Standard $999.99 / Pro $1599.99). Goes straight to a
+  // mode=payment Stripe Checkout — bypasses the upgrade/downgrade switch flow.
+  const handleLifetimeBuy = async (plan: PlanKey) => {
+    setActionLoading(`lifetime-${plan}`);
+    try {
+      const res = await createCheckoutSession({ plan, billing_cycle: "lifetime" });
+      window.location.href = res.data.checkout_url;
+    } catch (err) {
+      console.error("Failed to start lifetime checkout:", err);
+      setActionLoading(null);
+    }
+  };
+
+  const handleManageBilling = async () => {
+    setActionLoading("portal");
+    try {
+      const res = await createPortalSession();
+      window.location.href = res.data.portal_url;
+    } catch (err) {
+      console.error("Failed to open portal:", err);
+      setActionLoading(null);
+    }
+  };
+
+  const openCancelConfirmModal = async () => {
+    setRetentionFeedback(null);
+    setRetentionErrorMessage(null);
+    const shouldShowRetention = !!subscription?.retention_offer_eligible;
+    setShowRetentionOfferInCancel(shouldShowRetention);
+    setShowCancelConfirm(true);
+  };
+
+  const closeCancelConfirmModal = () => {
+    setShowCancelConfirm(false);
+    setShowRetentionOfferInCancel(false);
+    setRetentionFeedback(null);
+    setRetentionErrorMessage(null);
+  };
+
+  const handleCancel = async (declinedRetentionOffer = false) => {
+    setActionLoading("cancel");
+    try {
+      await cancelSubscription(
+        declinedRetentionOffer ? { declined_retention_offer: true } : undefined
+      );
+      await refreshUser();
+      await loadAll();
+      closeCancelConfirmModal();
+    } catch (err) {
+      console.error("Failed to cancel:", err);
+      setRetentionErrorMessage(
+        getErrorMessage(err, "We couldn't cancel your subscription. Please try again.")
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleAcceptRetentionOffer = async () => {
+    setActionLoading("retention-accept");
+    setRetentionErrorMessage(null);
+    try {
+      const res = await acceptRetentionOffer();
+      await refreshUser();
+      await loadAll();
+      const msg =
+        res.data.message?.trim() ||
+        (res.data.status === "already_applied"
+          ? "This discount is already applied to your subscription."
+          : "Thank you for staying. You have been given 30% off on your next voucher.");
+      const kind = res.data.status === "already_applied" ? "warning" : "success";
+      setRetentionFeedback({ kind, message: msg });
+      window.setTimeout(() => {
+        closeCancelConfirmModal();
+      }, kind === "warning" ? 3200 : 2500);
+    } catch (err) {
+      console.error("Failed to apply retention offer:", err);
+      setRetentionErrorMessage(
+        getErrorMessage(err, "We couldn't apply the discount. Please try again.")
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleResume = async () => {
+    setActionLoading("resume");
+    try {
+      await resumeSubscription();
+      await refreshUser();
+      await loadAll();
+    } catch (err) {
+      console.error("Failed to resume:", err);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleCancelScheduledChange = async () => {
+    setActionLoading("cancel-scheduled");
+    try {
+      await cancelScheduledPlanChange();
+      await refreshUser();
+      await loadAll();
+    } catch (err) {
+      console.error("Failed to cancel scheduled change:", err);
+      showError(
+        getErrorMessage(err, "We couldn't cancel the scheduled change. Please try again.")
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handlePlanSwitchSuccess = async () => {
+    await refreshUser();
+    await loadAll();
+  };
+
+  const openSwitchModal = (plan: PlanKey, cycle: BillingCycle) => {
+    setPendingSwitch({ plan, billing_cycle: cycle });
+  };
+
+  const handleDeleteAccount = async () => {
+    try {
+      await deleteAccount();
+      await logout();
+      navigate("/");
+    } catch (err) {
+      showError(getErrorMessage(err, "Failed to delete account."));
+      throw err;
+    }
+  };
+
+  const formatDate = (iso: string) =>
+    new Date(iso).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+
+  const formatCurrency = (cents: number, currency = "usd") =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: currency.toUpperCase(),
+    }).format(cents / 100);
+
+  const isPaid = isPaidPlan(user?.plan);
+  const isStandard = user?.plan === "standard";
+  const isLite = user?.plan === "lite";
+
+  // Slug of the user's currently active paid plan. Falls back to user.plan tier
+  // (assuming monthly) if there is no Subscription record yet — covers the
+  // transient state between webhook arrival and DB sync, or hand-edited dev data.
+  const currentSlug: CurrentSlug = (() => {
+    if (subscription?.plan_slug && isPaidSlug(subscription.plan_slug)) {
+      return subscription.plan_slug;
+    }
+    if (user?.plan === "pro") return "pro_monthly";
+    if (user?.plan === "standard") return "standard_monthly";
+    if (user?.plan === "lite") return "lite_monthly";
+    return "free";
+  })();
+
+  const scheduledPending = Boolean(subscription?.scheduled_plan_slug);
+  const paymentBlocked =
+    subscription?.status === "past_due" ||
+    subscription?.status === "requires_action";
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <div className="w-8 h-8 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-6xl mx-auto space-y-8 pb-12">
+      {/* Header */}
+      <div>
+        <button
+          onClick={() => navigate("/dashboard")}
+          className="text-xs text-gray-400 hover:text-gray-900 transition-colors mb-4 flex items-center gap-1"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
+          Back to Dashboard
+        </button>
+        <h1 className="text-2xl font-semibold text-gray-900">Subscription & Billing</h1>
+        <p className="text-sm text-gray-400 mt-1">
+          Manage your plan, view invoices, and check your data usage.
+        </p>
+      </div>
+
+      {/* Current plan */}
+      <section className="glass-card p-6">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-2">
+              Current Plan
+            </h2>
+            <div className="flex items-center gap-3">
+              <span className="text-2xl font-bold text-gray-900 capitalize">
+                {billing?.plan || "Free"}
+              </span>
+              {isPaid && (
+                <span className="px-2.5 py-0.5 bg-purple-100 text-purple-600 text-xs font-medium rounded-full">
+                  Active
+                </span>
+              )}
+              {subscription?.status === "past_due" && (
+                <span className="px-2.5 py-0.5 bg-red-100 text-red-600 text-xs font-medium rounded-full">
+                  Payment Failed
+                </span>
+              )}
+              {subscription?.status === "requires_action" && (
+                <span className="px-2.5 py-0.5 bg-amber-100 text-amber-600 text-xs font-medium rounded-full">
+                  Action Required
+                </span>
+              )}
+            </div>
+            {subscription?.current_period_end && (
+              <p className="text-xs text-gray-400 mt-2">
+                {subscription.canceled_at
+                  ? `Cancels on ${formatDate(subscription.current_period_end)}`
+                  : `Renews on ${formatDate(subscription.current_period_end)}`}
+              </p>
+            )}
+          </div>
+          <div className="flex gap-2">
+            {isPaid ? (
+              <>
+                <button
+                  onClick={handleManageBilling}
+                  disabled={actionLoading === "portal"}
+                  className="px-4 py-2 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-60"
+                >
+                  {actionLoading === "portal" ? "Opening..." : "Billing Portal"}
+                </button>
+                {subscription?.canceled_at ? (
+                  <button
+                    onClick={handleResume}
+                    disabled={actionLoading === "resume"}
+                    className="px-4 py-2 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg transition-colors disabled:opacity-60"
+                  >
+                    {actionLoading === "resume" ? "Resuming..." : "Resume Subscription"}
+                  </button>
+                ) : (
+                  <button
+                    onClick={openCancelConfirmModal}
+                    className="px-4 py-2 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
+                  >
+                    Cancel Plan
+                  </button>
+                )}
+              </>
+            ) : (
+              <button
+                onClick={() => handleUpgrade()}
+                disabled={actionLoading === "upgrade"}
+                className="px-5 py-2 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg transition-colors disabled:opacity-60"
+              >
+                {actionLoading === "upgrade" ? "Redirecting..." : "Upgrade to Pro"}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Payment action required banner */}
+        {subscription?.status === "requires_action" && (
+          <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+            <p className="text-sm text-amber-800">
+              Your bank requires additional verification (3D Secure). Please{" "}
+              <button
+                onClick={handleManageBilling}
+                className="font-medium underline hover:no-underline"
+              >
+                complete verification
+              </button>{" "}
+              to keep your subscription active.
+            </p>
+          </div>
+        )}
+
+        {/* Past due banner */}
+        {subscription?.status === "past_due" && (
+          <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+            <p className="text-sm text-red-800">
+              Your last payment failed. Please{" "}
+              <button
+                onClick={handleManageBilling}
+                className="font-medium underline hover:no-underline"
+              >
+                update your payment method
+              </button>{" "}
+              to avoid losing access.
+            </p>
+          </div>
+        )}
+      </section>
+
+      {/* Cancel confirmation dialog */}
+      {showCancelConfirm && ReactDOM.createPortal(
+        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6 relative">
+            <button
+              onClick={closeCancelConfirmModal}
+              className="absolute top-3 right-3 text-gray-400 hover:text-gray-700 transition-colors"
+              aria-label="Close"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            {retentionFeedback ? (
+              retentionFeedback.kind === "success" ? (
+                <div className="py-8 flex flex-col items-center text-center">
+                  <div className="w-14 h-14 rounded-full bg-green-100 flex items-center justify-center mb-4">
+                    <svg className="w-8 h-8 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
+                  <h3 className="text-lg font-semibold text-gray-900 mb-2">Success</h3>
+                  <p className="text-sm text-gray-600 max-w-sm">{retentionFeedback.message}</p>
+                </div>
+              ) : (
+                <div className="py-8 flex flex-col items-center text-center">
+                  <div className="w-14 h-14 rounded-full bg-amber-100 flex items-center justify-center mb-4">
+                    <svg className="w-8 h-8 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                      />
+                    </svg>
+                  </div>
+                  <h3 className="text-lg font-semibold text-gray-900 mb-2">Discount already active</h3>
+                  <p className="text-sm text-gray-600 max-w-sm">{retentionFeedback.message}</p>
+                </div>
+              )
+            ) : (
+              <>
+                {showRetentionOfferInCancel ? (
+                  <>
+                    <h3 className="text-lg font-semibold text-gray-900 mb-2">Cancel subscription?</h3>
+                    <p className="text-sm text-gray-500 mb-1">
+                      Your Pro access will remain active until the end of your current billing period
+                      {subscription?.current_period_end && (
+                        <> ({formatDate(subscription.current_period_end)})</>
+                      )}.
+                    </p>
+                    <p className="text-sm text-gray-500 mb-4">
+                      Before you go, we can offer 30% off on your next billing period if you keep your
+                      subscription active.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <h3 className="text-lg font-semibold text-gray-900 mb-2">Cancel subscription?</h3>
+                    <p className="text-sm text-gray-500 mb-1">
+                      Your Pro access will remain active until the end of your current billing period
+                      {subscription?.current_period_end && (
+                        <> ({formatDate(subscription.current_period_end)})</>
+                      )}.
+                    </p>
+                    <p className="text-sm text-gray-500 mb-4">
+                      After that, you'll be downgraded to the Free plan. You can resubscribe anytime.
+                    </p>
+                  </>
+                )}
+                {retentionErrorMessage && (
+                  <div
+                    className="mb-4 p-3 text-sm text-red-800 bg-red-50 border border-red-200 rounded-lg"
+                    role="alert"
+                  >
+                    {retentionErrorMessage}
+                  </div>
+                )}
+              </>
+            )}
+            {!retentionFeedback && (
+              <div className="flex gap-3 justify-end">
+              {showRetentionOfferInCancel && (
+                <button
+                  onClick={handleAcceptRetentionOffer}
+                  disabled={actionLoading === "retention-accept" || actionLoading === "cancel"}
+                  className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg transition-colors disabled:opacity-60"
+                >
+                  {actionLoading === "retention-accept"
+                    ? "Applying..."
+                    : "Keep Plan With 30% Discount"}
+                </button>
+              )}
+              <button
+                onClick={() => handleCancel(showRetentionOfferInCancel)}
+                disabled={actionLoading === "cancel"}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors disabled:opacity-60"
+              >
+                {actionLoading === "cancel" ? "Cancelling..." : "Yes, Cancel"}
+              </button>
+              </div>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Usage & data */}
+      <div className="grid sm:grid-cols-2 gap-4">
+        {/* Video usage */}
+        <section className="glass-card p-6">
+          <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">
+            Video Usage
+          </h2>
+          <div className="flex items-end gap-2 mb-3">
+            <span className="text-3xl font-bold text-gray-900">
+              {billing?.videos_used ?? 0}
+            </span>
+            <span className="text-sm text-gray-400 pb-1">
+              / {billing?.video_limit ?? 1} videos
+            </span>
+          </div>
+          {/* Progress bar */}
+          <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${Math.min(100, ((billing?.videos_used ?? 0) / (billing?.video_limit ?? 1)) * 100)}%`,
+              backgroundColor:
+                  (billing?.videos_used ?? 0) >= (billing?.video_limit ?? 1)
+                    ? "#ef4444"
+                    : "#7c3aed",
+              }}
+            />
+          </div>
+          <p className="text-xs text-gray-400 mt-2">
+            {billing?.can_create_video
+              ? `${(billing?.video_limit ?? 1) - (billing?.videos_used ?? 0)} videos remaining`
+              : "Video limit reached"}
+          </p>
+        </section>
+
+        {/* Account data */}
+        <section className="glass-card p-6">
+          <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">
+            Your Data
+          </h2>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-500">Total Projects</span>
+              <span className="text-sm font-medium text-gray-900">
+                {dataSummary?.total_projects ?? 0}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-500">Videos Rendered</span>
+              <span className="text-sm font-medium text-gray-900">
+                {dataSummary?.total_videos_rendered ?? 0}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-500">Total Assets</span>
+              <span className="text-sm font-medium text-gray-900">
+                {dataSummary?.total_assets ?? 0}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-500">Member Since</span>
+              <span className="text-sm font-medium text-gray-900">
+                {dataSummary?.account_created
+                  ? formatDate(dataSummary.account_created)
+                  : "--"}
+              </span>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      {/* Scheduled plan change banner */}
+      {scheduledPending && subscription?.scheduled_plan_name && subscription?.scheduled_change_at && (
+        <section className="glass-card p-4 border-l-4 border-amber-400 bg-amber-50/40">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <p className="text-sm text-gray-800">
+                Your plan will change to{" "}
+                <span className="font-medium">{subscription.scheduled_plan_name}</span> on{" "}
+                <span className="font-medium">{formatDate(subscription.scheduled_change_at)}</span>.
+              </p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                You'll keep your current plan's features until then.
+              </p>
+            </div>
+            <button
+              onClick={handleCancelScheduledChange}
+              disabled={actionLoading === "cancel-scheduled"}
+              className="px-3 py-1.5 text-xs font-medium text-amber-700 bg-white border border-amber-200 hover:bg-amber-100 rounded-lg transition-colors disabled:opacity-60"
+            >
+              {actionLoading === "cancel-scheduled" ? "Cancelling..." : "Cancel scheduled change"}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* Available Plans */}
+      <section>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider">
+            {isPaid ? "Your Plan" : "Available Plans"}
+          </h2>
+
+          {/* Monthly / Annual / Lifetime tabs */}
+          <div className="flex items-center gap-2">
+            <BillingCycleTabs active={billingCycle} onChange={setBillingCycle} />
+            {billingCycle === "annual" && (
+              <span className="px-1.5 py-0.5 bg-green-50 text-green-600 text-[10px] font-semibold rounded-full">
+                Save 20%
+              </span>
+            )}
+          </div>
+        </div>
+
+
+        <div
+          className={`grid w-full sm:grid-cols-2 gap-4 ${
+            billingCycle === "lifetime" ? "lg:grid-cols-4" : "lg:grid-cols-5"
+          }`}
+        >
+          {/* Free */}
+          <div className={`glass-card p-5 flex flex-col ${!isPaid && billing?.plan === "free" ? "ring-2 ring-purple-200" : ""}`}>
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-gray-900">Free</h3>
+              <p className="text-xs text-gray-400 mt-0.5">Try it out</p>
+            </div>
+            <div className="mb-4">
+              <span className="text-2xl font-bold text-gray-900">$0</span>
+            </div>
+            <ul className="space-y-2 mb-5 flex-1 text-xs text-gray-500">
+              <li className="flex items-start gap-2"><CheckMark />1 video free</li>
+              <li className="flex items-start gap-2"><CheckMark />AI script generation</li>
+              <li className="flex items-start gap-2"><CheckMark />ElevenLabs voiceover</li>
+              <li className="flex items-start gap-2"><CheckMark />Render & download MP4</li>
+              <li className="flex items-start gap-2"><CheckMark />{FREE_CUSTOM_TEMPLATE_COUNT} custom video template</li>
+              <li className="flex items-start gap-2 text-gray-300"><CrossMark />Monthly AI edit allowance</li>
+              <li className="flex items-start gap-2 text-gray-300"><CrossMark />Premium voiceover + cloning</li>
+            </ul>
+            {!isPaid && billing?.plan === "free" ? (
+              <div className="py-2 text-center text-xs font-medium text-purple-500 bg-purple-50 rounded-lg">
+                Current plan
+              </div>
+            ) : (
+              <div className="py-2 text-center text-xs text-gray-400">--</div>
+            )}
+          </div>
+
+          {/* Per Video — slider normally; fixed 500/$300 deal on the Lifetime tab */}
+          <PerVideoSliderCard
+            variant="compact"
+            loading={actionLoading === "per_video"}
+            disabled={false}
+            bulkDeal={billingCycle === "lifetime"}
+            bulkLoading={actionLoading === "bulk_500"}
+            onBuyBulk={async () => {
+              setActionLoading("bulk_500");
+              try {
+                const res = await createBulkCreditsCheckout();
+                if (res.data.checkout_url) window.location.href = res.data.checkout_url;
+              } catch (err) {
+                console.error("Bulk credits checkout error:", err);
+                setActionLoading(null);
+              }
+            }}
+            onBuy={async (quantity) => {
+              setActionLoading("per_video");
+              try {
+                const res = await createPerVideoCheckout({ quantity });
+                if (res.data.checkout_url) window.location.href = res.data.checkout_url;
+              } catch (err) {
+                console.error("Per-video checkout error:", err);
+                setActionLoading(null);
+              }
+            }}
+          />
+
+          {/* Lite — monthly/annual only, no lifetime option */}
+          {billingCycle !== "lifetime" && (
+            <div className={`glass-card p-5 flex flex-col ${isLite ? "ring-2 ring-purple-200" : ""}`}>
+              <div className="mb-4">
+                <h3 className="text-sm font-semibold text-gray-900">Lite</h3>
+                <p className="text-xs text-gray-400 mt-0.5">10 videos/month</p>
+              </div>
+              <div className="mb-4">
+                {billingCycle === "annual" ? (
+                  <>
+                    <span className="text-2xl font-bold text-gray-900">${LITE_ANNUAL_MONTHLY_PRICE}</span>
+                    <span className="text-xs text-gray-400 ml-1">/month</span>
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <span className="text-xs text-gray-400 line-through">${LITE_MONTHLY_PRICE}/mo</span>
+                      <span className="px-1.5 py-0.5 bg-green-50 text-green-600 text-[10px] font-semibold rounded">
+                        Save 20%
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-0.5">${LITE_ANNUAL_TOTAL_PRICE} billed annually</p>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-2xl font-bold text-gray-900">${LITE_MONTHLY_PRICE}</span>
+                    <span className="text-xs text-gray-400 ml-1">/month</span>
+                    <p className="text-[10px] text-gray-400 mt-1">
+                      or <span className="font-medium text-gray-500">${LITE_ANNUAL_MONTHLY_PRICE}/mo</span> billed annually
+                    </p>
+                  </>
+                )}
+              </div>
+              <ul className="space-y-2 mb-5 flex-1 text-xs text-gray-500">
+                <li className="flex items-start gap-2"><CheckMark />10 videos / month</li>
+                <li className="flex items-start gap-2"><CheckMark />AI script generation</li>
+                <li className="flex items-start gap-2"><CheckMark />ElevenLabs voiceover</li>
+                <li className="flex items-start gap-2"><CheckMark />Render & download MP4</li>
+                <li className="flex items-start gap-2"><CheckMark />{LITE_AI_EDIT_ALLOWANCE} AI edit credits/month</li>
+                <li className="flex items-start gap-2"><CheckMark />{LITE_CUSTOM_TEMPLATE_COUNT} custom video templates</li>
+                <li className="flex items-start gap-2"><CheckMark />Premium voiceover + cloning</li>
+                <li className="flex items-start gap-2"><CheckMark />Priority support</li>
+              </ul>
+              <PlanCardCTA
+                tier="lite"
+                currentSlug={currentSlug}
+                billingCycle={billingCycle}
+                scheduledTargetSlug={subscription?.scheduled_plan_slug}
+                scheduledPending={scheduledPending}
+                paymentBlocked={paymentBlocked}
+                onSubscribe={handleLiteUpgrade}
+                onSwitch={openSwitchModal}
+                subscribeLoading={actionLoading === "lite"}
+              />
+            </div>
+          )}
+
+          {/* Standard */}
+          <div className={`glass-card p-5 flex flex-col ${isStandard ? "ring-2 ring-purple-200" : ""}`}>
+            {billingCycle === "lifetime" && (
+              <LimitedSeatsBar seed="standard-lifetime" seatsLeft={6} />
+            )}
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-gray-900">Standard</h3>
+              <p className="text-xs text-gray-400 mt-0.5">30 videos/month</p>
+            </div>
+            <div className="mb-4">
+              {billingCycle === "lifetime" ? (
+                <>
+                  <span className="text-2xl font-bold text-gray-900">$999.99</span>
+                  <span className="text-xs text-gray-400 ml-1">one-time</span>
+                  <p className="text-[10px] text-gray-400 mt-1">Pay once, yours forever</p>
+                </>
+              ) : billingCycle === "annual" ? (
+                <>
+                  <span className="text-2xl font-bold text-gray-900">$27.99</span>
+                  <span className="text-xs text-gray-400 ml-1">/month</span>
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <span className="text-xs text-gray-400 line-through">$34.99/mo</span>
+                    <span className="px-1.5 py-0.5 bg-green-50 text-green-600 text-[10px] font-semibold rounded">
+                      Save 20%
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-0.5">$335.88 billed annually</p>
+                </>
+              ) : (
+                <>
+                  <span className="text-2xl font-bold text-gray-900">$34.99</span>
+                  <span className="text-xs text-gray-400 ml-1">/month</span>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    or <span className="font-medium text-gray-500">$27.99/mo</span> billed annually
+                  </p>
+                </>
+              )}
+            </div>
+            <ul className="space-y-2 mb-5 flex-1 text-xs text-gray-500">
+              <li className="flex items-start gap-2"><CheckMark />30 videos / month</li>
+              <li className="flex items-start gap-2"><CheckMark />AI script generation</li>
+              <li className="flex items-start gap-2"><CheckMark />ElevenLabs voiceover</li>
+              <li className="flex items-start gap-2"><CheckMark />Render & download MP4</li>
+              <li className="flex items-start gap-2"><CheckMark />{STANDARD_AI_EDIT_ALLOWANCE} AI edit credits/month</li>
+              <li className="flex items-start gap-2"><CheckMark />{STANDARD_CUSTOM_TEMPLATE_COUNT} custom video templates</li>
+              <li className="flex items-start gap-2"><CheckMark />Premium voiceover + cloning</li>
+              <li className="flex items-start gap-2"><CheckMark />Priority support</li>
+            </ul>
+            {billingCycle === "lifetime" ? (
+              <button
+                onClick={() => handleLifetimeBuy("standard")}
+                disabled={actionLoading === "lifetime-standard"}
+                className="w-full py-2 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg transition-colors disabled:opacity-60"
+              >
+                {actionLoading === "lifetime-standard" ? "Redirecting..." : "Buy lifetime"}
+              </button>
+            ) : (
+              <PlanCardCTA
+                tier="standard"
+                currentSlug={currentSlug}
+                billingCycle={billingCycle}
+                scheduledTargetSlug={subscription?.scheduled_plan_slug}
+                scheduledPending={scheduledPending}
+                paymentBlocked={paymentBlocked}
+                onSubscribe={handleStandardUpgrade}
+                onSwitch={openSwitchModal}
+                subscribeLoading={actionLoading === "standard"}
+              />
+            )}
+          </div>
+
+          {/* Pro */}
+          <div className={`glass-card p-5 flex flex-col relative ${user?.plan === "pro" ? "ring-2 ring-purple-200" : "ring-2 ring-purple-100"}`}>
+            {!isPaid && (
+              <div className="absolute -top-2.5 left-1/2 -translate-x-1/2">
+                <span className="px-3 py-0.5 bg-purple-600 text-white text-[10px] font-semibold rounded-full">
+                  Best value
+                </span>
+              </div>
+            )}
+            {billingCycle === "lifetime" && (
+              <LimitedSeatsBar seed="pro-lifetime" seatsLeft={8} />
+            )}
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-gray-900">Pro</h3>
+              <p className="text-xs text-gray-400 mt-0.5">For serious creators</p>
+            </div>
+            <div className="mb-4">
+              {billingCycle === "lifetime" ? (
+                <>
+                  <span className="text-2xl font-bold text-gray-900">$1,599.99</span>
+                  <span className="text-xs text-gray-400 ml-1">one-time</span>
+                  <p className="text-[10px] text-gray-400 mt-1">Pay once, yours forever</p>
+                </>
+              ) : billingCycle === "annual" ? (
+                <>
+                  <span className="text-2xl font-bold text-gray-900">$47.99</span>
+                  <span className="text-xs text-gray-400 ml-1">/month</span>
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <span className="text-xs text-gray-400 line-through">$59.99/mo</span>
+                    <span className="px-1.5 py-0.5 bg-green-50 text-green-600 text-[10px] font-semibold rounded">
+                      Save 20%
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-0.5">$575.88 billed annually</p>
+                </>
+              ) : (
+                <>
+                  <span className="text-2xl font-bold text-gray-900">$59.99</span>
+                  <span className="text-xs text-gray-400 ml-1">/month</span>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    or <span className="font-medium text-gray-500">$47.99/mo</span> billed annually
+                  </p>
+                </>
+              )}
+            </div>
+            <ul className="space-y-2 mb-5 flex-1 text-xs text-gray-500">
+              <li className="flex items-start gap-2"><CheckMark />100 videos / month</li>
+              <li className="flex items-start gap-2"><CheckMark />AI script generation</li>
+              <li className="flex items-start gap-2"><CheckMark />ElevenLabs voiceover</li>
+              <li className="flex items-start gap-2"><CheckMark />Render & download MP4</li>
+              <li className="flex items-start gap-2"><CheckMark />{PRO_AI_EDIT_ALLOWANCE} AI edit credits/month</li>
+              <li className="flex items-start gap-2"><CheckMark />{PRO_CUSTOM_TEMPLATE_COUNT} custom video templates</li>
+              <li className="flex items-start gap-2"><CheckMark />Premium voiceover + cloning</li>
+              <li className="flex items-start gap-2"><CheckMark />Priority support</li>
+            </ul>
+            {billingCycle === "lifetime" ? (
+              <button
+                onClick={() => handleLifetimeBuy("pro")}
+                disabled={actionLoading === "lifetime-pro"}
+                className="w-full py-2 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg transition-colors disabled:opacity-60"
+              >
+                {actionLoading === "lifetime-pro" ? "Redirecting..." : "Buy lifetime"}
+              </button>
+            ) : (
+              <PlanCardCTA
+                tier="pro"
+                currentSlug={currentSlug}
+                billingCycle={billingCycle}
+                scheduledTargetSlug={subscription?.scheduled_plan_slug}
+                scheduledPending={scheduledPending}
+                paymentBlocked={paymentBlocked}
+                onSubscribe={() => handleUpgrade()}
+                onSwitch={openSwitchModal}
+                subscribeLoading={actionLoading === "upgrade"}
+              />
+            )}
+          </div>
+        </div>
+
+        <CustomPlanSalesFooter className="mt-6" />
+
+        {/* Cost comparison */}
+        {billingCycle === "lifetime" ? (
+          <p className="text-center text-[11px] text-gray-400 mt-3">
+            One-time payment, no recurring fees — keep your monthly video allotment forever.
+          </p>
+        ) : (
+          <p className="text-center text-[11px] text-gray-400 mt-3">
+            Pro works out to just <span className="font-medium text-gray-500">{billingCycle === "annual" ? "$0.48" : "$0.60"}</span> per video — 10x cheaper than pay-per-video.
+          </p>
+        )}
+      </section>
+
+      {/* Invoices */}
+      <section className="glass-card p-6">
+        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">
+          Invoice History
+        </h2>
+        {invoices.length === 0 ? (
+          <p className="text-sm text-gray-400">No invoices yet.</p>
+        ) : (
+          <div className="divide-y divide-gray-100">
+            {invoices.map((inv) => (
+              <div
+                key={inv.id}
+                className="flex items-center justify-between py-3 first:pt-0 last:pb-0"
+              >
+                <div className="flex items-center gap-4">
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">
+                      {inv.number || inv.id.slice(0, 20)}
+                    </p>
+                    <p className="text-xs text-gray-400">
+                      {formatDate(inv.created)}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <InvoiceStatusBadge status={inv.status} />
+                  <span className="text-sm font-medium text-gray-900 min-w-[60px] text-right">
+                    {formatCurrency(inv.amount_paid || inv.amount_due, inv.currency)}
+                  </span>
+                  <div className="flex gap-1">
+                    {inv.hosted_invoice_url && (
+                      <a
+                        href={inv.hosted_invoice_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-1.5 text-gray-400 hover:text-purple-600 transition-colors"
+                        title="View invoice"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                        </svg>
+                      </a>
+                    )}
+                    {inv.invoice_pdf && (
+                      <a
+                        href={inv.invoice_pdf}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-1.5 text-gray-400 hover:text-purple-600 transition-colors"
+                        title="Download PDF"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Danger zone */}
+      <section className="glass-card p-6">
+        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">
+          Account
+        </h2>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-900">
+                {user?.name}
+              </p>
+              <p className="text-xs text-gray-400">{user?.email}</p>
+              {user?.auth_provider && (
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Signed in with {AUTH_PROVIDER_LABELS[user.auth_provider] ?? "Google"}
+                </p>
+              )}
+            </div>
+            <span className="px-2.5 py-0.5 bg-green-50 text-green-600 text-xs font-medium rounded-full">
+              Active
+            </span>
+          </div>
+          <div className="pt-3 border-t border-gray-100 flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-500">
+                Data retention: {isPaid ? "30 days" : "24 hours"} after last activity
+              </p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                {isPaid
+                  ? "Your files are kept for 30 days. Upgrade extends retention automatically."
+                  : "Free tier data is cleaned up after 24 hours. Upgrade to Pro for 30-day retention."}
+              </p>
+            </div>
+          </div>
+          <div className="pt-4 mt-4 border-t border-red-100">
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              className="text-sm font-medium text-red-600 hover:text-red-700"
+            >
+              Delete my account
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <ConfirmDeleteModal
+        open={showDeleteConfirm}
+        onClose={() => setShowDeleteConfirm(false)}
+        title="Delete your account?"
+        warningMessage="Deleting your account will permanently remove all your data and cancel any active subscription. This action cannot be undone."
+        confirmLabel="Delete"
+        onConfirm={handleDeleteAccount}
+      />
+
+      <PlanSwitchConfirmModal
+        open={Boolean(pendingSwitch)}
+        plan={pendingSwitch?.plan ?? "standard"}
+        billingCycle={pendingSwitch?.billing_cycle ?? "monthly"}
+        onClose={() => setPendingSwitch(null)}
+        onSuccess={handlePlanSwitchSuccess}
+      />
+    </div>
+  );
+}
+
+function CheckMark() {
+  return (
+    <svg className="w-3.5 h-3.5 text-purple-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+    </svg>
+  );
+}
+
+function CrossMark() {
+  return (
+    <svg className="w-3.5 h-3.5 text-gray-300 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+    </svg>
+  );
+}
+
+function InvoiceStatusBadge({ status }: { status: string | null }) {
+  const styles: Record<string, string> = {
+    paid: "bg-green-50 text-green-600",
+    open: "bg-amber-50 text-amber-600",
+    draft: "bg-gray-50 text-gray-500",
+    uncollectible: "bg-red-50 text-red-600",
+    void: "bg-gray-50 text-gray-400",
+  };
+
+  const label = status || "unknown";
+  const cls = styles[label] || "bg-gray-50 text-gray-500";
+
+  return (
+    <span className={`px-2 py-0.5 text-xs font-medium rounded-full capitalize ${cls}`}>
+      {label}
+    </span>
+  );
+}

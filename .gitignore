@@ -1,0 +1,47 @@
+# Archives
+*.zip
+*.tar.gz
+*.rar
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+venv/
+.venv/
+env/
+.env
+*.db
+*.sqlite3
+
+# Node & Frontend
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Media & Temp
+backend/media/
+backend/tmp/
+media/
+tmp/
+emotion_test_clips/
+
+# Remotion Output
+remotion-video/out/
+remotion-video/src/components/generated/
+crafted-templates/
+
+# Font binaries & assets
+remotion-video/public/templates
+frontend/public/templates
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local agent caches
+.claude/

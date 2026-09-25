@@ -1,0 +1,10216 @@
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, Fragment, MouseEvent as ReactMouseEvent, TouchEvent as ReactTouchEvent } from "react";
+import ReactDOM from "react-dom";
+import { LinkIcon } from "@heroicons/react/24/outline";
+import { useParams, useSearchParams, useNavigate } from "react-router-dom";
+import {
+  getProject,
+  listProjects,
+  startGeneration,
+  getPipelineStatus,
+  renderVideo,
+  cancelRender,
+  getRenderStatus,
+  downloadVideo,
+  fetchVideoBlob,
+  downloadStudioZip,
+  launchStudio,
+  deleteAsset,
+  uploadProjectDocuments,
+  reorderScenes,
+  updateScene,
+  updateSceneImage,
+  updateSceneVoiceover,
+  assignExistingImageToScene,
+  updateSceneImageFocus,
+  uploadStockFootage,
+  type StockClip,
+  deleteScene,
+  getValidLayouts,
+  type LayoutInfo,
+  updateProjectLogo,
+  uploadLogo,
+  deleteLogo,
+  Project,
+  Scene,
+  BACKEND_URL,
+  bulkUpdateSceneTypography,
+  submitProjectReview,
+  updateProject,
+  getMe,
+  getTemplates,
+  listCustomTemplates,
+  listProjectCustomTemplates,
+  listProjectCraftedTemplates,
+  getProjectCraftedTemplateDetail,
+  changeProjectTemplateRegenerateLayouts,
+  getProjectTemplateChangeStatus,
+  regenerateScript,
+  getRegenerateScriptStatus,
+  getRegenerateScriptPreview,
+  verifyRegenerateScript,
+  rejectRegenerateScript,
+  type ProjectRegenerateScriptJob,
+  type RegenerateScriptPreviewScene,
+  generateEmbedToken,
+  type TemplateMeta,
+  type CraftedTemplateItem,
+  type CraftedTemplateDetail,
+  type CustomTemplateItem,
+  getBgmTracks,
+  type BgmTrack,
+  AVATAR_PRESETS,
+  getAddSceneStatus,
+  type AddSceneJob,
+  approveInitialScriptReview,
+  type InitialScriptReviewScene,
+} from "../api/client";
+import { AVATAR_CUSTOM_PRESET_ID } from "../api/types";
+import Joyride, { CallBackProps, STATUS, Step } from "react-joyride";
+import { useAuth } from "../hooks/useAuth";
+import { isPaidPlan } from "../lib/plan";
+import { formatAiEditCreditsDisplay } from "../lib/formatAiEditCredits";
+import { CollabProvider } from "../components/CollabContext";
+import CollabToolbar from "../components/CollabToolbar";
+import EditHistoryPanel from "../components/EditHistoryPanel";
+import ShareProjectModal from "../components/ShareProjectModal";
+import PublishToSocialModal from "../components/PublishToSocialModal";
+import PublishStatusBanner from "../components/PublishStatusBanner";
+import PlatformIcon from "../components/PlatformIcon";
+import {
+  getIntegrationsConfig,
+  getPublishStatus,
+  isPublishJobActive,
+  platformLabel,
+  retryPublishJob,
+  type IntegrationsConfig,
+  type PublishJob,
+  type SocialPlatform,
+} from "../api/integrations";
+import type { CollabEdit } from "../hooks/useCollabSocket";
+import { useCraftedTemplates } from "../contexts/CraftedTemplatesContext";
+import { useErrorModal, getErrorMessage, DEFAULT_ERROR_MESSAGE } from "../contexts/ErrorModalContext";
+import { useNoticeModal } from "../contexts/NoticeModalContext";
+import { trackGoogleAdsPurchaseConversion } from "../gtag";
+import StatusBadge from "../components/StatusBadge";
+import ScriptPanel from "../components/ScriptPanel";
+import SceneGroupAccordion, { SCENE_GROUP_SIZE } from "../components/SceneGroupAccordion";
+import { StockFootageModal, STOCK_FOOTAGE_CREDIT_COST } from "../components/StockFootageModal";
+import { StockFootageVerifyModal } from "../components/StockFootageVerifyModal";
+import { StockFootageVerifyModalLegacy } from "../components/StockFootageVerifyModalLegacy";
+import { ImageAdjustStage } from "../components/ImageAdjustStage";
+import { TrimmedClipVideo } from "../utils/trimmedClipPlayback";
+import { isStockClipAdjustSource } from "../utils/stockClipMedia";
+import SceneEditModal, {
+  SceneImageItem,
+  resolveDefaultFontSizesForScene,
+} from "../components/SceneEditModal";
+import GenerateSceneImageModal, { AI_IMAGE_CREDIT_COST } from "../components/GenerateSceneImageModal";
+import AvatarEditModal from "../components/AvatarEditModal";
+import AvatarPresetMedia from "../components/AvatarPresetMedia";
+import RecordVoiceoverModal from "../components/RecordVoiceoverModal";
+import AddSceneModal, { ADD_SCENE_CREDIT_COST } from "../components/AddSceneModal";
+import AddScenePlaceholderRow from "../components/AddScenePlaceholderRow";
+import ChatPanel from "../components/ChatPanel";
+import UpgradeModal from "../components/UpgradeModal";
+import UpgradePlanModal from "../components/UpgradePlanModal";
+import OutOfVideosOfferModal from "../components/OutOfVideosOfferModal";
+import { useOutOfVideosOffer } from "../hooks/useOutOfVideosOffer";
+import ProjectReviewPrompt from "../components/ProjectReviewPrompt";
+import VideoPreview, { type CaptionSettings } from "../components/VideoPreview";
+import ConfirmDeleteModal from "../components/ConfirmDeleteModal";
+import RegenerateScriptModal from "../components/RegenerateScriptModal";
+import VerifyScriptModal from "../components/VerifyScriptModal";
+import InitialScriptReviewModal from "../components/InitialScriptReviewModal";
+import { TEMPLATE_PREVIEWS, TEMPLATE_DESCRIPTIONS, NewTemplateBadge, NewScenesTemplateBadge, PopularTemplateBadge } from "../components/templatePreviewRegistry";
+import ProjectTemplateSettingsCard, { TemplateAssignPreview } from "../components/ProjectTemplateSettingsCard";
+import ProjectVoiceLanguageSettingsCard from "../components/ProjectVoiceLanguageSettingsCard";
+import ProjectAvatarSettingsCard from "../components/ProjectAvatarSettingsCard";
+import { BgmTrackDropdown } from "../components/BgmTrackDropdown";
+import VoiceOperationModal from "../components/VoiceOperationModal";
+import LanguageChangeTracker, {
+  type LanguageChangeProgress,
+} from "../components/LanguageChangeTracker";
+import { getLanguageName } from "../constants/languages";
+import ProjectTabs, { type ProjectTabId, type ProjectTabItem } from "../components/ProjectTabs";
+import SceneListRow from "../components/SceneListRow";
+import SceneCommentModal from "../components/SceneCommentModal";
+import { listComments } from "../api/collaboration";
+import CustomPreviewLandscape from "../components/templatePreviews/CustomPreviewLandscape";
+import CraftedTemplatePreview from "../components/templatePreviews/CraftedTemplatePreview";
+import useIsMobileViewport from "../hooks/useIsMobileViewport";
+import CraftYourTemplateCard from "../components/CraftYourTemplateCard";
+import GetMoreTemplatesModal from "../components/GetMoreTemplatesModal";
+import DesignerTemplateRequestModal from "../components/DesignerTemplateRequestModal";
+import { normalizeVideoStyle } from "../constants/videoStyles";
+import { getPendingUpload } from "../stores/pendingUpload";
+import { FONT_REGISTRY, resolveFontFamily } from "../fonts/registry";
+import { getSceneLayoutLabel } from "../utils/layoutLabels";
+import {
+  baseLayoutId,
+  customSceneLayoutId,
+  customSceneSupportsImage,
+} from "../utils/layoutVariants";
+import { resolveCustomImageBoxAr } from "../utils/customImageBoxAr";
+import { getTemplateConfig } from "../components/remotion/templateConfig";
+import { getImageBoxAspectRatio, normalizeLayoutId, isImageBoxCircular } from "../components/remotion/imageBoxConfig";
+import type { PlayerRef } from "@remotion/player";
+import { exportScenesPptx, exportScenesPdf, exportScenesPng } from "../utils/sceneSlideExport";
+import type { ExportProgress } from "../utils/sceneSlideExport";
+import { getCompositionSchedule } from "../components/remotion/scheduleRegistry";
+import { getSceneExportGlobalFrame, SCENE_EXPORT_TIMELINE_FRACTION } from "../utils/sceneFrameSchedule";
+import { USER_BANDS, bodySizeForHeadline } from "../components/remotion/generated/kit";
+import { sceneFontConfig } from "../utils/sceneFontDefaults";
+
+type Tab = ProjectTabId;
+type SlideExportWizardState = { format: "pptx" | "pdf" | "zip"; fractions: number[]; stepIndex: number };
+type PlaybackSpeedOption = number;
+const PLAYBACK_SPEED_OPTIONS: readonly number[] = [0.5, 1, 1.5, 2, 2.5] as const;
+
+/** Image framing modal: uniform zoom only (no rectangular crop resize). */
+const IMAGE_ADJUST_ZOOM_MIN = 0.1;
+const IMAGE_ADJUST_ZOOM_MAX = 8;
+const TABS_GUIDE_SEEN_KEY = "blog2video_tabs_guide_seen";
+/**
+ * Ceiling on the pipeline poll, in 2s ticks (~10 minutes).
+ *
+ * Generous enough that a slow-but-real generation is never cut off, short
+ * enough that a stuck server-side flag surfaces as an error the user can act
+ * on rather than an editor that polls forever. See pollTicksRef.
+ */
+const MAX_PIPELINE_POLL_TICKS = 300;
+
+// Publish-status polling. The loop always reschedules (see the effect) and just
+// changes pace: fast while an upload is moving, slow otherwise so that starting
+// a publish is noticed without hammering the endpoint when nothing is going on.
+const PUBLISH_POLL_ACTIVE_MS = 3000;
+const PUBLISH_POLL_IDLE_MS = 15000;
+const PUBLISH_POLL_ERROR_MS = 30000;
+
+/** Nothing offered — used when the config call fails. Named so the next
+ *  platform has one place to update rather than an inline literal. */
+const INTEGRATIONS_DISABLED: IntegrationsConfig = {
+  youtube_enabled: false,
+  x_enabled: false,
+  linkedin_enabled: false,
+};
+const TABS_CONTAINER_STEP: Step = {
+  target: '[data-tour="tabs-container"]',
+  content: "Use these tabs to work on your video: Script shows the full narration, Images manages your visuals and logo, Audio lets you preview voiceover for each scene, and Scenes lets you edit each scene’s text and layout.",
+  disableBeacon: true,
+  placement: "bottom",
+};
+const SCENE_EDIT_FIRST_STEP: Step = {
+  target: '[data-tour="scene-edit-first"]',
+  content: "Click Edit to open the scene editor: change the title and on-screen text, pick a layout, assign or replace the image, adjust font sizes, or use AI-assisted editing to regenerate the scene from a description.",
+  disableBeacon: true,
+  placement: "right",
+};
+const SCENE_VISUALS_FIRST_STEP: Step = {
+  target: '[data-tour="scene-visuals-first"]',
+  content:
+    "This is the scene's visual: the assigned image or stock footage clip, plus cards to generate one with AI. You can change a scene's visuals from here or from the scene edit modal.",
+  disableBeacon: true,
+  placement: "right",
+};
+const CAPTIONS_STEP: Step = {
+  target: '[data-tour="captions"]',
+  content: "Turn on captions here: enable subtitles for your video, then fine-tune their font, size, and timing.",
+  disableBeacon: true,
+  placement: "top",
+};
+const PLAYBACK_SPEED_STEP: Step = {
+  target: '[data-tour="playback-speed"]',
+  content: "Adjust the playback speed here — speed up or slow down your video with a preset, or drag the slider for a custom speed.",
+  disableBeacon: true,
+  placement: "top",
+};
+const PROJECT_JOYRIDE_STYLES = {
+  options: { primaryColor: "#7c3aed", width: 280 },
+  tooltip: { fontSize: 13 },
+  tooltipContent: { fontSize: 13, padding: "12px 8px" },
+  buttonNext: { fontSize: 12 },
+  buttonBack: { fontSize: 12 },
+};
+
+function buildProjectTourSteps(project: Project | null): Step[] {
+  const steps: Step[] = [TABS_CONTAINER_STEP];
+  if (project?.scenes?.length) {
+    steps.push(SCENE_EDIT_FIRST_STEP);
+    // The visuals block only renders inside an EXPANDED scene row (the first
+    // scene auto-expands), so this anchor rides on the same condition.
+    steps.push(SCENE_VISUALS_FIRST_STEP);
+  }
+  // Captions require a voiceover to have anything to transcribe; the CC button is
+  // only rendered when the project has narration audio.
+  const hasVoiceover = project?.scenes?.some((s) => s.voiceover_path) ?? false;
+  if (hasVoiceover) steps.push(CAPTIONS_STEP);
+  steps.push(PLAYBACK_SPEED_STEP);
+  return steps;
+}
+
+function resolveCraftedTemplateLogoUrl(template?: CraftedTemplateItem | null): string | null {
+  if (!template) return null;
+  const directLogo = Array.isArray(template.logo_urls)
+    ? template.logo_urls.find((url) => typeof url === "string" && url.trim())
+    : null;
+  if (directLogo) return directLogo;
+
+  const publicAssets = template.public_asset_urls;
+  if (publicAssets && typeof publicAssets === "object") {
+    const preferredEntry = Object.entries(publicAssets).find(([key]) =>
+      /(?:^|\/)(?:laduc-)?(?:brand-)?logo\.(?:png|jpe?g|webp|svg)$/i.test(key),
+    );
+    const fallbackEntry = Object.entries(publicAssets).find(([key]) =>
+      /logo.*\.(?:png|jpe?g|webp|svg)$/i.test(key),
+    );
+
+    const resolved = preferredEntry?.[1] || fallbackEntry?.[1];
+    if (resolved) return resolved;
+  }
+
+  if (template.id === "crafted_laduc_bundle" && typeof template.preview_image_url === "string") {
+    return template.preview_image_url.replace(/\/assets\/preview\.[a-z0-9]+(?:\?.*)?$/i, "/public/templates/laduc/laduc-brand-logo.png");
+  }
+
+  if (template.id === "crafted_fj_market_brief_bundle" && typeof template.preview_image_url === "string") {
+    return template.preview_image_url.replace(/\/assets\/preview\.[a-z0-9]+(?:\?.*)?$/i, "/public/templates/fj_market_brief/fj-brand-logo.png");
+  }
+
+  return null;
+}
+
+/** Display string for ETA from total seconds (smoothed server/client estimate). */
+function formatEtaSecondsRounded(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return "";
+  const s = Math.round(sec);
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    const mm = m % 60;
+    return `~${h}h ${mm}m`;
+  }
+  if (m > 0) return `~${m}m ${rs}s`;
+  return `~${rs}s`;
+}
+
+const PIPELINE_STEPS_URL = [
+  { id: 1, label: "Scraping" },
+  { id: 2, label: "Script" },
+  { id: 3, label: "Scenes" },
+] as const;
+
+const PIPELINE_STEPS_UPLOAD = [
+  { id: 1, label: "Uploading" },
+  { id: 2, label: "Script" },
+  { id: 3, label: "Scenes" },
+] as const;
+
+// Tips shown while generation runs — teach the editing capabilities available
+// once the video is ready (rotated one at a time in <GenerationTips />).
+const GENERATION_TIPS = [
+  { tab: "Edit Scenes", text: "Refine any scene from the Edit Scenes tab — use AI-assisted changes or edit the text and layout manually." },
+  { tab: "Script", text: "Not happy with the narration? Regenerate the whole script from the Script tab with your own instructions." },
+  { tab: "Images", text: "Add or remove images per scene from the Images tab — you can also drop in your own logo." },
+  { tab: "Settings", text: "Switch the template, colors, and fonts anytime from the Settings tab." },
+  { tab: "Edit Scenes", text: "Want motion instead of a still? Add or swap stock footage for any scene from the Edit Scenes tab." },
+  { tab: "Edit Scenes", text: "Edit a scene's narration and regenerate just that voiceover." },
+  { tab: "Edit Scenes", text: "Reorder, duplicate, or delete scenes from the Edit Scenes tab to shape the final flow." },
+] as const;
+
+// Rotating product tips for the generation loading screen. Self-contained so its
+// hooks stay stable (not re-created inside renderGenerationLoader on every render).
+function GenerationTips() {
+  const [idx, setIdx] = useState(0);
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setVisible(false);
+      setTimeout(() => {
+        setIdx((i) => (i + 1) % GENERATION_TIPS.length);
+        setVisible(true);
+      }, 450);
+    }, 4500);
+    return () => clearInterval(timer);
+  }, []);
+  const tip = GENERATION_TIPS[idx];
+  return (
+    <div className="mt-6 pt-5 border-t border-gray-100">
+      <div
+        className="min-h-[3.5rem] flex flex-col items-center justify-center gap-1.5 px-2"
+        style={{ opacity: visible ? 1 : 0, transition: "opacity 0.25s ease" }}
+      >
+        <span className="text-[10px] font-semibold tracking-wide text-purple-500 uppercase">
+          💡 {tip.tab}
+        </span>
+        <p className="text-sm font-medium text-gray-600 leading-relaxed max-w-xs text-center">
+          {tip.text}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── URL Helpers ─────────────────────────────────────────────
+
+/**
+ * Resolve the best URL for an asset: R2 URL if available, else local media path.
+ */
+function resolveAssetUrl(asset: { r2_url: string | null; filename: string; asset_type: string }, projectId: number): string {
+  const mediaBaseUrl =
+    (BACKEND_URL && BACKEND_URL.trim()) ||
+    (typeof window !== "undefined" && window.location.hostname === "localhost"
+      ? "http://localhost:8000"
+      : "");
+
+  if (asset.r2_url) return asset.r2_url;
+
+  const subdir =
+    asset.asset_type === "image"
+      ? "images"
+      : asset.asset_type === "video"
+        ? "videos"
+        : "audio";
+  const localPath = `/media/projects/${projectId}/${subdir}/${asset.filename}`;
+
+  return `${mediaBaseUrl}${localPath}`;
+}
+
+/**
+ * Resolve the video URL: R2 URL if available, else local media path.
+ */
+function resolveVideoUrl(project: Project): string | null {
+  if (project.status !== "done") return null;
+  if (project.r2_video_url) return project.r2_video_url;
+  return `${BACKEND_URL}/media/projects/${project.id}/output/video.mp4`;
+}
+
+/**
+ * Extract audio filename from voiceover_path to handle reordering correctly.
+ * Returns filename like "scene_1.mp3" or null if not found.
+ * Handles Windows paths with mixed separators like "C:\...\projects/6/audio\scene_3.mp3"
+ */
+function extractAudioFilename(voiceoverPath: string | null): string | null {
+  if (!voiceoverPath) return null;
+  
+  // Split by both forward and backward slashes, find the part that matches scene_X.mp3
+  const pathParts = voiceoverPath.split(/[/\\]/);
+  const filename = pathParts.find(part => part.startsWith('scene_') && part.endsWith('.mp3'));
+  
+  return filename || null;
+}
+
+const FIRST_PROJECT_REVIEW_POPUP_DELAY_MS = 2 * 60 * 1000;
+const getFirstProjectReviewPopupDismissedKey = (projectId: number) =>
+  `b2v_first_project_review_popup_dismissed_${projectId}`;
+
+/**
+ * Resolve voiceover URL for a scene. When a scene is regenerated, a new audio Asset is created
+ * (same filename); we pick the latest by id and append ?v=assetId so the browser loads the new
+ * voiceover instead of serving cached old audio.
+ */
+function resolveVoiceoverUrl(
+  projectId: number,
+  audioFilename: string,
+  audioAssets: import("../api/client").Asset[]
+): string | null {
+  const matching = audioAssets.filter((a) => a.filename === audioFilename);
+  const latest = matching.length > 0 ? matching.sort((a, b) => b.id - a.id)[0] : null;
+  if (latest) {
+    const base = resolveAssetUrl(latest, projectId);
+    const sep = base.includes("?") ? "&" : "?";
+    return `${base}${sep}v=${latest.id}`;
+  }
+  const mediaBaseUrl =
+    (BACKEND_URL && BACKEND_URL.trim()) ||
+    (typeof window !== "undefined" && window.location.hostname === "localhost"
+      ? "http://localhost:8000"
+      : "");
+  const localPath = `/media/projects/${projectId}/audio/${audioFilename}`;
+  return `${mediaBaseUrl}${localPath}`;
+}
+
+// ─── Audio Player Row ────────────────────────────────────────
+// Ensures only one background-music preview plays at a time across every
+// AudioRow and the project-level Music card. Calling it stops the previous one.
+let activeBgmPreviewStop: (() => void) | null = null;
+
+function AudioRow({
+  scene,
+  projectId,
+  audioAssets,
+  hasBgm,
+  bgmTrackUrl,
+  projectBgmVolume,
+  onBgmSaved,
+  pendingUrl,
+  onRecord,
+  onDiscard,
+  onSaveRecording,
+  savingRecording,
+}: {
+  scene: Scene;
+  projectId: number;
+  audioAssets: import("../api/client").Asset[];
+  hasBgm: boolean;
+  bgmTrackUrl: string | null;
+  projectBgmVolume: number;
+  onBgmSaved?: () => void;
+  /** Applied-but-unsaved recording URL; overrides the saved voiceover for playback. */
+  pendingUrl?: string | null;
+  onRecord?: () => void;
+  /** Discard the applied-but-unsaved recording for this scene. */
+  onDiscard?: () => void;
+  /** Save just this scene's applied recording. */
+  onSaveRecording?: () => void;
+  /** True while this scene's recording is being saved (disables/spins the Save button). */
+  savingRecording?: boolean;
+}) {
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Per-scene background-music volume. null override → falls back to project default.
+  const savedBgmVol = scene.bgm_volume ?? projectBgmVolume;
+  const [bgmVol, setBgmVol] = useState<number>(savedBgmVol);
+  const [lastNonZeroBgm, setLastNonZeroBgm] = useState<number>(savedBgmVol > 0 ? savedBgmVol : (projectBgmVolume || 0.10));
+  const [savingBgm, setSavingBgm] = useState(false);
+  const [bgmPreviewPlaying, setBgmPreviewPlaying] = useState(false);
+  const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
+  const bgmDirty = Math.round(bgmVol * 100) !== Math.round(savedBgmVol * 100);
+
+  useEffect(() => {
+    setBgmVol(scene.bgm_volume ?? projectBgmVolume);
+  }, [scene.bgm_volume, projectBgmVolume]);
+
+  // Stop music preview on unmount.
+  useEffect(() => {
+    return () => { bgmAudioRef.current?.pause(); };
+  }, []);
+
+  const toggleBgmPreview = () => {
+    if (bgmPreviewPlaying) {
+      bgmAudioRef.current?.pause();
+      setBgmPreviewPlaying(false);
+      activeBgmPreviewStop = null;
+      return;
+    }
+    if (!bgmTrackUrl) return;
+    activeBgmPreviewStop?.(); // stop any other preview (scene or project card)
+    bgmAudioRef.current?.pause();
+    const audio = new Audio(bgmTrackUrl);
+    audio.loop = true;
+    audio.volume = Math.max(0, Math.min(1, bgmVol));
+    audio.play().catch(() => {});
+    bgmAudioRef.current = audio;
+    setBgmPreviewPlaying(true);
+    activeBgmPreviewStop = () => { audio.pause(); setBgmPreviewPlaying(false); };
+  };
+
+  const saveBgmVolume = async () => {
+    setSavingBgm(true);
+    try {
+      await updateScene(projectId, scene.id, { bgm_volume: Math.round(bgmVol * 100) / 100 });
+      onBgmSaved?.();
+    } catch {
+      // keep slider value; surfaced by parent error handling on reload
+    } finally {
+      setSavingBgm(false);
+    }
+  };
+
+  // Extract audio filename; use latest asset by id (regenerated scene = new asset) and cache-bust URL.
+  // A pending (applied, unsaved) recording takes precedence over the saved voiceover.
+  const audioFilename = extractAudioFilename(scene.voiceover_path) || `scene_${scene.order}.mp3`;
+  const savedAudioUrl = scene.voiceover_path
+    ? resolveVoiceoverUrl(projectId, audioFilename, audioAssets)
+    : null;
+  const audioUrl = pendingUrl ?? savedAudioUrl;
+
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+    };
+  }, []);
+
+  const togglePlay = () => {
+    if (!audioRef.current || !audioUrl) return;
+    if (playing) {
+      audioRef.current.pause();
+      setPlaying(false);
+    } else {
+      audioRef.current.play();
+      setPlaying(true);
+    }
+  };
+
+  const handleTimeUpdate = () => {
+    if (!audioRef.current) return;
+    setProgress(audioRef.current.currentTime);
+  };
+
+  const handleLoadedMetadata = () => {
+    if (!audioRef.current) return;
+    setDuration(audioRef.current.duration);
+  };
+
+  const handleEnded = () => {
+    setPlaying(false);
+    setProgress(0);
+  };
+
+  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!audioRef.current || !duration) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const pct = x / rect.width;
+    audioRef.current.currentTime = pct * duration;
+    setProgress(pct * duration);
+  };
+
+  const formatTime = (sec: number) => {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  };
+
+  const pct = duration > 0 ? (progress / duration) * 100 : 0;
+
+  return (
+    <div className="glass-card p-4">
+      <div className="flex flex-wrap items-center gap-4">
+      {/* Scene number */}
+      <div className="w-8 h-8 rounded-lg bg-purple-50 flex items-center justify-center flex-shrink-0">
+        <span className="text-xs font-semibold text-purple-600">
+          {scene.order}
+        </span>
+      </div>
+
+      {/* Play button */}
+      <button
+        onClick={togglePlay}
+        disabled={!audioUrl}
+        className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-gray-900 hover:bg-gray-800 text-white"
+      >
+        {playing ? (
+          <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+            <rect x="6" y="4" width="4" height="16" rx="1" />
+            <rect x="14" y="4" width="4" height="16" rx="1" />
+          </svg>
+        ) : (
+          <svg className="w-3.5 h-3.5 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M8 5v14l11-7z" />
+          </svg>
+        )}
+      </button>
+
+      {/* Info + progress */}
+      <div className="flex-1 min-w-[140px]">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-xs font-medium text-gray-900 truncate">
+            {scene.title}
+          </span>
+          <span className="text-[10px] text-gray-400 ml-2 flex-shrink-0">
+            {duration > 0
+              ? `${formatTime(progress)} / ${formatTime(duration)}`
+              : audioUrl
+              ? "—"
+              : "No audio"}
+          </span>
+        </div>
+
+        {/* Progress bar */}
+        <div
+          className="w-full h-1.5 bg-gray-100 rounded-full cursor-pointer"
+          onClick={handleSeek}
+        >
+          <div
+            className="h-full bg-purple-500 rounded-full transition-all duration-100"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+
+      </div>
+
+      {/* Record your own voice — wraps below the play/progress on small screens */}
+      {onRecord && (
+        <button
+          type="button"
+          onClick={onRecord}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 hover:border-purple-300 transition-colors flex-shrink-0 ml-auto sm:ml-0"
+          title="Record your own voice"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none">
+            <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor" />
+            <path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v3M8.5 21h7" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <span className="text-xs font-medium hidden sm:inline">Record</span>
+        </button>
+      )}
+
+      {/* Save / discard applied recording */}
+      {pendingUrl && (
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {onSaveRecording && (
+            <button
+              type="button"
+              onClick={onSaveRecording}
+              disabled={savingRecording}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold text-white bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 transition-colors"
+              title="Save the recorded voice for this scene"
+            >
+              {savingRecording ? (
+                <>
+                  <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Saving…
+                </>
+              ) : (
+                <>
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                  Save
+                </>
+              )}
+            </button>
+          )}
+          {onDiscard && (
+            <button
+              type="button"
+              onClick={onDiscard}
+              disabled={savingRecording}
+              className="inline-flex items-center gap-1 text-[11px] font-medium text-red-600 hover:text-red-700 hover:underline disabled:opacity-50 transition-colors"
+              title="Discard the recorded voice for this scene"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+              Discard
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Status indicator */}
+      <div className="flex-shrink-0">
+        {pendingUrl ? (
+          <span className="w-2 h-2 rounded-full bg-purple-500 block" title="Recorded voice applied (unsaved)" />
+        ) : audioUrl ? (
+          <span className="w-2 h-2 rounded-full bg-green-400 block" />
+        ) : (
+          <span className="w-2 h-2 rounded-full bg-gray-200 block" />
+        )}
+      </div>
+      </div>
+
+      {/* Background music — per-scene volume. Preview live, Save when changed. */}
+      {hasBgm && bgmTrackUrl && (
+        <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-3">
+          <button
+            type="button"
+            onClick={toggleBgmPreview}
+            className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 transition-colors bg-purple-50 text-purple-600 hover:bg-purple-100"
+            title="Preview background music at this scene's volume"
+          >
+            {bgmPreviewPlaying ? (
+              <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+            ) : (
+              <svg className="w-3 h-3 ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+            )}
+          </button>
+          <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wider flex-shrink-0 w-10">Music</span>
+          <button
+            type="button"
+            onClick={() => {
+              const v = bgmVol === 0 ? (lastNonZeroBgm || projectBgmVolume || 0.10) : 0;
+              if (bgmVol > 0) setLastNonZeroBgm(bgmVol);
+              setBgmVol(v);
+              if (bgmAudioRef.current) bgmAudioRef.current.volume = Math.max(0, Math.min(1, v));
+            }}
+            className={`flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-medium flex-shrink-0 transition-colors ${bgmVol === 0 ? "bg-red-50 text-red-600 hover:bg-red-100" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
+            title={bgmVol === 0 ? "Unmute music for this scene" : "Mute music for this scene"}
+          >
+            {bgmVol === 0 ? (
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /><path strokeLinecap="round" strokeLinejoin="round" d="M17 9l4 4m0-4l-4 4" /></svg>
+            ) : (
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
+            )}
+            {bgmVol === 0 ? "Unmute" : "Mute"}
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={Math.round(bgmVol * 100)}
+            onChange={(e) => {
+              const v = Number(e.target.value) / 100;
+              setBgmVol(v);
+              if (bgmAudioRef.current) bgmAudioRef.current.volume = Math.max(0, Math.min(1, v));
+            }}
+            className="flex-1 accent-purple-600 cursor-pointer"
+          />
+          <span className="text-[10px] tabular-nums text-gray-500 w-9 text-right flex-shrink-0">{Math.round(bgmVol * 100)}%</span>
+          {bgmDirty ? (
+            <button
+              type="button"
+              onClick={saveBgmVolume}
+              disabled={savingBgm}
+              className="px-3 py-1 rounded-lg text-[11px] font-semibold text-white bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 flex-shrink-0"
+            >
+              {savingBgm ? "Saving…" : "Save"}
+            </button>
+          ) : (
+            <span className="inline-block w-[46px] flex-shrink-0" />
+          )}
+        </div>
+      )}
+
+      {/* Hidden audio element — keyed by URL so swapping to a pending recording reloads it */}
+      {audioUrl && (
+        <audio
+          key={audioUrl}
+          ref={audioRef}
+          src={audioUrl}
+          onTimeUpdate={handleTimeUpdate}
+          onLoadedMetadata={handleLoadedMetadata}
+          onEnded={handleEnded}
+          preload="metadata"
+        />
+      )}
+    </div>
+  );
+}
+
+function normalizeProjectAspectRatio(ar: string | undefined | null): "landscape" | "portrait" {
+  return ar === "portrait" ? "portrait" : "landscape";
+}
+
+// ─── Main Component ──────────────────────────────────────────
+
+export default function ProjectView() {
+  const { id } = useParams<{ id: string }>();
+  const projectId = Number(id);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { user, refreshUser } = useAuth();
+  const isPro = isPaidPlan(user?.plan);
+  // On mobile, template-picker previews render static (image/placeholder) instead
+  // of compiling/mounting a Remotion Player, which OOMs/reloads the tab on iOS.
+  const isMobile = useIsMobileViewport();
+  const offer = useOutOfVideosOffer();
+
+  const [project, setProject] = useState<Project | null>(null);
+  const projectRef = useRef<Project | null>(null);
+  useEffect(() => {
+    projectRef.current = project;
+  }, [project]);
+  const hasStudioAccess = isPro || (project?.studio_unlocked ?? false);
+  const [activeTab, setActiveTab] = useState<Tab>("scenes");
+  const tabManuallyChanged = useRef(false);
+  const handleTabChange = useCallback((tab: Tab) => {
+    tabManuallyChanged.current = true;
+    setActiveTab(tab);
+  }, []);
+  const [loading, setLoading] = useState(true);
+  const [hasError, setHasError] = useState(false);
+  const { showError } = useErrorModal();
+  const { showNotice } = useNoticeModal();
+  const [logoSaving, setLogoSaving] = useState(false);
+  const [logoUploading, setLogoUploading] = useState(false);
+  const [logoRemoving, setLogoRemoving] = useState(false);
+  const logoFileInputRef = useRef<HTMLInputElement>(null);
+  const [logoPosition, setLogoPosition] = useState<string>("bottom_right");
+  const [logoSize, setLogoSize] = useState<number>(100);
+  const [logoOpacity, setLogoOpacity] = useState<number>(0.9);
+
+  const [globalTitleSize, setGlobalTitleSize] = useState(60);
+  const [globalDescSize, setGlobalDescSize] = useState(32);
+  const [savingGlobalTypography, setSavingGlobalTypography] = useState(false);
+
+  const [settingsAccentColor, setSettingsAccentColor] = useState("#7C3AED");
+  const [settingsBgColor, setSettingsBgColor] = useState("#FFFFFF");
+  const [settingsTextColor, setSettingsTextColor] = useState("#000000");
+  const [savingColors, setSavingColors] = useState(false);
+  const [settingsFontId, setSettingsFontId] = useState<string | null>(null);
+  const settingsFontPreviewFamily =
+    resolveFontFamily(settingsFontId) ??
+    "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const [savingFontFamily, setSavingFontFamily] = useState(false);
+  const [showFontDropdown, setShowFontDropdown] = useState(false);
+  const [playbackSpeedDraft, setPlaybackSpeedDraft] = useState<number>(1);
+  const [savingPlaybackSpeed, setSavingPlaybackSpeed] = useState(false);
+  // Captions
+  const [captionsEnabledDraft, setCaptionsEnabledDraft] = useState(false);
+  const [captionFontFamilyDraft, setCaptionFontFamilyDraft] = useState<string>("inter");
+  const [captionSettingsKey, setCaptionSettingsKey] = useState(0);
+  const [captionFontSizeDraft, setCaptionFontSizeDraft] = useState<number>(36);
+  const [captionOffsetDraft, setCaptionOffsetDraft] = useState<number>(0);
+  const [savingCaptions, setSavingCaptions] = useState(false);
+  // Background music
+  const [bgmTracks, setBgmTracks] = useState<import("../api/client").BgmTrack[]>([]);
+  const [bgmTrackDraft, setBgmTrackDraft] = useState<string | null>(null);
+  const [bgmVolumeDraft, setBgmVolumeDraft] = useState<number>(0.10);
+  const [lastNonZeroProjectBgm, setLastNonZeroProjectBgm] = useState<number>(0.10);
+  const [savingBgm, setSavingBgm] = useState(false);
+  const [bgmPlayingId, setBgmPlayingId] = useState<string | null>(null);
+  const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
+  const savingPlaybackSpeedRef = useRef(false);
+  const pendingPlaybackSpeedRef = useRef<number | null>(null);
+  const fontDropdownRef = useRef<HTMLDivElement>(null);
+  const [templateMetas, setTemplateMetas] = useState<TemplateMeta[]>([]);
+  const [customTemplatesList, setCustomTemplatesList] = useState<CustomTemplateItem[]>([]);
+  const [customTemplatesLoading, setCustomTemplatesLoading] = useState(true);
+  const [showTemplateChangeModal, setShowTemplateChangeModal] = useState(false);
+  const [showGetMoreTemplates, setShowGetMoreTemplates] = useState(false);
+  const [showDesignerRequest, setShowDesignerRequest] = useState(false);
+  const [templateChangePickerTab, setTemplateChangePickerTab] = useState<"builtin" | "custom" | "crafted">("builtin");
+  const [templateChangeDraft, setTemplateChangeDraft] = useState<string>("default");
+  const [templateRelayoutPendingId, setTemplateRelayoutPendingId] = useState<string | null>(null);
+  const [templateRelayoutJob, setTemplateRelayoutJob] = useState<{
+    id: number;
+    status: string;
+    processed_scenes: number;
+    total_scenes: number;
+    error_message: string | null;
+  } | null>(null);
+  const [submittingTemplateRelayout, setSubmittingTemplateRelayout] = useState(false);
+  const templateRelayoutPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [regenerateScriptJob, setRegenerateScriptJob] = useState<ProjectRegenerateScriptJob | null>(null);
+  const [showRegenerateScriptConfirm, setShowRegenerateScriptConfirm] = useState(false);
+  // The "Regenerate" action at the verify step reuses the same modal, pre-filled with the
+  // job's prior instruction; on confirm it re-runs stage A instead of creating a new job.
+  const [showRegenerateScriptRetry, setShowRegenerateScriptRetry] = useState(false);
+  const [regenerateScriptVerifying, setRegenerateScriptVerifying] = useState(false);
+  const [initialScriptReviewSaving, setInitialScriptReviewSaving] = useState(false);
+  // Previous (pre-regeneration) scenes for the verify popup's before/after comparison.
+  // null = loading; [] = loaded with no previous scenes (treat all as new).
+  const [regenScriptPreviousScenes, setRegenScriptPreviousScenes] =
+    useState<RegenerateScriptPreviewScene[] | null>(null);
+  const regenerateScriptPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const addScenePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // True once the user has clicked "Proceed". The DB write that flips the job from
+  // "awaiting_review" to "running" may not be visible to the very next poll, so we ignore
+  // any stale "awaiting_review" reads while this is set — otherwise the UI bounces back to
+  // the verify step. Reset whenever a fresh stage-A run starts (initiate / regenerate).
+  const regenerateScriptProceededRef = useRef(false);
+  // Guards the one-time preview load while parked on "awaiting_review" so the poll can
+  // keep running (to catch the transition out of review, e.g. when another collaborator
+  // approves) without re-fetching the before/after preview every tick.
+  const regenerateScriptPreviewLoadedRef = useRef(false);
+  const {
+    craftedTemplates: ownCraftedTemplates,
+    loading: ownCraftedTemplatesLoading,
+    ensureCraftedTemplateDetail: ensureOwnCraftedTemplateDetail,
+  } = useCraftedTemplates();
+
+  // On a *shared* project, a collaborator must see the OWNER's custom/crafted
+  // templates and voices — not their own. The context above is user-scoped, so
+  // for a collaborator we source crafted templates from the project-scoped
+  // (owner-resolved) endpoints instead. Owners keep the plain global context.
+  const useOwnerScopedAssets =
+    project != null && user != null && project.user_id !== user.id;
+
+  // Pro-gating for shared-project assets keys off the OWNER's plan, not the acting
+  // collaborator's — the owner pays, so a Free collaborator can use the owner's
+  // custom/crafted templates and paid voices. On own projects this is just `isPro`.
+  const effectiveIsPro = useOwnerScopedAssets ? (project?.owner_is_pro ?? false) : isPro;
+
+  // On a shared project the custom/crafted templates and voices in the settings
+  // pop-ups belong to the OWNER, not the collaborator — attribute them so it's
+  // clear whose assets these are. A possessive form of the owner's name, or a
+  // generic "the owner's" when the name is unavailable. Empty on own projects.
+  const ownerAssetLabel = useOwnerScopedAssets
+    ? (() => {
+        const name = (project?.owner_name || "").trim();
+        if (!name) return "the owner's";
+        return name.endsWith("s") ? `${name}'` : `${name}'s`;
+      })()
+    : "";
+
+  const [ownerCraftedTemplates, setOwnerCraftedTemplates] = useState<CraftedTemplateItem[]>([]);
+  const [ownerCraftedLoading, setOwnerCraftedLoading] = useState(false);
+  // Lazily-fetched full crafted packages for the shared-project (owner-scoped)
+  // path, keyed by template id — mirrors the context's in-memory detail cache.
+  const [ownerCraftedDetails, setOwnerCraftedDetails] = useState<Record<string, CraftedTemplateItem>>({});
+  const ownerCraftedDetailInFlight = useRef<Map<string, Promise<CraftedTemplateItem | null>>>(new Map());
+
+  // Positively-known owner: skip the owner-scoped crafted fetch (owners use the
+  // cached global CraftedTemplatesContext). `project` may still be loading, in
+  // which case `isKnownOwner` is false and we pre-fetch — a collaborator then has
+  // the data ready the moment the project payload arrives, and an owner only pays
+  // one cheap summaries request that the memo below simply ignores. This keeps the
+  // slow (collaborator) path fast without waiting for the project round-trip.
+  const isKnownOwner =
+    project != null && user != null && project.user_id === user.id;
+
+  useEffect(() => {
+    if (!projectId || isKnownOwner) {
+      setOwnerCraftedTemplates([]);
+      setOwnerCraftedDetails({});
+      return;
+    }
+    let cancelled = false;
+    setOwnerCraftedLoading(true);
+    listProjectCraftedTemplates(projectId)
+      .then((r) => {
+        if (!cancelled) setOwnerCraftedTemplates((r.data as CraftedTemplateItem[]) || []);
+      })
+      .catch(() => {
+        if (!cancelled) setOwnerCraftedTemplates([]);
+      })
+      .finally(() => {
+        if (!cancelled) setOwnerCraftedLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, isKnownOwner]);
+
+  const ensureOwnerCraftedTemplateDetail = useCallback(
+    async (templateId: string): Promise<CraftedTemplateItem | null> => {
+      if (!projectId || !templateId?.startsWith("crafted_")) return null;
+      const existing = ownerCraftedDetails[templateId];
+      if (existing?.frontend_files) return existing;
+      const inFlight = ownerCraftedDetailInFlight.current.get(templateId);
+      if (inFlight) return inFlight;
+      const req = getProjectCraftedTemplateDetail(projectId, templateId)
+        .then((res) => {
+          const detail = res.data as CraftedTemplateItem;
+          if (detail?.id) {
+            setOwnerCraftedDetails((prev) => ({ ...prev, [detail.id]: detail }));
+          }
+          if (!detail?.frontend_files || !detail?.frontend_entry_rel) {
+            console.warn(
+              "[ProjectView] Owner-scoped crafted detail arrived without a bundle:",
+              { templateId, id: detail?.id, hasFiles: !!detail?.frontend_files, entry: detail?.frontend_entry_rel },
+            );
+          }
+          return detail ?? null;
+        })
+        .catch((err) => {
+          console.error(
+            "[ProjectView] Owner-scoped crafted detail fetch failed (collaborator preview will stay loading):",
+            { templateId, status: err?.response?.status, detail: err?.response?.data },
+          );
+          return null;
+        })
+        .finally(() => {
+          ownerCraftedDetailInFlight.current.delete(templateId);
+        });
+      ownerCraftedDetailInFlight.current.set(templateId, req);
+      return req;
+    },
+    [projectId, ownerCraftedDetails]
+  );
+
+  // Unified accessors: owner-scoped on a shared project, own-scoped otherwise.
+  const craftedTemplates = useMemo<CraftedTemplateItem[]>(() => {
+    if (!useOwnerScopedAssets) return ownCraftedTemplates;
+    const merged = ownerCraftedTemplates.map((item) => ({ ...item, ...(ownerCraftedDetails[item.id] || {}) }));
+    // A crafted template the project is assigned to may NOT appear in the owner's
+    // entitled list (e.g. entitlement lapsed after the project was created, or the
+    // list hasn't arrived yet). ensureOwnerCraftedTemplateDetail still fetches its
+    // full detail into ownerCraftedDetails; surface those orphaned details here so
+    // the preview can resolve frontend_files instead of spinning forever.
+    const listed = new Set(merged.map((item) => item.id));
+    for (const [id, detail] of Object.entries(ownerCraftedDetails)) {
+      if (!listed.has(id)) merged.push(detail);
+    }
+    return merged;
+  }, [useOwnerScopedAssets, ownCraftedTemplates, ownerCraftedTemplates, ownerCraftedDetails]);
+  const craftedTemplatesLoading = useOwnerScopedAssets ? ownerCraftedLoading : ownCraftedTemplatesLoading;
+  const ensureCraftedTemplateDetail = useOwnerScopedAssets
+    ? ensureOwnerCraftedTemplateDetail
+    : ensureOwnCraftedTemplateDetail;
+
+  useEffect(() => {
+    if (!project?.template?.startsWith("crafted_")) return;
+    const found = craftedTemplates.find((ct) => ct.id === project.template);
+    console.log("[ProjectView] crafted ensure effect", {
+      template: project.template,
+      useOwnerScopedAssets,
+      foundInList: !!found,
+      foundHasFiles: !!found?.frontend_files,
+      willFetch: !found?.frontend_files,
+      craftedTemplateIds: craftedTemplates.map((c) => c.id),
+    });
+    if (!found?.frontend_files) {
+      void ensureCraftedTemplateDetail(project.template);
+    }
+  }, [project?.template, craftedTemplates, ensureCraftedTemplateDetail, useOwnerScopedAssets]);
+
+  const craftedTemplateLogoUrl = useMemo(() => {
+    if (!project?.template?.startsWith("crafted_")) return null;
+    const found = craftedTemplates.find((ct) => ct.id === project.template);
+    return resolveCraftedTemplateLogoUrl(found);
+  }, [project?.template, craftedTemplates]);
+
+  // On a shared project, feed the owner-resolved crafted detail directly to
+  // VideoPreview so it bypasses the (user-scoped, entitlement-gated) context —
+  // which would 403 for a collaborator. Only pass a detail with a compiled
+  // bundle; otherwise leave undefined so VideoPreview keeps its loading state.
+  const ownerScopedCraftedDetail = useMemo<CraftedTemplateDetail | null>(() => {
+    if (!useOwnerScopedAssets || !project?.template?.startsWith("crafted_")) return null;
+    const found = craftedTemplates.find((ct) => ct.id === project.template);
+    if (found?.frontend_files && found?.frontend_entry_rel) {
+      return found as CraftedTemplateDetail;
+    }
+    return null;
+  }, [useOwnerScopedAssets, project?.template, craftedTemplates]);
+
+  // The custom-template list already carries each template's intro/content/outro
+  // code (from _serialize_template), so when the project uses a custom template we
+  // can hand that code straight to VideoPreview as `precompiledTemplateData` and
+  // skip its separate `getTemplateCode`/`getProjectTemplateCode` round-trip — the
+  // preview compiles as soon as the list (loaded in parallel with the project) is
+  // in, instead of waiting on an extra fetch.
+  const currentCustomTemplateCode = useMemo(() => {
+    const m = project?.template?.match(/^custom_(\d+)$/);
+    if (!m) return undefined;
+    const id = parseInt(m[1], 10);
+    const tpl = customTemplatesList.find((ct) => ct.id === id);
+    if (!tpl || !tpl.intro_code) return undefined;
+    return {
+      intro_code: tpl.intro_code,
+      content_codes: tpl.content_codes ?? null,
+      outro_code: tpl.outro_code ?? null,
+      // Must travel with the code. Taking this shortcut SKIPS the fetch that
+      // would otherwise supply it, and the player defaults to 1 — which
+      // overlays the built-in CTA on a v2 outro and discards the ending the
+      // template designed.
+      design_version: tpl.design_version,
+      // Same reasoning, same shortcut, and the same bug a second time: skipping
+      // the fetch left the preview with no per-scene type sizes, so it fell
+      // through to the literal baked into the generated scene code while the
+      // expanded row beside it showed the template's real default. Anything the
+      // preview reads off this object has to be listed here.
+      scene_font_defaults: tpl.scene_font_defaults ?? null,
+      // And a third time: without this the preview could not tell a half-side
+      // image from a full-bleed one, so it blurred and scrimmed media sitting
+      // BESIDE the copy — where the treatment buys nothing and only mutes the
+      // picture.
+      image_modes: tpl.image_modes ?? undefined,
+    };
+  }, [project?.template, customTemplatesList]);
+
+  const displayLogoUrl = project?.logo_r2_url || craftedTemplateLogoUrl;
+
+  useEffect(() => {
+    if (project) {
+      setLogoPosition(project.logo_position || "bottom_right");
+      setLogoSize(typeof project.logo_size === "number" ? project.logo_size : 100);
+      setLogoOpacity(project.logo_opacity ?? 0.9);
+      // ADD THESE:
+      setSettingsAccentColor(project.accent_color || "#7C3AED");
+      setSettingsBgColor(project.bg_color || "#FFFFFF");
+      setSettingsTextColor(project.text_color || "#000000");
+      setSettingsFontId(project.font_family ?? null);
+      const current = Number(project.playback_speed ?? 1);
+      setPlaybackSpeedDraft(Math.min(2.5, Math.max(0.5, Number.isFinite(current) ? current : 1)));
+      setBgmTrackDraft(project.bgm_track_id ?? null);
+      setBgmVolumeDraft(project.bgm_volume ?? 0.10);
+      if ((project.bgm_volume ?? 0) > 0) setLastNonZeroProjectBgm(project.bgm_volume as number);
+      setCaptionsEnabledDraft(project.captions_enabled ?? false);
+      setCaptionFontFamilyDraft(project.caption_font_family ?? "inter");
+      setCaptionFontSizeDraft(project.caption_font_size ? Number(project.caption_font_size) || 36 : 36);
+      setCaptionOffsetDraft(typeof project.caption_offset === "number" ? project.caption_offset : 0);
+      // Seed global typography sliders from the first scene that has stored values.
+      // This avoids the slider defaulting to 60 when e.g. mosaic_metric scenes have 131.
+      if (project.scenes && project.scenes.length > 0) {
+        for (const s of project.scenes) {
+          if (!s.remotion_code) continue;
+          try {
+            const d = JSON.parse(s.remotion_code);
+            const lp = d.layoutProps ?? d.layoutConfig ?? {};
+            // Seeded within the SAME range the sliders offer. A custom
+            // template's band is narrower at the top than the old fixed 20-200,
+            // so seeding outside it would put the thumb somewhere the control
+            // cannot represent.
+            const _tb = (project.template || "").startsWith("custom_")
+              ? USER_BANDS.title[project.aspect_ratio === "portrait" ? "portrait" : "landscape"]
+              : ([20, 200] as const);
+            const _db = (project.template || "").startsWith("custom_")
+              ? USER_BANDS.description[project.aspect_ratio === "portrait" ? "portrait" : "landscape"]
+              : ([12, 80] as const);
+            if (typeof lp.titleFontSize === "number") {
+              setGlobalTitleSize(Math.min(_tb[1], Math.max(_tb[0], lp.titleFontSize)));
+            }
+            if (typeof lp.descriptionFontSize === "number") {
+              setGlobalDescSize(Math.min(_db[1], Math.max(_db[0], lp.descriptionFontSize)));
+            }
+            break;
+          } catch { /* ignore */ }
+        }
+      }
+    }
+  }, [project?.id, project?.logo_position, project?.logo_size, project?.logo_opacity,
+      project?.accent_color, project?.bg_color, project?.text_color, project?.font_family, project?.playback_speed,
+      // Re-seed caption drafts whenever the project refreshes after a voice add/delete
+      // (the backend toggles captions_enabled with voiceover presence). Without these
+      // deps the draft goes stale and the toggle shows the wrong state until a hard refresh.
+      project?.captions_enabled,
+      project?.caption_font_family, project?.caption_font_size, project?.caption_offset,
+      // Re-seed the Music card when a collaborator changes the track or volume, so the
+      // controls don't sit on a stale draft while the preview plays the new track.
+      project?.bgm_track_id, project?.bgm_volume,
+      project?.scenes?.some((s) => !!s.voiceover_path)]);
+
+  useEffect(() => {
+    if (project) {
+      setLogoPosition(project.logo_position || "bottom_right");
+      setLogoSize(typeof project.logo_size === "number" ? project.logo_size : 100);
+      setLogoOpacity(project.logo_opacity ?? 0.9);
+    }
+  }, [project?.id, project?.logo_position, project?.logo_size, project?.logo_opacity]);
+
+  // Fetch BGM tracks once
+  useEffect(() => {
+    getBgmTracks().then((r) => setBgmTracks(r.data)).catch(() => {});
+  }, []);
+
+  // Upload-based project detection
+  const isUploadProject = project?.blog_url?.startsWith("upload://") ?? false;
+  // Stock-footage clip fetching (when enabled) now runs in parallel with scene
+  // generation instead of pausing the pipeline, so there's no inline "Review"
+  // step anymore — the review gate (if any) appears as a modal AFTER
+  // generation finishes (see awaitingStockFootageReview below).
+  const PIPELINE_STEPS = useMemo(
+    () => (isUploadProject ? PIPELINE_STEPS_UPLOAD : PIPELINE_STEPS_URL),
+    [isUploadProject],
+  );
+
+  // Page-level voiceover add/change/delete progress modal (survives tab switches
+  // and page refresh — see VoiceOperationModal). Set to kick it off instantly.
+  const [voiceOpKickstart, setVoiceOpKickstart] = useState<
+    { kind: "voice_change" | "delete"; total: number } | null
+  >(null);
+  // True while a voiceover add/change/delete op is running (reported by VoiceOperationModal).
+  const [voiceOpRunning, setVoiceOpRunning] = useState(false);
+  const [languageOpKickstart, setLanguageOpKickstart] = useState<
+    { kind: "language_change"; total: number } | null
+  >(null);
+  // True while a language change is running (reported by LanguageChangeTracker).
+  const [languageOpRunning, setLanguageOpRunning] = useState(false);
+  const [languageProgress, setLanguageProgress] = useState<LanguageChangeProgress | null>(null);
+
+  // Pipeline state
+  const [pipelineRunning, setPipelineRunning] = useState(false);
+  // Generation finished; parked at the post-generation stock-footage review
+  // gate, waiting on user approve/change/reject. Purely DB-status-driven (see
+  // the polling logic below), so it reappears on every reload.
+  const [awaitingStockFootageReview, setAwaitingStockFootageReview] = useState(false);
+  // Legacy: a project still parked at the OLD pre-scene-gen gate when this
+  // shipped. TODO(cleanup): remove once no rows remain at that status.
+  const [awaitingFootageLegacy, setAwaitingFootageLegacy] = useState(false);
+  const [pipelineStep, setPipelineStep] = useState(0);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /**
+   * Ticks spent in the pipeline poll, so it cannot run forever.
+   *
+   * Two branches of the interval return without stopping — "backend says still
+   * running" and "status is still pre-generation" — each on the assumption that
+   * the state they are waiting on must eventually change. Neither is guaranteed:
+   * `running` comes from an in-memory dict on the server that any restart can
+   * strand at `true`, which left the editor polling three endpoints every 2s
+   * indefinitely on an already-finished project. The backend now refuses to
+   * report a terminal project as running; this is the client-side backstop so no
+   * future staleness can present as a frozen editor again.
+   */
+  const pollTicksRef = useRef(0);
+  const generationStarted = useRef(false);
+  /** One pipeline terminal failure per poll session; also suppresses duplicate "load project" 404 modal after rollback. */
+  const pipelineTerminalFailureHandledRef = useRef(false);
+
+  useEffect(() => {
+    pipelineTerminalFailureHandledRef.current = false;
+  }, [projectId]);
+
+  // Render state
+  const [rendering, setRendering] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "success" | "error">("idle");
+  const [saving, setSaving] = useState(false); // "Saving to cloud" after render completes
+  const [rendered, setRendered] = useState(false);
+  // ─── Social publishing ───────────────────────────────────
+  /** Which platform's publish modal is open, if any. */
+  const [publishPlatform, setPublishPlatform] = useState<SocialPlatform | null>(null);
+  /** What this deployment can offer; null until loaded. */
+  const [integrationsConfig, setIntegrationsConfig] = useState<IntegrationsConfig | null>(null);
+  const [publishJobs, setPublishJobs] = useState<PublishJob[]>([]);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadingStudio, setDownloadingStudio] = useState(false);
+  const [sceneExporting, setSceneExporting] = useState(false);
+  /** Which slide the backend is currently rendering, for the export progress UI. */
+  const [sceneExportProgress, setSceneExportProgress] = useState<{
+    completed: number;
+    total: number;
+    title?: string;
+  } | null>(null);
+  const [showSlidesExportMenu, setShowSlidesExportMenu] = useState(false);
+  const [slideExportWizard, setSlideExportWizard] = useState<SlideExportWizardState | null>(null);
+  const previewPlayerRef = useRef<PlayerRef | null>(null);
+  const modalPreviewPlayerRef = useRef<PlayerRef | null>(null);
+  const slidesExportAnchorRef = useRef<HTMLDivElement | null>(null);
+  const videoPreviewContainerRef = useRef<HTMLDivElement | null>(null);
+  const slideExportWizardPrevRef = useRef<SlideExportWizardState | null>(null);
+  const [renderProgress, setRenderProgress] = useState(0);
+  const [renderFrames, setRenderFrames] = useState({ rendered: 0, total: 0 });
+  const [renderEtaLabel, setRenderEtaLabel] = useState<string | null>(null);
+  const [cancellingRender, setCancellingRender] = useState(false);
+  const renderPollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const renderRetryCountRef = useRef(0); // how many times we've auto-retried render
+  const MAX_RENDER_RETRIES = 20;
+
+  // Auto-download trigger (only when render finishes during this session)
+  const autoDownloadRef = useRef(false);
+
+  // Smooth pipeline progress: gradually fills between discrete step updates
+  const [smoothProgress, setSmoothProgress] = useState(0);
+  const smoothProgressRef = useRef(0);
+
+  useEffect(() => {
+    if (!pipelineRunning) {
+      setSmoothProgress(0);
+      smoothProgressRef.current = 0;
+      return;
+    }
+
+    // A project page can first learn about a run after earlier stages already completed
+    // (for example status="scripted", step=3). Snap to the start of the reported stage
+    // immediately instead of animating all the way from 0, then keep the usual gradual fill.
+    // Math.max also prevents a stale poll response from moving the bar backwards.
+    const stepFloors: Record<number, number> = { 0: 0, 1: 3, 2: 20, 3: 48, 4: 100 };
+    const stepTargets: Record<number, number> = { 0: 3, 1: 20, 2: 48, 3: 72, 4: 100 };
+    const floor = stepFloors[pipelineStep] ?? 0;
+    const target = stepTargets[pipelineStep] ?? 100;
+
+    if (smoothProgressRef.current < floor) {
+      smoothProgressRef.current = floor;
+      setSmoothProgress(floor);
+    }
+
+    // Animate towards target in small increments
+    const timer = setInterval(() => {
+      smoothProgressRef.current = Math.min(
+        smoothProgressRef.current + 0.4,
+        target
+      );
+      setSmoothProgress(Math.round(smoothProgressRef.current));
+    }, 150);
+
+    return () => clearInterval(timer);
+  }, [pipelineRunning, pipelineStep]);
+
+  // Upgrade modal
+  const [showUpgrade, setShowUpgrade] = useState(false);
+  const [showEmbedModal, setShowEmbedModal] = useState(false);
+  const [embedToken, setEmbedToken] = useState<string | null>(null);
+  const [embedLoading, setEmbedLoading] = useState(false);
+  const [embedCopied, setEmbedCopied] = useState(false);
+  const [showShareDropdown, setShowShareDropdown] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [showPreviewLinkModal, setShowPreviewLinkModal] = useState(false);
+  const [previewLinkUrl, setPreviewLinkUrl] = useState<string | null>(null);
+  const [previewLinkCopied, setPreviewLinkCopied] = useState(false);
+  const [showDownloadWarning, setShowDownloadWarning] = useState(false);
+  const [downloadWarningMode, setDownloadWarningMode] = useState<"render" | "download">("download");
+  const [showReRenderWarning, setShowReRenderWarning] = useState(false);
+  const [showCancelRenderWarning, setShowCancelRenderWarning] = useState(false);
+  const [showTemplateRelayoutWarning, setShowTemplateRelayoutWarning] = useState(false);
+  const [renderConfirmLoading, setRenderConfirmLoading] = useState(false);
+  const [showAspectFormatConfirm, setShowAspectFormatConfirm] = useState(false);
+  const [aspectFormatPending, setAspectFormatPending] = useState<"landscape" | "portrait" | null>(null);
+  const [aspectFormatSaving, setAspectFormatSaving] = useState(false);
+  const shareAnchorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onClickOutside = (evt: MouseEvent) => {
+      const target = evt.target as Node;
+      if (fontDropdownRef.current && !fontDropdownRef.current.contains(target)) {
+        setShowFontDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, []);
+
+  // Scenes tab: expanded scene detail, edit modal, drag reorder
+  const [expandedScene, setExpandedScene] = useState<number | null>(
+    project?.scenes?.[0]?.id ?? null
+  );
+  // Scenes tab: scenes are clustered into groups of 5, accordion-style (one group open at a time).
+  const [expandedGroupIndex, setExpandedGroupIndex] = useState<number | null>(0);
+  // Audio tab: independent accordion over the same group-of-5 scenes.
+  const [expandedAudioGroupIndex, setExpandedAudioGroupIndex] = useState<number | null>(0);
+  // Images tab: independent accordion over the same group-of-5 scenes.
+  const [expandedImagesGroupIndex, setExpandedImagesGroupIndex] = useState<number | null>(0);
+  const firstSceneAutoExpandedRef = useRef(false);
+  useEffect(() => {
+    if (firstSceneAutoExpandedRef.current) return;
+    const firstId = project?.scenes?.[0]?.id;
+    if (firstId != null) {
+      firstSceneAutoExpandedRef.current = true;
+      setExpandedScene(firstId);
+    }
+  }, [project?.scenes?.[0]?.id]);
+  const [sceneEditModal, setSceneEditModal] = useState<Scene | null>(null);
+  const [avatarEditScene, setAvatarEditScene] = useState<Scene | null>(null);
+  const [commentScene, setCommentScene] = useState<Scene | null>(null);
+  const [commentCounts, setCommentCounts] = useState<Record<number, number>>({});
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [imageAdjustSceneId, setImageAdjustSceneId] = useState<number | null>(null);
+  const [imageAdjustSrc, setImageAdjustSrc] = useState<string | null>(null);
+  const [imageAdjustAspectRatio, setImageAdjustAspectRatio] = useState("16 / 9");
+  const [imageAdjustCircular, setImageAdjustCircular] = useState(false);
+  const [isAdjustDragging, setIsAdjustDragging] = useState(false);
+  const [imageAdjustFocusX, setImageAdjustFocusX] = useState(50);
+  const [imageAdjustFocusY, setImageAdjustFocusY] = useState(50);
+  const [imageAdjustZoom, setImageAdjustZoom] = useState(1);
+  // Clip trim (video only): start offset (seconds) into a longer clip.
+  const [imageAdjustStartSeconds, setImageAdjustStartSeconds] = useState(0);
+  const [savingImageAdjust, setSavingImageAdjust] = useState(false);
+  const imageAdjustPreviewRef = useRef<HTMLDivElement>(null);
+  const imageAdjustScrollRef = useRef<HTMLDivElement>(null);
+  const imageAdjustFocusRef = useRef({ x: 50, y: 50 });
+  const imageAdjustPanRef = useRef<{
+    startX: number;
+    startY: number;
+    startFx: number;
+    startFy: number;
+  } | null>(null);
+  const [draggedSceneId, setDraggedSceneId] = useState<number | null>(null);
+  const [dragOverSceneId, setDragOverSceneId] = useState<number | null>(null);
+  const [reorderSaving, setReorderSaving] = useState(false);
+  const [sceneToDelete, setSceneToDelete] = useState<Scene | null>(null);
+  const [addSceneOpen, setAddSceneOpen] = useState(false);
+  // The scene the new one will be inserted after (null = append at end).
+  const [addSceneAnchor, setAddSceneAnchor] = useState<Scene | null>(null);
+  // The in-flight background add-scene job (drives the placeholder row + polling).
+  const [addSceneJob, setAddSceneJob] = useState<AddSceneJob | null>(null);
+  // 1-indexed insert position of the pending add (for placing the placeholder row).
+  const [addScenePosition, setAddScenePosition] = useState<number | null>(null);
+  const addSceneRunning = addSceneJob?.status === "queued" || addSceneJob?.status === "running";
+  const [removingAssetId, setRemovingAssetId] = useState<number | null>(null);
+  const [uploadingSceneId, setUploadingSceneId] = useState<number | null>(null);
+  // Custom user-recorded voiceovers: applied-but-unsaved recordings, keyed by scene id.
+  const [recordModalScene, setRecordModalScene] = useState<Scene | null>(null);
+  const [pendingRecordings, setPendingRecordings] = useState<
+    Map<number, { blob: Blob; url: string; duration: number }>
+  >(new Map());
+  const [savingRecordings, setSavingRecordings] = useState(false);
+  // Scene id currently being saved individually (per-scene Save button).
+  const [savingRecordingSceneId, setSavingRecordingSceneId] = useState<number | null>(null);
+  // sceneId → { url, duration }, so the preview player uses the applied (unsaved)
+  // recording's audio AND its measured length (not the stale scene duration).
+  const pendingVoiceovers = useMemo(() => {
+    const m = new Map<number, { url: string; duration: number }>();
+    pendingRecordings.forEach(({ url, duration }, sceneId) =>
+      m.set(sceneId, { url, duration })
+    );
+    return m;
+  }, [pendingRecordings]);
+  // Revoke any pending recording object URLs on unmount to avoid leaks.
+  useEffect(() => {
+    return () => {
+      pendingRecordings.forEach(({ url }) => URL.revokeObjectURL(url));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [imageSourceChooserSceneId, setImageSourceChooserSceneId] = useState<number | null>(null);
+  const [scrapedImagesPickerSceneId, setScrapedImagesPickerSceneId] = useState<number | null>(null);
+  // Which asset kind the existing-assets picker offers. The image flow shows only
+  // stills; the stock-footage flow shows only clips (reusing one is free — it's a
+  // descriptor relink, no download/transcode/credits).
+  const [existingPickerKind, setExistingPickerKind] = useState<"image" | "video">("image");
+  // Stock-footage picker + audio-adjust, driven from the expanded scene section.
+  const [stockFootagePickerSceneId, setStockFootagePickerSceneId] = useState<number | null>(null);
+  // Source chooser for the stock-footage flow: reuse an owned clip, or search new.
+  const [stockSourceChooserSceneId, setStockSourceChooserSceneId] = useState<number | null>(null);
+  // Scene whose clip is currently being downloaded + transcoded in the
+  // background. Drives the top-right toast, the per-scene loader, and the
+  // editing lock — mirroring generatingImageSceneId for AI images.
+  const [stockFootageBusySceneId, setStockFootageBusySceneId] = useState<number | null>(null);
+  // Draft audio settings for the expanded-section clip preview — always visible
+  // when the expanded scene has an audio-capable clip.
+  const [stockAudioDraft, setStockAudioDraft] = useState<{ muted: boolean; volume: number } | null>(null);
+  const [stockAudioSaving, setStockAudioSaving] = useState(false);
+  // Expanded-section clip preview: play/stop control + the <video> element, so
+  // the user can pause the clip even while its audio is on. Only one scene is
+  // expanded at a time, so a single ref/flag suffices.
+  const expandedClipVideoRef = useRef<HTMLVideoElement | null>(null);
+  const [expandedClipPlaying, setExpandedClipPlaying] = useState(true);
+  useEffect(() => {
+    // Reset to playing whenever a different scene is expanded.
+    setExpandedClipPlaying(true);
+    if (expandedScene == null) {
+      setStockAudioDraft(null);
+      return;
+    }
+    const scene = project?.scenes.find((s) => s.id === expandedScene);
+    if (!scene) {
+      setStockAudioDraft(null);
+      return;
+    }
+    let lp: Record<string, unknown> = {};
+    try {
+      lp = scene.remotion_code ? JSON.parse(scene.remotion_code).layoutProps || {} : {};
+    } catch {
+      lp = {};
+    }
+    if (lp.hideImage || !lp.assignedVideo) {
+      setStockAudioDraft(null);
+      return;
+    }
+    const asset = project?.assets.find(
+      (a) => a.asset_type === "video" && a.filename === lp.assignedVideo && !a.excluded,
+    );
+    const hasAudio = Boolean(
+      (asset as { audio_variant_filename?: string | null } | undefined)?.audio_variant_filename,
+    );
+    if (!hasAudio) {
+      setStockAudioDraft(null);
+      return;
+    }
+    setStockAudioDraft({
+      muted: lp.videoMuted === undefined ? true : Boolean(lp.videoMuted),
+      volume: Number.isFinite(Number(lp.videoVolume)) ? Number(lp.videoVolume) : 0.35,
+    });
+  }, [expandedScene]);
+  // Apply the live audio draft to the currently-playing clip preview so dragging
+  // the volume slider is heard immediately (the `volume` attribute is not
+  // reactive on the element).
+  useEffect(() => {
+    const el = expandedClipVideoRef.current;
+    if (!el || !stockAudioDraft) return;
+    el.volume = Math.max(0, Math.min(1, stockAudioDraft.volume));
+  }, [stockAudioDraft]);
+  const toggleExpandedClipPlaying = () => {
+    const el = expandedClipVideoRef.current;
+    setExpandedClipPlaying((prev) => {
+      const next = !prev;
+      if (el) {
+        if (next) void el.play().catch(() => { /* refused; harmless */ });
+        else el.pause();
+      }
+      return next;
+    });
+  };
+  const [selectedExistingAssetId, setSelectedExistingAssetId] = useState<number | null>(null);
+  const [localUploadTargetSceneId, setLocalUploadTargetSceneId] = useState<number | null>(null);
+  const [assigningExistingImage, setAssigningExistingImage] = useState(false);
+  const [imageGenModalSceneId, setImageGenModalSceneId] = useState<number | null>(null);
+  const [generatingImageSceneId, setGeneratingImageSceneId] = useState<number | null>(null);
+  // Lets the Scene Edit modal stage a kept AI image into its own (unsaved) form. The
+  // modal registers a stager on mount; ProjectView calls it when the user keeps an
+  // image while the edit modal for that scene is still open. Null when no modal is open.
+  const stageEditModalImageRef = useRef<((file: File) => void) | null>(null);
+  const [generatedImageSceneId, setGeneratedImageSceneId] = useState<number | null>(null);
+  const [generatedImageBase64, setGeneratedImageBase64] = useState<string | null>(null);
+  const [generatedPrompt, setGeneratedPrompt] = useState<string | null>(null);
+  const [generateImageError, setGenerateImageError] = useState<string | null>(null);
+  const [generateErrorSceneId, setGenerateErrorSceneId] = useState<number | null>(null);
+  const [showAiImageUpgradeModal, setShowAiImageUpgradeModal] = useState(false);
+  const [layoutsWithoutImage, setLayoutsWithoutImage] = useState<Set<string>>(new Set());
+  const [layoutPropSchema, setLayoutPropSchema] = useState<Record<string, { defaults?: Record<string, unknown> }> | null>(null);
+  /**
+   * The WHOLE layouts response, kept so SceneEditModal does not have to fetch
+   * it again on every open — it only used the two fields above and threw
+   * `layout_names` away, which is why the modal flashed a raw layout id before
+   * the real name arrived.
+   */
+  const [projectLayouts, setProjectLayouts] = useState<LayoutInfo | null>(null);
+  // Ranges and labels for the "Global Text Sizes" panel, which applies one pair
+  // of sizes to every scene. They must match the per-scene sliders exactly: a
+  // global control offering a size the per-scene one cannot express writes a
+  // value the backend then clamps, so the number dragged is not the number
+  // stored.
+  const globalIsCustomTpl = (project?.template || "").startsWith("custom_");
+  const globalIsTwoTierType =
+    globalIsCustomTpl && (projectLayouts?.design_version ?? 1) >= 3;
+  const globalOrientation: "landscape" | "portrait" =
+    project?.aspect_ratio === "portrait" ? "portrait" : "landscape";
+  const globalTitleBand: readonly [number, number] = globalIsCustomTpl
+    ? USER_BANDS.title[globalOrientation]
+    : [20, 200];
+  const globalDescBand: readonly [number, number] = globalIsCustomTpl
+    ? USER_BANDS.description[globalOrientation]
+    : [12, 80];
+  /**
+   * Whether that fetch has resolved. Until it has, the set above is EMPTY, and
+   * an empty set reads as "every layout supports images" — so an image-free
+   * scene briefly showed image controls, and permanently did so if the request
+   * failed (its .catch is swallowed). SceneEditModal already guards this the
+   * same way; treat unknown as NOT supported.
+   */
+  const [layoutsLoaded, setLayoutsLoaded] = useState(false);
+  const navigate = useNavigate();
+  const missingCustomTemplate = Boolean(
+    project?.custom_template_missing ||
+    ((project?.template || "").startsWith("custom_") && !project?.custom_theme)
+  );
+  const tabsGuideSeenKey = user ? `${TABS_GUIDE_SEEN_KEY}_${user.id}` : TABS_GUIDE_SEEN_KEY;
+  const [runProjectTour, setRunProjectTour] = useState(false);
+  const [tabsTourStepIndex, setTabsTourStepIndex] = useState(0);
+  const tourAutoStartedRef = useRef(false);
+  const tourShownThisSessionRef = useRef(false);
+  const [projectCount, setProjectCount] = useState<number | null>(null);
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [inlineReviewSubmitted, setInlineReviewSubmitted] = useState(false);
+  const [showReviewPopup, setShowReviewPopup] = useState(false);
+  const [firstProjectPopupDismissed, setFirstProjectPopupDismissed] = useState(false);
+  const [starReviewModalOpen, setStarReviewModalOpen] = useState(false);
+  const [starReviewModalRating, setStarReviewModalRating] = useState<1 | 2 | 3 | 4 | 5 | null>(null);
+  const [showPostReviewInvite, setShowPostReviewInvite] = useState(false);
+  const reviewPopupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const localSceneImageInputRef = useRef<HTMLInputElement>(null);
+  const dismissTabsGuide = useCallback(() => {
+    if (tourShownThisSessionRef.current && user) localStorage.setItem(tabsGuideSeenKey, "true");
+    tourShownThisSessionRef.current = false;
+    setRunProjectTour(false);
+    navigate(`/project/${id}`, { replace: true });
+  }, [navigate, id, user, tabsGuideSeenKey]);
+  const projectTourSteps = buildProjectTourSteps(project);
+  const scenesLoaded = (project?.scenes?.length ?? 0) > 0;
+  const pipelineFinished = project?.status === "generated" || project?.status === "done";
+
+  // Force back to scenes tab when video finishes generating, resetting the manual-change flag.
+  useEffect(() => {
+    if (pipelineFinished) {
+      tabManuallyChanged.current = false;
+      setActiveTab("scenes");
+    }
+  }, [pipelineFinished]);
+
+  const reviewState = project?.review_state ?? null;
+  const isFirstProject = reviewState?.project_sequence === 1;
+  // Review prompts are for the project owner only — a collaborator viewing a shared
+  // project should never be asked to review it.
+  const isProjectOwner = project != null && user != null && project.user_id === user.id;
+  const clearReviewPopupTimer = useCallback(() => {
+    if (reviewPopupTimerRef.current) {
+      clearTimeout(reviewPopupTimerRef.current);
+      reviewPopupTimerRef.current = null;
+    }
+  }, []);
+  // Pre-fetch project count when guide not seen so we can start tour when pipeline is done
+  useEffect(() => {
+    if (localStorage.getItem(tabsGuideSeenKey) || !user) return;
+    listProjects()
+      .then((res) => setProjectCount(res.data.length))
+      .catch(() => setProjectCount(0));
+  }, [tabsGuideSeenKey, user?.id]);
+  // Start guide ONLY when: pipeline finished (all 3 stages done, status generated/done), polling stopped, 1 project, guide not seen
+  useEffect(() => {
+    if (localStorage.getItem(tabsGuideSeenKey) || !scenesLoaded || !project || tourAutoStartedRef.current) return;
+    if (projectCount !== 1) return;
+    if (!pipelineFinished || pipelineRunning) return;
+    tourAutoStartedRef.current = true;
+    tourShownThisSessionRef.current = true;
+    setActiveTab("scenes");
+    setTabsTourStepIndex(0);
+    setRunProjectTour(true);
+  }, [tabsGuideSeenKey, scenesLoaded, project?.id, project?.status, projectCount, pipelineFinished, pipelineRunning]);
+  const handleProjectTourCallback = useCallback(
+    (data: CallBackProps) => {
+      if ((data as { action?: string }).action === "close" || data.status === STATUS.FINISHED || data.status === STATUS.SKIPPED) {
+        if (tourShownThisSessionRef.current && user) localStorage.setItem(tabsGuideSeenKey, "true");
+        tourShownThisSessionRef.current = false;
+        setRunProjectTour(false);
+        navigate(`/project/${id}`, { replace: true });
+        return;
+      }
+      const type = (data as { type?: string }).type;
+      const action = data.action;
+      const index = data.index ?? 0;
+      const stepsCount = projectTourSteps.length;
+      const isLastStep = index === stepsCount - 1;
+      if (type === "step:after" && action === "next" && isLastStep) {
+        if (tourShownThisSessionRef.current && user) localStorage.setItem(tabsGuideSeenKey, "true");
+        tourShownThisSessionRef.current = false;
+        setRunProjectTour(false);
+        navigate(`/project/${id}`, { replace: true });
+        return;
+      }
+      if (type === "step:after" && (action === "next" || action === "prev")) {
+        if (action === "next" && index === 0) setActiveTab("scenes");
+        const targetIndex = action === "next" ? Math.min(index + 1, stepsCount - 1) : Math.max(index - 1, 0);
+        setTabsTourStepIndex(targetIndex);
+      }
+    },
+    [navigate, id, user, tabsGuideSeenKey, projectTourSteps.length]
+  );
+  useEffect(() => {
+    if (runProjectTour) setTabsTourStepIndex(0);
+  }, [runProjectTour]);
+
+  useEffect(() => {
+    clearReviewPopupTimer();
+    setReviewSubmitting(false);
+    setReviewError(null);
+    setInlineReviewSubmitted(false);
+    setShowReviewPopup(false);
+    if (!project?.id) {
+      setFirstProjectPopupDismissed(false);
+      return;
+    }
+    try {
+      setFirstProjectPopupDismissed(
+        window.localStorage.getItem(getFirstProjectReviewPopupDismissedKey(project.id)) === "1"
+      );
+    } catch {
+      setFirstProjectPopupDismissed(false);
+    }
+  }, [project?.id, clearReviewPopupTimer]);
+
+  useEffect(() => {
+    if (reviewState?.has_review_for_project) {
+      clearReviewPopupTimer();
+      setShowReviewPopup(false);
+    }
+  }, [reviewState?.has_review_for_project, clearReviewPopupTimer]);
+
+  useEffect(() => {
+    clearReviewPopupTimer();
+    if (
+      !project?.id ||
+      !isProjectOwner ||
+      !reviewState ||
+      reviewState.has_review_for_project ||
+      !pipelineFinished ||
+      !isFirstProject ||
+      firstProjectPopupDismissed
+    ) {
+      setShowReviewPopup(false);
+      return;
+    }
+    reviewPopupTimerRef.current = setTimeout(() => {
+      setShowReviewPopup(true);
+    }, FIRST_PROJECT_REVIEW_POPUP_DELAY_MS);
+
+    return clearReviewPopupTimer;
+  }, [
+    project?.id,
+    isProjectOwner,
+    reviewState?.has_review_for_project,
+    pipelineFinished,
+    isFirstProject,
+    firstProjectPopupDismissed,
+    clearReviewPopupTimer,
+  ]);
+
+  useEffect(() => {
+    return clearReviewPopupTimer;
+  }, [clearReviewPopupTimer]);
+
+  const submitReview = useCallback(async ({
+    rating,
+    suggestion,
+    source,
+    triggerEvent,
+    surface,
+  }: {
+    rating: 1 | 2 | 3 | 4 | 5;
+    suggestion?: string;
+    source: "first_project_popup" | "inline_row";
+    triggerEvent: "delayed_popup" | "manual";
+    surface: "inline" | "popup";
+  }): Promise<boolean> => {
+    if (!project) return false;
+    setReviewSubmitting(true);
+    setReviewError(null);
+    try {
+      const response = await submitProjectReview(project.id, {
+        rating,
+        suggestion,
+        source,
+        trigger_event: triggerEvent,
+      });
+      setProject((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          review_state: response.data.review_state,
+        };
+      });
+      if (surface === "inline") {
+        setInlineReviewSubmitted(true);
+      } else {
+        setShowReviewPopup(false);
+        setInlineReviewSubmitted(false);
+      }
+      return true;
+    } catch (err) {
+      setReviewError(getErrorMessage(err, "Failed to save your review."));
+      return false;
+    } finally {
+      setReviewSubmitting(false);
+    }
+  }, [project]);
+  const handleInlineSubmitReview = useCallback(({
+    rating,
+    suggestion,
+  }: {
+    rating: 1 | 2 | 3 | 4 | 5;
+    suggestion?: string;
+  }) => submitReview({
+    rating,
+    suggestion,
+    source: "inline_row",
+    triggerEvent: "manual",
+    surface: "inline",
+  }), [submitReview]);
+  const handlePopupSubmitReview = useCallback(({
+    rating,
+    suggestion,
+  }: {
+    rating: 1 | 2 | 3 | 4 | 5;
+    suggestion?: string;
+  }) => submitReview({
+    rating,
+    suggestion,
+    source: "first_project_popup",
+    triggerEvent: "delayed_popup",
+    surface: "popup",
+  }), [submitReview]);
+  const handleStarModalSubmitReview = useCallback(async ({
+    rating,
+    suggestion,
+  }: {
+    rating: 1 | 2 | 3 | 4 | 5;
+    suggestion?: string;
+  }) => {
+    const ok = await submitReview({
+      rating,
+      suggestion,
+      source: "inline_row",
+      triggerEvent: "manual",
+      surface: "inline",
+    });
+    if (ok) {
+      setStarReviewModalOpen(false);
+      setShowPostReviewInvite(true);
+    }
+  }, [submitReview]);
+  const handleDismissStarReviewModal = useCallback(() => {
+    setStarReviewModalOpen(false);
+  }, []);
+  const handleDismissReviewPopup = useCallback(() => {
+    if (!project) return;
+    clearReviewPopupTimer();
+    setShowReviewPopup(false);
+    setFirstProjectPopupDismissed(true);
+    try {
+      window.localStorage.setItem(getFirstProjectReviewPopupDismissedKey(project.id), "1");
+    } catch {
+      // Ignore storage failures and fall back to in-memory dismissal for this page.
+    }
+  }, [project, clearReviewPopupTimer]);
+  const [sceneFontOverrides, setSceneFontOverrides] = useState<Record<number, { title: number; desc: number }>>({});
+  const [savingFontSizes, setSavingFontSizes] = useState<number | null>(null);
+  const fontSaveTimeoutRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  const fontPendingRef = useRef<Record<number, { title: number; desc: number }>>({});
+
+  // Images tab: delete asset confirmation
+  const [deletingImageAssetId, setDeletingImageAssetId] = useState<number | null>(null);
+  const [imageAssetDeletePending, setImageAssetDeletePending] = useState<{
+    id: number;
+    filename: string;
+  } | null>(null);
+  // Expanded scene section: confirm removing a scene's image/clip. This only
+  // UNASSIGNS it from the scene — the asset stays in the project's media list
+  // (deleting outright is the Media tab's ✕).
+  const [sceneMediaRemovePending, setSceneMediaRemovePending] = useState<{
+    scene: Scene;
+    assetId: number;
+    isClip: boolean;
+  } | null>(null);
+
+  // Video blob URL for playback (fetched via backend to avoid CORS, loads completely)
+  const [videoBlobUrl, setVideoBlobUrl] = useState<string | null>(null);
+  const [videoLoading, setVideoLoading] = useState(false);
+
+  // Fetch video as blob when project is done — ensures full load, no CORS
+  // useEffect(() => {
+  //   if (project?.status !== "done" || !projectId) {
+  //     if (videoBlobUrl) {
+  //       window.URL.revokeObjectURL(videoBlobUrl);
+  //       setVideoBlobUrl(null);
+  //     }
+  //     return;
+  //   }
+  //   let revoked = false;
+  //   setVideoLoading(true);
+  //   fetchVideoBlob(projectId)
+  //     .then((url) => {
+  //       if (!revoked) {
+  //         setVideoBlobUrl(url);
+  //       } else {
+  //         window.URL.revokeObjectURL(url);
+  //       }
+  //     })
+  //     .catch(() => {
+  //       if (!revoked) setVideoBlobUrl(null);
+  //     })
+  //     .finally(() => {
+  //       if (!revoked) setVideoLoading(false);
+  //     });
+  //   return () => {
+  //     revoked = true;
+  //   };
+  // }, [project?.status, projectId]);
+
+  // Revoke blob URL on unmount
+  useEffect(() => {
+    return () => {
+      if (videoBlobUrl) {
+        window.URL.revokeObjectURL(videoBlobUrl);
+      }
+    };
+  }, [videoBlobUrl]);
+
+ // Auto-download once render finishes
+// useEffect(() => {
+//   // 1. Only run if rendered is true and we haven't auto-downloaded yet
+//   if (!autoDownloadRef.current || !rendered || !project) return;
+
+//   console.log("autoDownload triggered", autoDownloadRef.current);
+
+//   const tryAutoDownload = async () => {
+
+//     console.log("Function called!")
+//     let currentProject = project;
+//     let attempts = 0;
+//     const maxAttempts = 6;
+
+//     while (attempts < maxAttempts) {
+//       // 2. Check if we actually have the URL yet
+//       if (currentProject.r2_video_url) {
+//         try {
+//           // IMPORTANT: Use the native link method, NOT the axios-based downloadVideo
+//           const safeName = currentProject.name?.replace(/\s+/g, "_").slice(0, 50) || "video";
+//           const cacheBuster = `?v=${new Date().getTime()}`;
+//           const finalUrl = currentProject.r2_video_url + cacheBuster;
+
+//           const link = document.createElement("a");
+//           link.href = finalUrl;
+//           link.setAttribute("download", `${safeName}.mp4`);
+//           // Use target _blank to handle cases where download attribute is ignored
+//           link.target = "_blank"; 
+          
+//           document.body.appendChild(link);
+//           link.click();
+//           document.body.removeChild(link);
+
+//           autoDownloadRef.current = false;
+//           return;
+//         } catch (err) {
+//           console.error("Auto-download trigger failed", err);
+//         }
+//       }
+
+//       attempts++;
+//       if (attempts < maxAttempts) {
+//         await new Promise((r) => setTimeout(r, 2000));
+//         const updated = await loadProject(); 
+//         if (updated) currentProject = updated;
+//       }
+//     }
+
+//     autoDownloadRef.current = false; 
+//   };
+
+//   // tryAutoDownload();
+// }, [rendered, project?.r2_video_url]); 
+
+  const loadProject = useCallback(
+    async (opts?: { silent404?: boolean }) => {
+      try {
+        const res = await getProject(projectId);
+        setProject(res.data);
+        setHasError(false); // clear any previous load errors on success
+        if (res.data.status === "done" || (res.data.status === "rendering" && res.data.r2_video_url)) {
+          setRendered(true);
+        }
+        // Fetch layout image-support info (non-blocking)
+        getValidLayouts(projectId)
+          .then((lr) => {
+          setLayoutsWithoutImage(new Set(lr.data.layouts_without_image ?? []));
+          setLayoutPropSchema(lr.data.layout_prop_schema ?? null);
+          // Keep the full response for SceneEditModal (layout_names in
+          // particular), and record that it landed.
+          setProjectLayouts(lr.data);
+          setLayoutsLoaded(true);
+          })
+          .catch(() => {
+            // The image controls fail CLOSED while this is unresolved, so a
+            // swallowed failure would hide them permanently on scenes that DO
+            // take an image. Mark it resolved anyway: with an empty
+            // layouts_without_image set every layout reads as capable, which is
+            // the pre-existing behaviour and the safe direction when we simply
+            // do not know. The per-scene descriptor still gates what renders.
+            setLayoutsLoaded(true);
+          });
+        return res.data;
+      } catch (err: unknown) {
+        const status =
+          err &&
+          typeof err === "object" &&
+          "response" in err &&
+          typeof (err as { response?: { status?: number } }).response?.status === "number"
+            ? (err as { response: { status: number } }).response.status
+            : undefined;
+        // Poller can call loadProject right after the worker deletes the row (race with stale `running: true`).
+        if (status === 404 && opts?.silent404) {
+          return null;
+        }
+        // After scrape/pipeline rollback the project row is gone; polling may still call loadProject once.
+        if (status === 404 && pipelineTerminalFailureHandledRef.current) {
+          setHasError(true);
+          return null;
+        }
+        showError("Failed to load project"); setHasError(true);
+        return null;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [projectId, showError],
+  );
+
+  /** Render failed — warn the user, then reload once they dismiss the modal so
+   *  project.status and the stuck "Rendering" badge sync with the server. */
+  const showRenderFailureError = useCallback(
+    (message: string) => {
+      showError(message, {
+        variant: "warning",
+        onClose: () => {
+          window.location.reload();
+        },
+      });
+    },
+    [showError],
+  );
+
+  // ─── Collaboration: apply a peer's live edit into local state ──
+  const handleRemoteCollabEdit = useCallback((edit: CollabEdit) => {
+    setProject((prev) => {
+      if (!prev) return prev;
+      if (edit.scope === "project") {
+        const next = { ...prev, [edit.field]: edit.value } as typeof prev;
+        if (edit.field === "bgm_track_id") {
+          // bgm_track_url is derived server-side from the track id, so it isn't part
+          // of the broadcast. Re-resolve it here or the preview keeps the old audio.
+          const trackId = edit.value as string | null;
+          next.bgm_track_url = trackId
+            ? bgmTracks.find((t) => t.track_id === trackId)?.r2_url ?? null
+            : null;
+        }
+        return next;
+      }
+      if (edit.scope === "scene" && edit.scene_id != null) {
+        return {
+          ...prev,
+          scenes: prev.scenes.map((s) =>
+            s.id === edit.scene_id ? ({ ...s, [edit.field]: edit.value } as typeof s) : s
+          ),
+        };
+      }
+      return prev;
+    });
+  }, [bgmTracks]);
+
+  // A change-set was reverted — refetch authoritative state.
+  const handleCollabDraftResolved = useCallback(() => {
+    loadProject();
+  }, [loadProject]);
+
+  // A bulk job finished elsewhere (render complete, template change, script/voice
+  // regen, voiceover add/delete). These rewrite too much state to reconcile
+  // field-by-field, so force a full page reload to pick up authoritative state.
+  const handleCollabRemoteReload = useCallback(() => {
+    window.location.reload();
+  }, []);
+
+  // Per-scene comment counts (badge on the Comment button). Only fetched for shared
+  // projects, where the comment affordance is shown.
+  const loadCommentCounts = useCallback(async () => {
+    if (!projectId || !project?.is_shared) {
+      setCommentCounts({});
+      return;
+    }
+    try {
+      const res = await listComments(projectId);
+      const counts: Record<number, number> = {};
+      for (const c of res.data) counts[c.scene_id] = (counts[c.scene_id] ?? 0) + 1;
+      setCommentCounts(counts);
+    } catch {
+      /* non-critical */
+    }
+  }, [projectId, project?.is_shared]);
+
+  useEffect(() => {
+    loadCommentCounts();
+  }, [loadCommentCounts]);
+
+  const handlePreviewPlaybackSpeedChange = useCallback(
+    async (speed: number) => {
+      if (!project) return;
+      const normalized = Math.min(2.5, Math.max(0.5, Math.round(speed * 10) / 10));
+      setPlaybackSpeedDraft(normalized);
+      pendingPlaybackSpeedRef.current = normalized;
+      if (savingPlaybackSpeedRef.current) return;
+
+      setSavingPlaybackSpeed(true);
+      savingPlaybackSpeedRef.current = true;
+      try {
+        while (pendingPlaybackSpeedRef.current !== null) {
+          const nextSpeed = pendingPlaybackSpeedRef.current;
+          pendingPlaybackSpeedRef.current = null;
+          await updateProject(project.id, { playback_speed: nextSpeed });
+          await loadProject();
+        }
+      } catch (err) {
+        showError(getErrorMessage(err, "Failed to save playback speed."));
+      } finally {
+        setSavingPlaybackSpeed(false);
+        savingPlaybackSpeedRef.current = false;
+      }
+    },
+    [project, loadProject, showError],
+  );
+
+  const handleCaptionSettingsChange = useCallback(
+    async (settings: CaptionSettings) => {
+      if (!project) return;
+      setSavingCaptions(true);
+      try {
+        await updateProject(project.id, {
+          captions_enabled: settings.captionsEnabled,
+          caption_font_family: settings.captionFontFamily,
+          caption_font_size: settings.captionFontSize,
+          caption_offset: settings.captionOffset,
+        });
+        // Sync draft state so the settings panel reflects changes made via the player button.
+        setCaptionsEnabledDraft(settings.captionsEnabled);
+        setCaptionFontFamilyDraft(settings.captionFontFamily);
+        setCaptionFontSizeDraft(settings.captionFontSize);
+        setCaptionOffsetDraft(settings.captionOffset);
+        setCaptionSettingsKey((k) => k + 1);
+        await loadProject();
+      } catch (err) {
+        const msg = getErrorMessage(err, "Failed to save caption settings.");
+        // "Captions require a voiceover" is a soft prerequisite, not a failure —
+        // show it as a warning so the user isn't alarmed.
+        const isVoiceoverWarning = /captions? require a voiceover/i.test(msg);
+        showError(msg, isVoiceoverWarning ? { variant: "warning" } : undefined);
+      } finally {
+        setSavingCaptions(false);
+      }
+    },
+    [project, loadProject, showError],
+  );
+
+  const stopTemplateRelayoutPolling = useCallback(() => {
+    if (templateRelayoutPollRef.current) {
+      clearInterval(templateRelayoutPollRef.current);
+      templateRelayoutPollRef.current = null;
+    }
+  }, []);
+
+  const startTemplateRelayoutPolling = useCallback(() => {
+    stopTemplateRelayoutPolling();
+    templateRelayoutPollRef.current = setInterval(async () => {
+      try {
+        const res = await getProjectTemplateChangeStatus(projectId);
+        const job = res.data;
+        if (!job) return;
+        setTemplateRelayoutJob(job);
+        if (job.status === "completed") {
+          stopTemplateRelayoutPolling();
+          setTemplateRelayoutJob({
+            ...job,
+            processed_scenes: 0,
+            total_scenes: 0,
+          });
+          await loadProject();
+        } else if (job.status === "failed") {
+          stopTemplateRelayoutPolling();
+          setTemplateRelayoutJob(null);
+          await loadProject();
+          showError(
+            job.error_message ||
+              "We faced an unforeseen error while processing your request. Please retry — your video count has not been deducted.",
+            { variant: "pipeline" }
+          );
+        }
+      } catch {
+        stopTemplateRelayoutPolling();
+      }
+    }, 2000);
+  }, [loadProject, projectId, stopTemplateRelayoutPolling, showError]);
+
+  const stopRegenerateScriptPolling = useCallback(() => {
+    if (regenerateScriptPollRef.current) {
+      clearInterval(regenerateScriptPollRef.current);
+      regenerateScriptPollRef.current = null;
+    }
+  }, []);
+
+  const stopAddScenePolling = useCallback(() => {
+    if (addScenePollRef.current) {
+      clearInterval(addScenePollRef.current);
+      addScenePollRef.current = null;
+    }
+  }, []);
+
+  // Poll the background add-scene job. On completion → reload project + credits and
+  // clear the placeholder. On failure → clear placeholder, refresh credits (the refund
+  // is reflected) and surface the global "Oops" modal.
+  const startAddScenePolling = useCallback(() => {
+    stopAddScenePolling();
+    addScenePollRef.current = setInterval(async () => {
+      try {
+        const res = await getAddSceneStatus(projectId);
+        const job = res.data;
+        if (!job) return;
+        setAddSceneJob(job);
+        if (job.status === "completed") {
+          stopAddScenePolling();
+          setAddSceneJob(null);
+          setAddScenePosition(null);
+          await loadProject();
+          void refreshUser();
+        } else if (job.status === "failed") {
+          stopAddScenePolling();
+          setAddSceneJob(null);
+          setAddScenePosition(null);
+          void refreshUser();
+          showError(
+            "We're sorry — we couldn't generate the new scene. No AI edits were deducted. Please try again.",
+            { variant: "pipeline" }
+          );
+        }
+      } catch {
+        // Transient poll error — keep trying on the next tick.
+      }
+    }, 2000);
+  }, [projectId, loadProject, refreshUser, showError, stopAddScenePolling]);
+
+  // On mount / project change: if an add-scene job is already in flight (e.g. after a
+  // refresh, or started by a collaborator), resume the placeholder + polling.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getAddSceneStatus(projectId);
+        const job = res.data;
+        if (cancelled || !job) return;
+        if (job.status === "queued" || job.status === "running") {
+          setAddSceneJob(job);
+          setAddScenePosition(job.position ?? null);
+          startAddScenePolling();
+        }
+      } catch {
+        /* ignore — no add-scene job to resume */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      stopAddScenePolling();
+    };
+  }, [projectId, startAddScenePolling, stopAddScenePolling]);
+
+  // Load the previous scenes for the verify popup. On error, fall back to [] so the popup
+  // isn't stuck on a loading spinner (it then treats every scene as new, no comparison).
+  const loadRegenerateScriptPreview = useCallback(async () => {
+    try {
+      const res = await getRegenerateScriptPreview(projectId);
+      setRegenScriptPreviousScenes(res.data?.previous_scenes ?? []);
+    } catch {
+      setRegenScriptPreviousScenes([]);
+    }
+  }, [projectId]);
+
+  const startRegenerateScriptPolling = useCallback(() => {
+    stopRegenerateScriptPolling();
+    regenerateScriptPollRef.current = setInterval(async () => {
+      try {
+        const res = await getRegenerateScriptStatus(projectId);
+        const job = res.data;
+        if (!job) return;
+        // After the user proceeds, the persisted status may briefly still read
+        // "awaiting_review" (DB write not yet visible to this read). Ignore those stale
+        // reads so the UI doesn't bounce back to the verify step — keep polling until the
+        // status catches up to running/completed/failed.
+        if (job.status === "awaiting_review" && regenerateScriptProceededRef.current) {
+          return;
+        }
+        setRegenerateScriptJob(job);
+        if (job.status === "awaiting_review") {
+          // Paused for verification — show the new scenes and the before/after preview.
+          // Keep polling (don't stop): the reviewer might be another collaborator, so
+          // this client must track the transition out of review (approve/regenerate)
+          // rather than waiting only on a broadcast reload. Load the project + preview
+          // once (guarded) so we don't refetch every tick.
+          if (!regenerateScriptPreviewLoadedRef.current) {
+            regenerateScriptPreviewLoadedRef.current = true;
+            await loadProject();
+            setRegenerateScriptJob(job);
+            loadRegenerateScriptPreview();
+          }
+        } else if (job.status === "completed") {
+          regenerateScriptPreviewLoadedRef.current = false;
+          regenerateScriptProceededRef.current = false;
+          setRegenScriptPreviousScenes(null);
+          stopRegenerateScriptPolling();
+          // Clear any pipeline state that may have been set by a spurious auto-start
+          // (e.g. if the project was stuck in "scripted" on mount and kickOffGeneration fired).
+          stopPolling();
+          setPipelineRunning(false);
+          await loadProject();
+          setRegenerateScriptJob(null);
+        } else if (job.status === "failed") {
+          regenerateScriptPreviewLoadedRef.current = false;
+          regenerateScriptProceededRef.current = false;
+          setRegenScriptPreviousScenes(null);
+          stopRegenerateScriptPolling();
+          stopPolling();
+          setPipelineRunning(false);
+          setRegenerateScriptJob(null);
+          await loadProject();
+          showError(
+            job.error_message
+              ? `We're sorry — we couldn't regenerate your script. Your previous version has been restored and no video credit was deducted.`
+              : "We're sorry — something went wrong while regenerating your script. Your previous version has been restored and no video credit was deducted. Please try again.",
+            { variant: "pipeline" }
+          );
+        }
+      } catch {
+        stopRegenerateScriptPolling();
+      }
+    }, 2000);
+  }, [loadProject, projectId, stopRegenerateScriptPolling, showError, loadRegenerateScriptPreview]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCustomTemplatesLoading(true);
+    getTemplates()
+      .then((r) => {
+        if (!cancelled) setTemplateMetas(r.data || []);
+      })
+      .catch(() => {});
+    // Always fetch the OWNER-resolved custom templates via the project-scoped
+    // endpoint. It returns the owner's templates for a collaborator and the
+    // caller's own for the owner (owner resolves to self), so it's correct for
+    // both — and, crucially, it needs only `projectId` (known at mount), so it
+    // fires in PARALLEL with the project load instead of waiting for the project
+    // payload to arrive and flip `useOwnerScopedAssets`. That removes the serial
+    // round-trip (and the previous wrong-then-right double fetch) that made the
+    // template picker slow to populate for collaborators.
+    (projectId ? listProjectCustomTemplates(projectId) : listCustomTemplates())
+      .then((r) => {
+        if (!cancelled) setCustomTemplatesList(r.data || []);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setCustomTemplatesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      stopTemplateRelayoutPolling();
+    };
+  }, [stopTemplateRelayoutPolling, projectId]);
+
+  useEffect(() => {
+    const refreshTemplateJob = async () => {
+      try {
+        const res = await getProjectTemplateChangeStatus(projectId);
+        if (!res.data) return;
+        setTemplateRelayoutJob(res.data);
+        if (res.data.status === "queued" || res.data.status === "running") {
+          startTemplateRelayoutPolling();
+        }
+      } catch {
+        // ignore
+      }
+    };
+    refreshTemplateJob();
+  }, [projectId, startTemplateRelayoutPolling]);
+
+  useEffect(() => {
+    const refreshRegenerateScriptJob = async () => {
+      try {
+        const res = await getRegenerateScriptStatus(projectId);
+        if (!res.data) return;
+        setRegenerateScriptJob(res.data);
+        if (
+          res.data.status === "queued" ||
+          res.data.status === "running" ||
+          res.data.status === "awaiting_review"
+        ) {
+          // Poll in all three active states. For "awaiting_review" this is what lets a
+          // COLLABORATOR viewing the review step track the transition out of review when
+          // the actor (or another collaborator) approves/regenerates — otherwise they'd
+          // sit on the review popup forever (they don't drive it). The poll loads the
+          // before/after preview once (guarded) and keeps running until the status flips.
+          startRegenerateScriptPolling();
+        }
+      } catch {
+        // ignore
+      }
+    };
+    refreshRegenerateScriptJob();
+  }, [projectId, startRegenerateScriptPolling, loadRegenerateScriptPreview]);
+
+  // Handle ?purchased=true redirect from Stripe per-video checkout
+  useEffect(() => {
+    if (searchParams.get("purchased") === "true") {
+      trackGoogleAdsPurchaseConversion(searchParams.get("session_id"));
+      // Clear the query param and refresh project to pick up studio_unlocked
+      setSearchParams({}, { replace: true });
+      loadProject();
+      // The purchase also granted AI-edit credits / video bonus on the user —
+      // refresh so the SceneEdit modal's credit count reflects the new balance.
+      void refreshUser();
+    }
+  }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-start generation when project loads and isn't complete
+  useEffect(() => {
+    const init = async () => {
+      // silent404: scrape can delete the row before this GET returns; avoid "Failed to load" before tombstone.
+      const proj = await loadProject({ silent404: true });
+      if (!proj || generationStarted.current) {
+        if (!proj && !generationStarted.current) {
+          try {
+            const st = await getPipelineStatus(projectId);
+            const d = st.data;
+            const tombstoneMsg =
+              typeof d.error === "string" && d.error.trim() ? d.error.trim() : null;
+            const rolledBack =
+              Boolean(d.project_removed) || d.status === "failed";
+            if (tombstoneMsg || rolledBack) {
+              if (!pipelineTerminalFailureHandledRef.current) {
+                pipelineTerminalFailureHandledRef.current = true;
+                showError(
+                  tombstoneMsg ||
+                    "Something went wrong while creating your video. Please try again.",
+                  { variant: "pipeline" },
+                );
+              }
+              setHasError(true);
+              setPipelineRunning(false);
+              if (rolledBack) {
+                navigate("/dashboard", { replace: true });
+              }
+              return;
+            }
+          } catch {
+            // ignore — fall through to generic not-found handling
+          }
+          showError("Failed to load project");
+          setHasError(true);
+        }
+        return;
+      }
+
+      // Check for pending document upload (from Dashboard upload flow)
+      const pendingFiles = getPendingUpload(projectId);
+      if (pendingFiles && pendingFiles.length > 0 && proj.status === "created") {
+        generationStarted.current = true;
+        setPipelineRunning(true);
+        setPipelineStep(1); // "Uploading" step
+        setHasError(false);
+        try {
+          await uploadProjectDocuments(projectId, pendingFiles);
+          // Reload project (status is now SCRAPED)
+          await loadProject();
+          // Now kick off the generation pipeline (starts at script step)
+          await startGeneration(projectId);
+          startPolling();
+        } catch (err: any) {
+          showError(getErrorMessage(err, "Failed to upload documents."), {
+            variant: "pipeline",
+          });
+          setHasError(true);
+          setPipelineRunning(false);
+        }
+        return;
+      }
+
+      // Returning to a project parked at the post-generation review gate (e.g.
+      // the user closed the tab mid-review): show the review modal instead of
+      // restarting generation — deliberately NOT part of needsGeneration below.
+      if (proj.status === "awaiting_stock_footage_review") {
+        generationStarted.current = true;
+        setAwaitingStockFootageReview(true);
+        return;
+      }
+      if (proj.status === "awaiting_script_review") {
+        generationStarted.current = true;
+        setPipelineRunning(false);
+        return;
+      }
+      // Legacy: a project still parked at the OLD pre-scene-gen gate.
+      if (proj.status === "awaiting_footage") {
+        generationStarted.current = true;
+        setAwaitingFootageLegacy(true);
+        return;
+      }
+
+      const needsGeneration = ["created", "scraped", "scripted"].includes(
+        proj.status
+      );
+      if (needsGeneration) {
+        generationStarted.current = true;
+        // Do not call /generate again if a pipeline is already running on the
+        // server (e.g. user refreshed mid stock-footage prep). Restarting would
+        // re-pick clips for every scene from scratch.
+        try {
+          const st = await getPipelineStatus(projectId);
+          const d = st.data;
+          if (d.status === "awaiting_stock_footage_review") {
+            generationStarted.current = true;
+            setAwaitingStockFootageReview(true);
+            return;
+          }
+          if (d.status === "awaiting_footage") {
+            generationStarted.current = true;
+            setAwaitingFootageLegacy(true);
+            return;
+          }
+          if (d.running) {
+            setPipelineRunning(true);
+            setPipelineStep(d.step ?? 0);
+            setHasError(false);
+            startPolling();
+            return;
+          }
+        } catch {
+          // fall through to kickOffGeneration
+        }
+        kickOffGeneration();
+      }
+    };
+    init();
+    return () => {
+      stopPolling();
+      stopRenderPolling();
+    };
+  }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const kickOffGeneration = async () => {
+    setPipelineRunning(true);
+    setPipelineStep(0);
+    setHasError(false);
+    pipelineTerminalFailureHandledRef.current = false;
+
+    try {
+      await startGeneration(projectId);
+      startPolling();
+    } catch (err: any) {
+      showError(getErrorMessage(err, "Failed to start generation. Please try again or contact support, if the issue persist.")); setHasError(true);
+      setPipelineRunning(false);
+    }
+  };
+
+  const initialScriptReviewResultRef = useRef<{ project: Project; isBulk: boolean } | null>(null);
+
+  const handleApproveInitialScriptReview = async (
+    scenes: InitialScriptReviewScene[],
+    reportSaved: (learning: "queued" | "unchanged") => void,
+  ) => {
+    if (!project) return;
+    setInitialScriptReviewSaving(true);
+    try {
+      const res = await approveInitialScriptReview(project.id, scenes);
+      // Hold the result until the user dismisses the confirmation screen
+      // (handleInitialScriptReviewDone) instead of resuming on a timer.
+      initialScriptReviewResultRef.current = { project: res.data.project, isBulk: !!project.is_bulk };
+      reportSaved(res.data.preference_learning);
+    } finally {
+      setInitialScriptReviewSaving(false);
+    }
+  };
+
+  const handleInitialScriptReviewDone = () => {
+    const result = initialScriptReviewResultRef.current;
+    initialScriptReviewResultRef.current = null;
+    if (!result) return;
+    if (result.isBulk) {
+      navigate("/dashboard");
+      return;
+    }
+    setProject(result.project);
+    setPipelineRunning(true);
+    // Script review is already done at this point, so the resumed pipeline
+    // skips straight to scene generation (backend bumps _pipeline_progress
+    // to step 3 within moments). Set it optimistically here too — the UI's
+    // step index is pipelineStep - 1, so step 3 highlights "Scenes", the
+    // correct current stage, instead of showing "Script" until the first poll.
+    setPipelineStep(3);
+    startPolling();
+  };
+
+  const startPolling = () => {
+    stopPolling();
+    pipelineTerminalFailureHandledRef.current = false;
+    pollTicksRef.current = 0;
+    pollingRef.current = setInterval(async () => {
+      try {
+        // Hard ceiling on the whole poll session — see pollTicksRef. Generation
+        // is minutes, not hours, so anything past this is a stuck server-side
+        // flag rather than work still in flight. Give up loudly instead of
+        // spinning: a visible error the user can act on beats a silent loop.
+        pollTicksRef.current += 1;
+        if (pollTicksRef.current > MAX_PIPELINE_POLL_TICKS) {
+          setPipelineRunning(false);
+          stopPolling();
+          showError(
+            "We lost track of this video's progress. Reload the page — if it still looks unfinished, please try generating again.",
+          );
+          return;
+        }
+        const res = await getPipelineStatus(projectId);
+        const { step, running, error: pipelineError, status, notice } = res.data;
+        const rolledBackProject =
+          Boolean(res.data.project_removed) || status === "failed";
+        const pipelineErrMsg =
+          typeof pipelineError === "string" && pipelineError.trim()
+            ? pipelineError.trim()
+            : null;
+
+        setPipelineStep(step);
+
+        // Review gates: trust DB status even when in-memory running is stale.
+        if (status === "awaiting_script_review") {
+          setPipelineRunning(false);
+          stopPolling();
+          await loadProject({ silent404: true });
+          return;
+        }
+        if (status === "awaiting_stock_footage_review") {
+          setPipelineRunning(false);
+          stopPolling();
+          setAwaitingStockFootageReview(true);
+          await loadProject({ silent404: true });
+          return;
+        }
+        // Legacy pre-scene-gen gate.
+        if (status === "awaiting_footage") {
+          setPipelineRunning(false);
+          stopPolling();
+          setAwaitingFootageLegacy(true);
+          await loadProject({ silent404: true });
+          return;
+        }
+
+        // Terminal generation failure (scrape/script/scene rollback, or tombstone after delete).
+        // Treat `status === "failed"` like an error even if `error` is missing briefly — avoids
+        // falling through to `loadProject()` and showing a second "Failed to load project" modal.
+        if (pipelineErrMsg || rolledBackProject) {
+          if (!pipelineTerminalFailureHandledRef.current) {
+            pipelineTerminalFailureHandledRef.current = true;
+            const message =
+              pipelineErrMsg ||
+              "Something went wrong while creating your video. Please try again.";
+            console.error("Pipeline error while generating video:", message);
+            showError(message, { variant: "pipeline" });
+          }
+          setHasError(true);
+          setPipelineRunning(false);
+          stopPolling();
+          if (rolledBackProject) {
+            navigate("/dashboard", { replace: true });
+          } else {
+            try {
+              await loadProject({ silent404: true });
+            } finally {
+              pipelineTerminalFailureHandledRef.current = false;
+            }
+          }
+          return;
+        }
+
+        // Backend says pipeline is done — but verify the project status.
+        // On Cloud Run, the in-memory progress dict can be lost if a new
+        // container handles the poll.  If the project is still mid-generation,
+        // keep the loader visible and keep polling.
+        if (!running) {
+          // Parked at the post-generation review gate: stop polling and hand
+          // over to the review modal. Generation already finished — approve/
+          // change/reject just finalizes the project, no pipeline to resume.
+          if (status === "awaiting_stock_footage_review") {
+            setPipelineRunning(false);
+            stopPolling();
+            setAwaitingStockFootageReview(true);
+            await loadProject({ silent404: true });
+            return;
+          }
+          // Legacy pre-scene-gen gate: approving there resumes the pipeline.
+          if (status === "awaiting_footage") {
+            setPipelineRunning(false);
+            stopPolling();
+            setAwaitingFootageLegacy(true);
+            await loadProject({ silent404: true });
+            return;
+          }
+          const stillGenerating = ["created", "scraped", "scripted"].includes(
+            status
+          );
+          if (stillGenerating) {
+            // Progress was lost (container restart / cold start).
+            // Keep polling — the pipeline task is still running on the
+            // original instance or will be retried.
+            await loadProject({ silent404: true });
+            return;
+          }
+          setPipelineRunning(false);
+          stopPolling();
+          if (notice?.code === "video_shortened") {
+            showNotice(
+              notice.message ||
+                "We shortened the video because the scraped/uploaded content was too short for your selected length.",
+              { title: "Video shortened" }
+            );
+          }
+          await loadProject({ silent404: true });
+          // Trigger A: free user just finished their last available video → out-of-videos offer.
+          // We re-fetch the user directly because refreshUser() updates context async
+          // and the closure's `user` is still stale here.
+          try {
+            const me = await getMe();
+            await refreshUser();
+            if (me.data.plan === "free" && me.data.can_create_video === false) {
+              offer.open();
+            }
+          } catch {
+            // ignore — eligibility just won't fire this tick
+          }
+          return;
+        }
+
+        await loadProject({ silent404: true });
+      } catch {
+        // Network hiccup -- keep polling
+      }
+    }, 2000);
+  };
+
+  const stopPolling = () => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+  };
+
+  const stopRenderPolling = () => {
+    if (renderPollingRef.current) {
+      clearInterval(renderPollingRef.current);
+      clearTimeout(renderPollingRef.current);
+      renderPollingRef.current = null;
+    }
+  };
+
+  // Track highest-seen render progress so we never go backward (also persisted while rendering)
+  const renderHighWaterRef = useRef(0);
+  const renderResumeInitRef = useRef(false);
+  /** Wall time when we first saw rendered_frames > 0 (client ETA fallback only). */
+  const renderStartWallRef = useRef<number | null>(null);
+  // Monotonic ETA: once it has decreased at least once, never allow it to increase again.
+  const renderEtaLastSecRef = useRef<number | null>(null);
+  const renderEtaWentDownRef = useRef(false);
+  const lastRenderAttemptRef = useRef(1);
+  const renderKickoffPendingRef = useRef(false);
+  const renderCancelRequestedRef = useRef(false);
+  const expectedRenderRunIdRef = useRef<string | null>(null);
+  const handleRenderRef = useRef<(force: boolean, onStart?: () => void) => Promise<void>>();
+
+  const handleRender = async (
+    forceReRender = false,
+    onRenderStarted?: () => void
+  ) => {
+    if (missingCustomTemplate) {
+      onRenderStarted?.();
+      showError(
+        "You can't render this video because its custom template has been deleted."
+      );
+      setRendering(false);
+      return;
+    }
+
+    // Re-render while already rendering — skip API call, take user to status page instead
+    if (forceReRender && project?.status === "rendering") {
+      renderCancelRequestedRef.current = false;
+      renderKickoffPendingRef.current = false;
+      onRenderStarted?.();
+      setRendered(false);
+      setRendering(true);
+      setHasError(false);
+      setRenderEtaLabel(null);
+      renderEtaLastSecRef.current = null;
+      renderEtaWentDownRef.current = false;
+      const key = `render_hw_${projectId}`;
+      const hw = sessionStorage.getItem(key);
+      if (hw) {
+        const n = parseInt(hw, 10);
+        if (!Number.isNaN(n)) {
+          renderHighWaterRef.current = n;
+          setRenderProgress(n);
+        }
+      }
+      renderStartWallRef.current = null;
+      startRenderPollingLoop({ isResume: true });
+      return;
+    }
+
+    // If already rendered and available in R2, skip straight to download (unless forcing re-render)
+    if (!forceReRender && project?.r2_video_url) {
+      setRendered(true);
+      setRendering(false);
+      onRenderStarted?.();
+      return;
+    }
+
+    // Only one job per project at a time: don't start a new render while a template
+    // change / script regen / voice op is running (the server would 409 anyway). A
+    // re-render while already rendering is handled by the resume path above.
+    if (anyJobRunning && !(forceReRender && project?.status === "rendering")) {
+      onRenderStarted?.();
+      setRendering(false);
+      showError("A job is already running for this project. Please wait for it to finish.");
+      return;
+    }
+
+    // Reset render state so auto-download triggers when we flip rendered -> true again
+    renderCancelRequestedRef.current = false;
+    expectedRenderRunIdRef.current = null;
+    setRendered(false);
+    autoDownloadRef.current = false;
+    setRendering(true);
+    setRenderProgress(0);
+    setRenderFrames({ rendered: 0, total: 0 });
+    setRenderEtaLabel(null);
+    renderEtaLastSecRef.current = null;
+    renderEtaWentDownRef.current = false;
+    setHasError(false);
+    renderHighWaterRef.current = 0;
+    renderRetryCountRef.current = 0;
+    sessionStorage.removeItem(`render_hw_${projectId}`);
+    renderStartWallRef.current = null;
+    lastRenderAttemptRef.current = 1;
+
+    const startRenderAndPoll = async () => {
+      // Start polling immediately so users can see "preparing" phases while
+      // the /render call is still doing backend setup work.
+      renderKickoffPendingRef.current = true;
+      startRenderPollingLoop({ isResume: false });
+      // Close confirmation modal immediately; render startup continues in background.
+      onRenderStarted?.();
+      try {
+        console.log("rendering started")
+        const startRes = await renderVideo(projectId, forceReRender);
+        const runId = startRes?.data?.render_run_id;
+        if (runId != null && String(runId).trim()) {
+          expectedRenderRunIdRef.current = String(runId);
+        }
+        renderKickoffPendingRef.current = false;
+        // A re-render (force_render) deducts a video server-side — refresh the
+        // count so the UI doesn't show a stale videos-remaining number.
+        if (forceReRender) void refreshUser();
+      } catch (err: any) {
+        renderKickoffPendingRef.current = false;
+        const message = getErrorMessage(err, "");
+        if (
+          err?.response?.status === 409 &&
+          message.toLowerCase().includes("deleted custom template")
+        ) {
+          showError(message);
+          setHasError(true);
+          setRendering(false);
+          stopRenderPolling();
+          return;
+        }
+        // Video limit reached (403) — show upgrade modal + mention download option
+        if (err?.response?.status === 403) {
+          const baseMsg = message || "Video limit reached. Re-render counts as a video. Upgrade your plan or buy more credits to continue.";
+          const hasExisting = Boolean(project?.r2_video_url);
+          const opened = user?.plan === "free" ? offer.open() : false;
+          if (!opened) {
+            showError(baseMsg, { showUpgrade: true });
+          }
+          setHasError(true);
+          setRendering(false);
+          if (hasExisting) setRendered(true);
+          stopRenderPolling();
+          return;
+        }
+        // If this is a retry, keep going; otherwise show error
+        if (renderRetryCountRef.current >= MAX_RENDER_RETRIES) {
+          showRenderFailureError(
+            getErrorMessage(
+              err,
+              "Render failed after multiple attempts. Please try again, or contact support, if the issue persist.",
+            ),
+          );
+          setHasError(true);
+          setRendering(false);
+          return;
+        }
+      }
+    };
+
+    startRenderAndPoll();
+  };
+  handleRenderRef.current = handleRender;
+
+  const handleCancelRender = useCallback(async () => {
+    if (!projectId || cancellingRender) return;
+    try {
+      setCancellingRender(true);
+      renderCancelRequestedRef.current = true;
+      await cancelRender(projectId);
+      renderKickoffPendingRef.current = false;
+      expectedRenderRunIdRef.current = null;
+      sessionStorage.removeItem(`render_hw_${projectId}`);
+      renderHighWaterRef.current = 0;
+      stopRenderPolling();
+      setSaving(false);
+      setRenderEtaLabel("Render cancelled");
+      setHasError(false);
+      showNotice("Render cancelled.", {
+        onClose: () => {
+          setRendering(false);
+          setRenderFrames({ rendered: 0, total: 0 });
+          setRenderProgress(0);
+          renderCancelRequestedRef.current = false;
+          void loadProject();
+        },
+      });
+    } catch (err) {
+      renderCancelRequestedRef.current = false;
+      showError(getErrorMessage(err, "Failed to cancel render."));
+    } finally {
+      setCancellingRender(false);
+    }
+  }, [projectId, cancellingRender, loadProject, showNotice, showError]);
+
+  /** Start polling render status. When isResume=true, we're resuming (no retry on error). */
+  const startRenderPollingLoop = useCallback(
+    (opts?: { isResume?: boolean }) => {
+      const isResume = opts?.isResume ?? false;
+      const poll = async () => {
+        try {
+          const status = await getRenderStatus(projectId);
+          const {
+            progress,
+            rendered_frames,
+            total_frames,
+            done,
+            error: renderErr,
+            time_remaining: timeRemaining,
+            eta_seconds: etaSecondsApi,
+            progress_unknown: progressUnknown,
+            render_attempt: renderAttempt,
+            render_run_id: renderRunId,
+          } = status.data;
+
+          if (
+            renderKickoffPendingRef.current &&
+            (done || Boolean(renderErr) || progress > 0 || rendered_frames > 0)
+          ) {
+            // Ignore terminal/progress-bearing stale snapshots while /render is still in-flight.
+            return;
+          }
+
+          const expectedRunId = expectedRenderRunIdRef.current;
+          if (expectedRunId) {
+            const incomingRunId =
+              renderRunId != null && String(renderRunId).trim()
+                ? String(renderRunId)
+                : null;
+            const hasTerminalOrProgressSignal =
+              Boolean(done) ||
+              Boolean(renderErr) ||
+              (Number(progress) > 0) ||
+              (Number(rendered_frames) > 0);
+            if (incomingRunId && incomingRunId !== expectedRunId) {
+              return; // stale snapshot from an older run
+            }
+            if (!incomingRunId && hasTerminalOrProgressSignal) {
+              return; // legacy/stale payload without run id while waiting for current run
+            }
+          }
+
+          // During re-render kickoff, ignore stale "done=100%" snapshots from
+          // the previous render until /render acknowledges the new run.
+          if (renderKickoffPendingRef.current && done && !renderErr) {
+            return;
+          }
+
+          const attempt = renderAttempt ?? 1;
+          if (attempt > lastRenderAttemptRef.current) {
+            lastRenderAttemptRef.current = attempt;
+            renderHighWaterRef.current = 0;
+            setRenderProgress(0);
+            setRenderFrames({ rendered: 0, total: 0 });
+            sessionStorage.removeItem(`render_hw_${projectId}`);
+            renderStartWallRef.current = null;
+            renderEtaLastSecRef.current = null;
+            renderEtaWentDownRef.current = false;
+          }
+
+          if (rendered_frames > 0 && renderStartWallRef.current === null) {
+            renderStartWallRef.current = Date.now();
+          }
+
+          // Frames are the more reliable signal: some snapshots carry a frame
+          // count with progress still at 0, which left the bar at 0% while
+          // "Frame 863 of 1,464" ticked up beside it. Derive the percentage
+          // from the frames in that case and take whichever is further along.
+          const framePct =
+            total_frames > 0
+              ? Math.round((rendered_frames / total_frames) * 100)
+              : 0;
+          const effectiveProgress = Math.max(progress || 0, framePct);
+          if (effectiveProgress >= renderHighWaterRef.current) {
+            renderHighWaterRef.current = effectiveProgress;
+            setRenderProgress(effectiveProgress);
+            if (effectiveProgress > 0) {
+              sessionStorage.setItem(
+                `render_hw_${projectId}`,
+                String(effectiveProgress),
+              );
+            }
+          }
+          if (rendered_frames > 0) {
+            setRenderFrames({ rendered: rendered_frames, total: total_frames });
+          }
+
+          const hasStartupStatus =
+            !done &&
+            !renderErr &&
+            rendered_frames === 0 &&
+            total_frames === 0 &&
+            progress === 0 &&
+            typeof timeRemaining === "string" &&
+            timeRemaining.trim().length > 0;
+          if (!done && !renderErr && rendered_frames === 0 && total_frames === 0 && progress === 0) {
+            const prep = hasStartupStatus ? timeRemaining.trim() : "Preparing render...";
+            setRenderEtaLabel(prep);
+          }
+
+          // ETA: server uses seconds/frame from consecutive lines (linear in work left).
+          // Fallback: (remaining_frames / rendered_frames) × elapsed since first frame — not %, which mixed startup into elapsed.
+          if (!progressUnknown || progress > 0 || rendered_frames > 0) {
+            if (
+              etaSecondsApi != null &&
+              Number.isFinite(etaSecondsApi) &&
+              etaSecondsApi >= 1
+            ) {
+              let nextSec = etaSecondsApi;
+              const lastSec = renderEtaLastSecRef.current;
+              if (lastSec != null) {
+                if (nextSec < lastSec) renderEtaWentDownRef.current = true;
+                if (renderEtaWentDownRef.current && nextSec > lastSec) {
+                  nextSec = lastSec;
+                }
+              }
+              renderEtaLastSecRef.current = nextSec;
+              setRenderEtaLabel(formatEtaSecondsRounded(nextSec));
+            } else if (
+              rendered_frames > 0 &&
+              total_frames > 0 &&
+              rendered_frames < total_frames &&
+              renderStartWallRef.current != null
+            ) {
+              const elapsed = (Date.now() - renderStartWallRef.current) / 1000;
+              const rawEta =
+                (elapsed * (total_frames - rendered_frames)) / rendered_frames;
+              if (Number.isFinite(rawEta) && rawEta >= 1) {
+                let nextSec = rawEta;
+                const lastSec = renderEtaLastSecRef.current;
+                if (lastSec != null) {
+                  if (nextSec < lastSec) renderEtaWentDownRef.current = true;
+                  if (renderEtaWentDownRef.current && nextSec > lastSec) {
+                    nextSec = lastSec;
+                  }
+                }
+                renderEtaLastSecRef.current = nextSec;
+                setRenderEtaLabel(formatEtaSecondsRounded(nextSec));
+              } else {
+                // Avoid showing a misleading early "0s".
+                setRenderEtaLabel(null);
+              }
+            } else if (progress >= 100) {
+              setRenderEtaLabel("Almost done");
+            } else if (
+              progress >= 100 ||
+              (total_frames > 0 && rendered_frames >= total_frames)
+            ) {
+              setRenderEtaLabel("Almost done");
+            } else if (total_frames === 0 && progress === 0) {
+              // Keep explicit backend startup phase text (e.g. "Preparing workspace...").
+              if (!hasStartupStatus) setRenderEtaLabel(null);
+            } else {
+              // No meaningful ETA yet; don't keep an old "0s" value.
+              if (progress > 0 || rendered_frames > 0) setRenderEtaLabel(null);
+            }
+          }
+
+          if (renderErr) {
+            const msg =
+              typeof renderErr === "string" && renderErr.trim()
+                ? renderErr
+                : "Render failed after multiple attempts. Please try re-rendering.";
+            if (
+              renderKickoffPendingRef.current &&
+              /cancel|cancelled|canceled|no longer rendering|project was deleted/i.test(msg)
+            ) {
+              return;
+            }
+            const isExpectedCancel =
+              renderCancelRequestedRef.current &&
+              /cancel|cancelled|canceled|no longer rendering|project was deleted/i.test(msg);
+            if (isExpectedCancel) {
+              stopRenderPolling();
+              setRendering(false);
+              setSaving(false);
+              setHasError(false);
+              return;
+            }
+            showRenderFailureError(msg);
+            setHasError(true);
+            setRendering(false);
+            stopRenderPolling();
+            return;
+          }
+
+          const allFramesRendered =
+            progress >= 100 && total_frames > 0 && rendered_frames >= total_frames;
+
+          if (done || allFramesRendered) {
+            setRenderProgress(100);
+            stopRenderPolling();
+            setRendering(false);
+            setSaving(true);
+
+            const maxWait = 120;
+            for (let i = 0; i < maxWait; i++) {
+              await new Promise((r) => setTimeout(r, 2000));
+              const [statusRes, fresh] = await Promise.all([
+                getRenderStatus(projectId),
+                loadProject(),
+              ]);
+              const renderDone = statusRes?.data?.done === true && !statusRes?.data?.error;
+              const hasVideoUrl = Boolean(fresh?.r2_video_url);
+              const localDone = fresh?.status === "done" && !fresh?.r2_video_url && i >= 2;
+              if (renderDone && (hasVideoUrl || localDone)) break;
+            }
+
+            setSaving(false);
+            setRendered(true);
+            autoDownloadRef.current = true;
+            const freshProject = await loadProject();
+            const directUrl = freshProject?.r2_video_url;
+            if (directUrl) {
+              window.open(directUrl, "_blank", "noopener,noreferrer");
+            }
+          }
+        } catch {
+          /* keep polling */
+        }
+      };
+
+      stopRenderPolling();
+      const pollStartedAt = Date.now();
+      let currentIntervalMs = 2000;
+
+      const schedule = () => {
+        renderPollingRef.current = setTimeout(async () => {
+          await poll();
+          const stillInWarmup = Date.now() - pollStartedAt < 60000;
+          const desiredMs = stillInWarmup ? 2000 : 10000;
+          currentIntervalMs = desiredMs;
+          if (renderPollingRef.current) schedule();
+        }, currentIntervalMs);
+      };
+
+      poll(); // immediate first poll
+      schedule();
+    },
+    [projectId, showRenderFailureError]
+  );
+
+  // ─── Social publishing ───────────────────────────────────
+
+  // What this deployment offers. Fetched once; decides whether the Share menu
+  // shows the publish options at all.
+  useEffect(() => {
+    let cancelled = false;
+    getIntegrationsConfig()
+      .then((res) => {
+        if (!cancelled) setIntegrationsConfig(res.data);
+      })
+      .catch(() => {
+        // Publishing simply isn't offered if we can't ask.
+        if (!cancelled) setIntegrationsConfig(INTEGRATIONS_DISABLED);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * Platforms this server offers, in menu order.
+   *
+   * Derived rather than hand-written: the old code had a `(youtube_enabled ||
+   * x_enabled)` gate wrapping per-platform buttons, so adding a platform meant
+   * remembering to widen the disjunction too — and forgetting would hide the new
+   * platform whenever it was the only one enabled.
+   */
+  const enabledPublishPlatforms = useMemo<SocialPlatform[]>(() => {
+    if (!integrationsConfig) return [];
+    const order: [SocialPlatform, boolean][] = [
+      ["youtube", integrationsConfig.youtube_enabled],
+      ["x", integrationsConfig.x_enabled],
+      ["linkedin", integrationsConfig.linkedin_enabled],
+    ];
+    return order.filter(([, on]) => on).map(([platform]) => platform);
+  }, [integrationsConfig]);
+
+  /**
+   * Bumped whenever a publish is started or retried, to restart the polling
+   * effect at its fast cadence. Without it a brand-new job would wait out the
+   * idle delay before the UI acknowledged it.
+   */
+  const [publishPollNonce, setPublishPollNonce] = useState(0);
+
+  /**
+   * Jobs the banner has finished showing.
+   *
+   * A succeeded job stays succeeded forever, so "hidden after 3s" has to be
+   * remembered here — otherwise the next poll tick brings the banner straight
+   * back.
+   */
+  const [dismissedPublishJobIds, setDismissedPublishJobIds] = useState<Set<number>>(
+    () => new Set()
+  );
+  const dismissPublishJob = useCallback((jobId: number) => {
+    setDismissedPublishJobIds((prev) => new Set(prev).add(jobId));
+  }, []);
+
+  /**
+   * Whether the "what was already finished when we arrived" baseline has been
+   * taken for the project currently open.
+   *
+   * publish-status returns the last 20 jobs whatever their age, and a terminal
+   * job keeps its status forever, so without a baseline every visit to a
+   * previously-published project opens on a green "Published to X" banner for
+   * an upload that finished days ago. The banner reports what happened while
+   * you were watching, so jobs that were ALREADY terminal on the first poll are
+   * pre-dismissed as history.
+   *
+   * A ref rather than state: the poll effect re-runs on every publishPollNonce
+   * bump, and this must be taken once per project, not once per effect run.
+   */
+  const publishBaselineTakenRef = useRef(false);
+
+  /**
+   * Pre-dismiss jobs that were already finished before this page saw them.
+   *
+   * Only the first poll of a project seeds. Seeding on later ticks would
+   * immediately hide the success banner of a job that completed in front of the
+   * user — the exact arc this banner exists to show. An upload still in flight
+   * on arrival is deliberately NOT seeded, so it keeps its progress bar and
+   * then its green tick when it lands.
+   */
+  const seedDismissedPublishJobs = useCallback((jobs: PublishJob[]) => {
+    if (publishBaselineTakenRef.current) return;
+    publishBaselineTakenRef.current = true;
+    const alreadyFinished = jobs.filter((job) => !isPublishJobActive(job));
+    if (alreadyFinished.length === 0) return;
+    setDismissedPublishJobIds((prev) => {
+      const next = new Set(prev);
+      for (const job of alreadyFinished) next.add(job.id);
+      return next;
+    });
+  }, []);
+
+  // Switching projects within the SPA must retake the baseline, or the second
+  // project inherits the first's "already seeded" flag and shows a stale banner.
+  useEffect(() => {
+    publishBaselineTakenRef.current = false;
+    setDismissedPublishJobIds(new Set());
+  }, [projectId]);
+
+  const refreshPublishJobs = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const res = await getPublishStatus(Number(projectId));
+      setPublishJobs(res.data.jobs);
+    } catch {
+      /* non-fatal: the pill and modal just won't update this tick */
+    } finally {
+      setPublishPollNonce((n) => n + 1);
+    }
+  }, [projectId]);
+
+  // Poll publish status. Lives here rather than in the modal, so closing the
+  // modal doesn't stop tracking — a publish started before a render can outlive
+  // several page visits.
+  //
+  // The loop NEVER stops while the project is open, it only slows down. An
+  // earlier version stopped as soon as nothing was active, which meant the very
+  // common case — open a project, then publish — polled once against an empty
+  // list, stopped forever, and never saw the job that was created a moment
+  // later. Both the modal and the banner then sat frozen on their last known
+  // state while the upload actually ran to completion server-side.
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const tick = async () => {
+      if (cancelled) return;
+      let delay = PUBLISH_POLL_IDLE_MS;
+      try {
+        const res = await getPublishStatus(Number(projectId));
+        if (cancelled) return;
+        // Before publishing the jobs, so the banner never renders a frame with
+        // a stale terminal job that is about to be seeded away.
+        seedDismissedPublishJobs(res.data.jobs);
+        setPublishJobs(res.data.jobs);
+        if (res.data.jobs.some(isPublishJobActive)) delay = PUBLISH_POLL_ACTIVE_MS;
+      } catch {
+        delay = PUBLISH_POLL_ERROR_MS;
+      }
+      if (!cancelled) timer = window.setTimeout(tick, delay);
+    };
+
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [projectId, publishPollNonce, seedDismissedPublishJobs]);
+
+  /** The most recent job per platform — what the modal and the pill display. */
+  const latestPublishJobByPlatform = useMemo(() => {
+    const map = new Map<SocialPlatform, PublishJob>();
+    // An in-flight job always wins over a finished one, independently of list
+    // order. Ordering alone is not enough: re-uploading moments after a publish
+    // can produce two rows with the same created_at, and picking the wrong one
+    // shows "your video is on YouTube" while the new upload runs invisibly.
+    for (const job of publishJobs) {
+      const current = map.get(job.platform);
+      if (!current) {
+        map.set(job.platform, job);
+      } else if (isPublishJobActive(job) && !isPublishJobActive(current)) {
+        map.set(job.platform, job);
+      }
+    }
+    return map;
+  }, [publishJobs]);
+
+  const activePublishJob = useMemo(
+    () => publishJobs.find(isPublishJobActive) || null,
+    [publishJobs]
+  );
+
+  /** The single job the banner should show, if any. */
+  const visiblePublishJob = useMemo(() => {
+    const undismissed = publishJobs.filter(
+      (job) => !dismissedPublishJobIds.has(job.id)
+    );
+    // An upload in flight always wins. Ordering is newest-first, so without
+    // this a just-finished job would keep the banner while a fresh re-upload
+    // ran invisibly behind it.
+    return (
+      undismissed.find(
+        (job) => job.status === "queued" || job.status === "running"
+      ) ??
+      undismissed.find(
+        (job) => job.status === "succeeded" || job.status === "failed"
+      ) ??
+      null
+    );
+  }, [publishJobs, dismissedPublishJobIds]);
+
+  /** Platforms this project has already been published to at least once. */
+  const publishedPlatforms = useMemo(
+    () =>
+      new Set(
+        publishJobs
+          .filter((job) => job.status === "succeeded")
+          .map((job) => job.platform)
+      ),
+    [publishJobs]
+  );
+
+  const handleRetryPublish = useCallback(async () => {
+    if (!visiblePublishJob || !projectId) return;
+    try {
+      await retryPublishJob(Number(projectId), visiblePublishJob.id);
+      await refreshPublishJobs();
+    } catch (err) {
+      showError(getErrorMessage(err, DEFAULT_ERROR_MESSAGE));
+    }
+  }, [visiblePublishJob, projectId, refreshPublishJobs, showError]);
+
+  // Resume render progress after refresh/navigation when the project is still rendering
+  useEffect(() => {
+    renderResumeInitRef.current = false;
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!project || project.status !== "rendering" || project.r2_video_url) return;
+    if (renderPollingRef.current) return;
+    if (renderResumeInitRef.current) return;
+    renderResumeInitRef.current = true;
+    const key = `render_hw_${projectId}`;
+    const hw = sessionStorage.getItem(key);
+    if (hw) {
+      const n = parseInt(hw, 10);
+      if (!Number.isNaN(n)) {
+        renderHighWaterRef.current = Math.max(renderHighWaterRef.current, n);
+        setRenderProgress(renderHighWaterRef.current);
+      }
+    }
+    renderStartWallRef.current = null;
+    setRendering(true);
+    setRenderEtaLabel(null);
+    renderEtaLastSecRef.current = null;
+    renderEtaWentDownRef.current = false;
+    startRenderPollingLoop({ isResume: true });
+  }, [projectId, project?.status, project?.r2_video_url, startRenderPollingLoop]);
+
+  const handleDownload = async () => {
+    if (!project || !project.r2_video_url) {
+      showError("Video URL not found. Please wait for rendering to finish.");
+      return;
+    }
+
+    setDownloading(true);
+    setHasError(false);
+
+    try {
+      // 1. Generate the filename
+      const safeName = project.name?.replace(/\s+/g, "_").slice(0, 50) || "video";
+      
+      // 2. Use the R2 URL from your project object
+      // We add a timestamp to ensure the browser doesn't serve a cached old version
+      const cacheBuster = `?v=${new Date(project.updated_at).getTime()}`;
+      const finalUrl = project.r2_video_url + cacheBuster;
+
+      // 3. Trigger a Native Browser Download
+      // This bypasses Axios/Fetch and avoids the "Network Error" CORS block
+      const link = document.createElement("a");
+      link.href = finalUrl;
+      link.setAttribute("download", `${safeName}.mp4`);
+      
+      // For cross-origin downloads to work correctly with the 'download' attribute,
+      // the R2 bucket must have the correct CORS headers (see below).
+      link.target = "_blank"; 
+      
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      setDownloading(false);
+    } catch (err: any) {
+      console.error("Download trigger failed:", err);
+      showError("Could not start download. Try right-clicking the video and 'Save As'.");
+      setHasError(true);
+      setDownloading(false);
+    }
+  };
+
+  const openSlideExportWizard = useCallback(
+    (format: "pptx" | "pdf" | "zip") => {
+      if (!project?.scenes?.length) return;
+      if (missingCustomTemplate) {
+        showError("This project cannot export slides because its custom template is missing.");
+        return;
+      }
+      if (!previewPlayerRef.current) {
+        showError("Wait until the preview has finished loading, then try again.");
+        return;
+      }
+      setShowSlidesExportMenu(false);
+      const defaultFractions = project.scenes.map(() => SCENE_EXPORT_TIMELINE_FRACTION);
+      setSlideExportWizard({
+        format,
+        fractions: defaultFractions,
+        stepIndex: 0,
+      });
+    },
+    [project, missingCustomTemplate, showError]
+  );
+
+  const runSlideExportWithFractions = useCallback(
+    async (format: "pptx" | "pdf" | "zip", fractions: number[]) => {
+      if (!project) return;
+      // Slides are rendered by Remotion on the backend, so this no longer depends
+      // on the preview player being mounted or parked on a particular frame — the
+      // wizard only supplies the per-scene frame fractions.
+      setSceneExporting(true);
+      setSceneExportProgress({ completed: 0, total: project.scenes.length });
+      // Server-side rendering means the preview no longer seeks scene-by-scene on
+      // its own, which used to be the de-facto progress indicator. Drive the wizard
+      // to the scene being rendered so the user still watches it advance.
+      const onProgress: ExportProgress = ({ completed, total, title }) => {
+        setSceneExportProgress({ completed, total, title });
+        if (title !== undefined) {
+          setSlideExportWizard((prev) =>
+            prev && prev.stepIndex !== completed ? { ...prev, stepIndex: completed } : prev
+          );
+        }
+      };
+      try {
+        if (format === "pptx") await exportScenesPptx(project, fractions, onProgress);
+        else if (format === "pdf") await exportScenesPdf(project, fractions, onProgress);
+        else await exportScenesPng(project, fractions, onProgress);
+      } catch (err) {
+        showError(getErrorMessage(err, "Could not export scenes."));
+      } finally {
+        setSceneExporting(false);
+        setSceneExportProgress(null);
+        setSlideExportWizard(null);
+      }
+    },
+    [project, showError]
+  );
+
+  useEffect(() => {
+    if (slideExportWizard && !slideExportWizardPrevRef.current) {
+      queueMicrotask(() => {
+        videoPreviewContainerRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+    }
+    slideExportWizardPrevRef.current = slideExportWizard;
+  }, [slideExportWizard]);
+
+  // No capture effect needed — modal uses a live VideoPreview with initialFrame.
+
+  const handleGetEmbedLink = async () => {
+    if (!project) return;
+    setEmbedLoading(true);
+    setShowShareDropdown(false);
+    try {
+      const res = await generateEmbedToken(project.id);
+      setEmbedToken(res.data.embed_token);
+      setShowEmbedModal(true);
+    } catch {
+      showError("Could not generate embed link. Please try again.");
+    } finally {
+      setEmbedLoading(false);
+    }
+  };
+
+  const handleCopyPreviewLink = async () => {
+    if (!project) return;
+    setShowShareDropdown(false);
+    setEmbedLoading(true);
+    try {
+      const res = await generateEmbedToken(project.id);
+      const previewUrl = `${import.meta.env.VITE_APP_URL || window.location.origin}/preview/${res.data.embed_token}`;
+      setPreviewLinkUrl(previewUrl);
+      setPreviewLinkCopied(false);
+      setShowPreviewLinkModal(true);
+    } catch {
+      showError("Could not generate preview link. Please try again.");
+    } finally {
+      setEmbedLoading(false);
+    }
+  };
+
+  const handleCopyDownloadLink = async () => {
+    try {
+      if (!project?.r2_video_url) {
+        setCopyStatus("error");
+        return;
+      }
+
+      await navigator.clipboard.writeText(project.r2_video_url);
+      setCopyStatus("success");
+
+      setTimeout(() => {
+        setCopyStatus("idle");
+      }, 2500);
+    } catch (err) {
+      console.error("Copy failed", err);
+      setCopyStatus("error");
+
+      setTimeout(() => {
+        setCopyStatus("idle");
+      }, 2500);
+    }
+  };
+
+  const handleOpenStudio = async () => {
+    if (!project) return;
+    setDownloadingStudio(true);
+    setHasError(false);
+    try {
+      const res = await launchStudio(projectId);
+      const url = res.data.studio_url;
+      if (url) {
+        window.open(url, "_blank");
+      }
+    } catch (err: any) {
+      if (err?.response?.status === 403) {
+        setShowUpgrade(true);
+      } else {
+        showError(getErrorMessage(err, "Failed to launch Studio.")); setHasError(true);
+      }
+    } finally {
+      setDownloadingStudio(false);
+    }
+  };
+
+  const handleDownloadStudio = async () => {
+    if (!project) return;
+    setDownloadingStudio(true);
+    try {
+      const safeName =
+        project.name?.replace(/\s+/g, "_").slice(0, 50) || "project";
+      await downloadStudioZip(projectId, `${safeName}_studio.zip`);
+    } catch (err: any) {
+      if (err?.response?.status === 403) {
+        setShowUpgrade(true);
+      } else {
+        showError(getErrorMessage(err, "Studio download failed.")); setHasError(true);
+      }
+    } finally {
+      setDownloadingStudio(false);
+    }
+  };
+
+  const handleRequestDeleteBlogImage = (asset: { id: number; filename: string }) => {
+    if (!project) return;
+    setImageAssetDeletePending({ id: asset.id, filename: asset.filename });
+  };
+
+  const handleConfirmDeleteBlogImage = async () => {
+    if (!project || !imageAssetDeletePending) return;
+    const id = imageAssetDeletePending.id;
+    setDeletingImageAssetId(id);
+    try {
+      await deleteAsset(project.id, id);
+      setImageAssetDeletePending(null);
+      await loadProject();
+    } catch (err) {
+      showError(getErrorMessage(err, "Failed to delete image."));
+    } finally {
+      setDeletingImageAssetId(null);
+    }
+  };
+
+  const applyTemplateRelayout = async () => {
+    if (!project || !templateRelayoutPendingId) return;
+    const targetId = templateRelayoutPendingId;
+    setSubmittingTemplateRelayout(true);
+    try {
+      const res = await changeProjectTemplateRegenerateLayouts(project.id, targetId);
+      setTemplateRelayoutJob(res.data);
+      startTemplateRelayoutPolling();
+      // The job start consumed a video server-side — refresh so the count isn't stale.
+      void refreshUser();
+    } catch (err) {
+      const status = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { status?: number } }).response?.status
+        : undefined;
+      // 403 = the payer's video limit is exhausted — a quota wall, not a failure.
+      // Show the soft "Oops" warning, matching the voice/language change flows.
+      showError(
+        getErrorMessage(err, "Failed to start template relayout."),
+        status === 403 ? { variant: "warning" } : undefined
+      );
+    } finally {
+      setSubmittingTemplateRelayout(false);
+    }
+  };
+
+  const applyRegenerateScript = async (instruction: string) => {
+    if (!project) return;
+    try {
+      const res = await regenerateScript(project.id, { user_instruction: instruction });
+      regenerateScriptProceededRef.current = false; // fresh run — the verify pause is expected
+      regenerateScriptPreviewLoadedRef.current = false; // reload the preview when the new review is reached
+      setRegenerateScriptJob(res.data);
+      startRegenerateScriptPolling();
+      // The job start consumed a video server-side — refresh so the count isn't stale.
+      void refreshUser();
+    } catch (err) {
+      const status = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { status?: number } }).response?.status
+        : undefined;
+      // 422 = out-of-context instruction; the modal already shows it inline, so don't also toast it.
+      if (status !== 422) {
+        // 403 = video limit exhausted — show the soft "Oops" warning, matching the
+        // voice/language/template change flows.
+        showError(
+          getErrorMessage(err, "Failed to start script regeneration."),
+          status === 403 ? { variant: "warning" } : undefined
+        );
+      }
+      throw err; // let the modal surface the error inline
+    }
+  };
+
+  // Verify step — "Proceed": approve the regenerated script and resume scene generation.
+  const handleVerifyRegenerateScript = async () => {
+    if (!project) return;
+    setRegenerateScriptVerifying(true);
+    regenerateScriptProceededRef.current = true; // ignore stale "awaiting_review" reads from now on
+    try {
+      const res = await verifyRegenerateScript(project.id);
+      setRegenerateScriptJob(res.data);
+      startRegenerateScriptPolling();
+    } catch (err) {
+      showError(getErrorMessage(err, "Failed to continue script generation."));
+    } finally {
+      setRegenerateScriptVerifying(false);
+    }
+  };
+
+  // Verify step — "Regenerate" (modal confirm): discard and re-run stage A with the
+  // (optionally edited) instruction. No credit is charged for re-runs.
+  const applyRejectRegenerateScript = async (instruction: string) => {
+    if (!project) return;
+    try {
+      const res = await rejectRegenerateScript(project.id, { user_instruction: instruction });
+      regenerateScriptProceededRef.current = false; // re-run reaches the verify pause again
+      regenerateScriptPreviewLoadedRef.current = false; // reload the preview when the new review is reached
+      setRegenerateScriptJob(res.data);
+      startRegenerateScriptPolling();
+    } catch (err) {
+      const status = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { status?: number } }).response?.status
+        : undefined;
+      // 422 = out-of-context instruction; the modal already shows it inline, so don't also toast it.
+      if (status !== 422) {
+        showError(getErrorMessage(err, "Failed to regenerate the script."));
+      }
+      throw err; // let the modal surface the error inline
+    }
+  };
+
+  const assignedTemplateId = project?.template || "default";
+  const readyCustomForPicker = customTemplatesList.filter((ct) => !!ct.intro_code);
+  const readyCraftedForPicker = (craftedTemplates || []).filter((ct: CraftedTemplateItem) => !!ct.theme);
+
+  useEffect(() => {
+    imageAdjustFocusRef.current = { x: imageAdjustFocusX, y: imageAdjustFocusY };
+  }, [imageAdjustFocusX, imageAdjustFocusY]);
+
+  useEffect(() => {
+    if (!isAdjustDragging || !imageAdjustSceneId || !imageAdjustSrc) return;
+    const pan = imageAdjustPanRef.current;
+    if (!pan) return;
+
+    const clamp = (v: number) => Math.max(0, Math.min(100, v));
+
+    const applyPan = (clientX: number, clientY: number) => {
+      const el = imageAdjustPreviewRef.current;
+      if (!el || !imageAdjustPanRef.current) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const { startX, startY, startFx, startFy } = imageAdjustPanRef.current;
+      const dxPct = ((clientX - startX) / rect.width) * 100;
+      const dyPct = ((clientY - startY) / rect.height) * 100;
+      setImageAdjustFocusX(clamp(startFx - dxPct));
+      setImageAdjustFocusY(clamp(startFy - dyPct));
+    };
+
+    const onMouseMove = (e: MouseEvent) => applyPan(e.clientX, e.clientY);
+    const onTouchMove = (e: TouchEvent) => {
+      const touch = e.touches[0];
+      if (!touch) return;
+      e.preventDefault();
+      applyPan(touch.clientX, touch.clientY);
+    };
+    const endPan = () => {
+      setIsAdjustDragging(false);
+      imageAdjustPanRef.current = null;
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("mouseup", endPan);
+    window.addEventListener("touchend", endPan);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("mouseup", endPan);
+      window.removeEventListener("touchend", endPan);
+    };
+  }, [isAdjustDragging, imageAdjustSceneId, imageAdjustSrc]);
+
+  useLayoutEffect(() => {
+    if (imageAdjustSceneId === null || !imageAdjustSrc) return;
+    const el = imageAdjustPreviewRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const delta = e.deltaY;
+      setImageAdjustZoom((z) => {
+        const factor = delta > 0 ? 0.97 : 1.03;
+        const next = Math.min(
+          IMAGE_ADJUST_ZOOM_MAX,
+          Math.max(IMAGE_ADJUST_ZOOM_MIN, z * factor)
+        );
+        return Math.round(next * 100) / 100;
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [imageAdjustSceneId, imageAdjustSrc]);
+
+  // The preview + trim bar can push the zoom slider and crop controls below
+  // the fold, and users kept missing them starting scrolled to the top. Open
+  // scrolled to the bottom (controls visible first) — users can still scroll
+  // up to see the full framing preview. The image/video hasn't finished
+  // loading (and the crop overlay hasn't measured its natural size) on first
+  // paint, so content height keeps changing for a moment — a ResizeObserver
+  // re-pins to bottom through those changes instead of a single one-shot
+  // scroll that lands before layout has settled. Only auto-pins while the
+  // user hasn't scrolled away from the bottom themselves.
+  useEffect(() => {
+    if (imageAdjustSceneId === null || !imageAdjustSrc) return;
+    const el = imageAdjustScrollRef.current;
+    if (!el) return;
+    let pinned = true;
+    const SCROLL_BOTTOM_SLOP = 4;
+    const onScroll = () => {
+      pinned = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_SLOP;
+    };
+    const pinToBottom = () => {
+      if (pinned) el.scrollTop = el.scrollHeight;
+    };
+    pinToBottom();
+    el.addEventListener("scroll", onScroll, { passive: true });
+    const ro = new ResizeObserver(pinToBottom);
+    // Observe the CONTENT, not just the scroll port: the port is `flex-1` so its
+    // own box never changes size, and observing only it fires once at mount —
+    // before the stage/filmstrip/video have laid out. The inner wrapper is what
+    // actually grows, and that growth is what needs a re-pin.
+    ro.observe(el);
+    for (const child of Array.from(el.children)) ro.observe(child);
+    // Media loading in doesn't always resize a box (e.g. a fixed-ratio stage
+    // swapping in its poster frame), so re-pin across a few frames too.
+    const raf1 = requestAnimationFrame(pinToBottom);
+    const raf2 = requestAnimationFrame(() => requestAnimationFrame(pinToBottom));
+    const timer = window.setTimeout(pinToBottom, 250);
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      ro.disconnect();
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      window.clearTimeout(timer);
+    };
+  }, [imageAdjustSceneId, imageAdjustSrc]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <div className="w-6 h-6 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!project) {
+    return (
+      <div className="text-center py-24 text-gray-400 text-sm">
+        Project not found.
+      </div>
+    );
+  }
+
+  const openCraftCustomTemplateFromProjectSettings = () => {
+    // Creation is open to all plans; the dashboard creator enforces the per-plan
+    // template-creation cap (1 free + purchased slots) via can_create_custom_template.
+    const style = normalizeVideoStyle(project.video_style);
+    setShowTemplateChangeModal(false);
+    const params = new URLSearchParams();
+    params.set("tab", "templates");
+    params.set("openCustomCreator", "1");
+    params.set("videoStyle", style);
+    navigate(`/dashboard?${params.toString()}`);
+  };
+
+  const tabs: ProjectTabItem[] = [
+    {
+      id: "scenes",
+      label: "Edit Scenes",
+      icon: (
+        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+        </svg>
+      ),
+    },
+    { id: "script", label: "Script" },
+    { id: "images", label: "Images" },
+    ...(project.voice_gender !== "none" ||
+    project.bgm_track_id ||
+    project.scenes.some((s) => s.voiceover_path) ||
+    pendingRecordings.size > 0
+      ? [{ id: "audio" as Tab, label: "Audio" }]
+      : []),
+    // Always shown, unlike the Audio gate above: this is the only entry point to
+    // the avatar feature, so hiding it until an avatar exists would leave the user
+    // no way to discover it. The card itself explains what to do when empty.
+    { id: "avatar", label: "Avatar", badge: "BETA" },
+    { id: "settings", label: "Settings" },
+  ];
+
+  // Includes the post-generation review status so the preview/scenes area
+  // renders underneath the review modal instead of a loading spinner — the
+  // scenes + remotion data are fully written by the time the project reaches
+  // that status, same as GENERATED.
+  const pipelineComplete = [
+    "generated",
+    "rendering",
+    "done",
+    "awaiting_stock_footage_review",
+  ].includes(project.status);
+  const showInlineReviewPrompt = Boolean(
+    isProjectOwner &&
+    !inlineReviewSubmitted &&
+    !reviewState?.has_review_for_project &&
+    (
+      reviewState?.should_show_inline ||
+      (isFirstProject && firstProjectPopupDismissed)
+    )
+  );
+
+  // ─── Distribute blog images across scenes (match VideoPreview logic) ────────────────
+  const imageAssets = project.assets.filter((a) => a.asset_type === "image");
+  const activeImageAssets = imageAssets
+    .filter((a) => !a.excluded)
+    .slice()
+    .sort((a, b) => {
+      const ad = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const bd = b.created_at ? new Date(b.created_at).getTime() : 0;
+      if (ad !== bd) return ad - bd;
+      return (a.id ?? 0) - (b.id ?? 0);
+    });
+  // Stock-footage clips live alongside images in the media lists (Images tab and
+  // the "existing media" picker) so a clip can be reused across scenes exactly
+  // like a scraped image. Deliberately NOT merged into activeImageAssets, which
+  // drives scene image auto-assignment — a clip must never be auto-assigned.
+  const videoAssets = project.assets.filter((a) => a.asset_type === "video");
+  const activeVideoAssets = videoAssets.filter((a) => !a.excluded);
+
+  /** Images + clips, newest-last, for the media grid and reuse picker. */
+  const mediaAssets = [...imageAssets, ...videoAssets].sort((a, b) => {
+    const ad = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const bd = b.created_at ? new Date(b.created_at).getTime() : 0;
+    if (ad !== bd) return ad - bd;
+    return (a.id ?? 0) - (b.id ?? 0);
+  });
+
+  // Any clip already in this project can be re-used for free.
+  const hasReusableClips = mediaAssets.some((a) => a.asset_type === "video");
+  const scrapedImageOptions = mediaAssets
+    .filter((asset) =>
+      existingPickerKind === "video"
+        ? asset.asset_type === "video"
+        : asset.asset_type !== "video",
+    )
+    .map((asset) => ({
+      asset,
+      url: resolveAssetUrl(asset, project.id),
+    }));
+  const sceneImageMap: Record<number, string[]> = {};
+  const sceneImageAssetsMap: Record<number, SceneImageItem[]> = {};
+  const hideImageFlags: boolean[] = new Array(project.scenes.length).fill(false);
+  if (project.scenes.length > 0 && activeImageAssets.length > 0) {
+    project.scenes.forEach((_, idx) => {
+      sceneImageMap[idx] = [];
+      sceneImageAssetsMap[idx] = [];
+    });
+
+    // Build filename -> asset lookup
+    const filenameToAsset = new Map<string, typeof activeImageAssets[0]>();
+    activeImageAssets.forEach((asset) => filenameToAsset.set(asset.filename, asset));
+
+    const usedGenericFiles = new Set<string>();
+
+    // 1) Honor stored assignedImage (any filename); multiple scenes may share one file.
+    project.scenes.forEach((scene, idx) => {
+      let layoutProps: Record<string, unknown> = {};
+      if (scene.remotion_code) {
+        try {
+          const descriptor = JSON.parse(scene.remotion_code);
+          layoutProps = (descriptor.layoutProps as Record<string, unknown>) || {};
+        } catch {
+          /* legacy */
+        }
+      }
+
+      // A scene showing a stock clip has its visual slot filled, so it must be
+      // excluded from image auto-assignment (steps 2 & 3 below) just like
+      // hideImage — otherwise a generic scraped image gets bound underneath and
+      // shows a phantom thumbnail next to the clip.
+      const hideImage =
+        Boolean((layoutProps as any).hideImage) || Boolean(layoutProps.assignedVideo);
+      hideImageFlags[idx] = hideImage;
+      if (hideImage) {
+        return;
+      }
+
+      const assignedImage = layoutProps.assignedImage as string | undefined;
+      if (assignedImage && filenameToAsset.has(assignedImage)) {
+        const asset = filenameToAsset.get(assignedImage)!;
+        const url = resolveAssetUrl(asset, project.id);
+        sceneImageMap[idx] = [url];
+        sceneImageAssetsMap[idx] = [{ url, asset }];
+        usedGenericFiles.add(assignedImage);
+      }
+    });
+
+    // 2) Orphan scene_<id>_ files on disk with no layoutProps — bind to matching scene only
+    const sceneSpecific: { sceneId: number; url: string; asset: (typeof activeImageAssets)[0] }[] = [];
+    const genericAssets: typeof activeImageAssets = [];
+    for (const asset of activeImageAssets) {
+      const match = asset.filename.match(/^scene_(\d+)_/);
+      if (match) {
+        const sceneId = parseInt(match[1], 10);
+        sceneSpecific.push({
+          sceneId,
+          url: resolveAssetUrl(asset, project.id),
+          asset,
+        });
+      } else {
+        genericAssets.push(asset);
+      }
+    }
+    for (const { sceneId, url, asset } of sceneSpecific) {
+      const sceneIdx = project.scenes.findIndex((s) => s.id === sceneId);
+      if (sceneIdx < 0 || hideImageFlags[sceneIdx]) continue;
+      let layoutProps: Record<string, unknown> = {};
+      if (project.scenes[sceneIdx].remotion_code) {
+        try {
+          const descriptor = JSON.parse(project.scenes[sceneIdx].remotion_code!);
+          layoutProps = (descriptor.layoutProps as Record<string, unknown>) || {};
+        } catch {
+          /* legacy */
+        }
+      }
+      if (layoutProps.assignedImage || layoutProps.hideImage) continue;
+      sceneImageMap[sceneIdx] = [url];
+      sceneImageAssetsMap[sceneIdx] = [{ url, asset }];
+      usedGenericFiles.add(asset.filename);
+    }
+
+    // 3) Auto-fill remaining scenes with unused generic images (match backend)
+    let genericIdx = 0;
+    for (let sceneIdx = 0; sceneIdx < project.scenes.length; sceneIdx++) {
+      if (sceneImageMap[sceneIdx].length > 0 || hideImageFlags[sceneIdx]) continue;
+      while (genericIdx < genericAssets.length) {
+        const candidate = genericAssets[genericIdx];
+        genericIdx++;
+        if (usedGenericFiles.has(candidate.filename)) continue;
+        const url = resolveAssetUrl(candidate, project.id);
+        sceneImageMap[sceneIdx] = [url];
+        sceneImageAssetsMap[sceneIdx] = [{ url, asset: candidate }];
+        usedGenericFiles.add(candidate.filename);
+        break;
+      }
+    }
+  }
+
+  // A scene whose visual slot holds a stock clip is skipped by the image
+  // auto-assignment above, so its clip never lands in sceneImageAssetsMap.
+  // Resolve it separately (same rules as the Edit Scenes tab) so the Images tab
+  // can show the clip under its scene instead of dumping it in "Unassigned".
+  const sceneClipAssetMap: Record<number, import("../api/client").Asset> = {};
+  project.scenes.forEach((scene, idx) => {
+    let lp: Record<string, unknown> = {};
+    try {
+      lp = scene.remotion_code ? JSON.parse(scene.remotion_code).layoutProps || {} : {};
+    } catch { /* legacy */ }
+    if (lp.hideImage) return;
+    const fn = lp.assignedVideo as string | undefined;
+    if (!fn) return;
+    const asset = activeVideoAssets.find((a) => a.filename === fn);
+    if (asset) sceneClipAssetMap[idx] = asset;
+  });
+
+  const unassignedAssetIds = new Set<number>();
+  Object.values(sceneImageAssetsMap).forEach((sceneItems) =>
+    sceneItems.forEach((item) => unassignedAssetIds.add(item.asset.id)),
+  );
+  Object.values(sceneClipAssetMap).forEach((asset) => unassignedAssetIds.add(asset.id));
+  const unassignedAssets = mediaAssets.filter((asset) => !unassignedAssetIds.has(asset.id));
+
+  const renderMediaCard = (asset: import("../api/client").Asset) => {
+    const url = resolveAssetUrl(asset, project.id);
+    const isDeleting = deletingImageAssetId === asset.id;
+    const isClip = asset.asset_type === "video";
+
+    return (
+      <div
+        key={`${asset.asset_type}-${asset.id}`}
+        className="relative group rounded-xl overflow-hidden border border-gray-200/40 hover:border-gray-300 transition-all"
+      >
+        {isClip ? (
+          <>
+            <video
+              src={url}
+              muted
+              loop
+              playsInline
+              preload="metadata"
+              className="w-full aspect-[4/3] object-cover bg-black"
+              onMouseEnter={(e) => {
+                void (e.currentTarget as HTMLVideoElement).play().catch(() => {});
+              }}
+              onMouseLeave={(e) => (e.currentTarget as HTMLVideoElement).pause()}
+            />
+            <span className="absolute top-2 left-2 px-1.5 py-0.5 rounded bg-black/70 text-white text-[9px] font-medium uppercase tracking-wide">
+              Clip
+            </span>
+          </>
+        ) : (
+          <img
+            src={url}
+            alt={asset.filename}
+            className="w-full aspect-[4/3] object-cover"
+            loading="lazy"
+            onError={(e) => {
+              (e.target as HTMLImageElement).src =
+                "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='150'><rect fill='%23f3f4f6' width='200' height='150'/><text x='50%25' y='50%25' fill='%239ca3af' font-size='12' text-anchor='middle' dy='.3em'>No preview</text></svg>";
+            }}
+          />
+        )}
+
+        {/* Info bar */}
+        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/50 to-transparent p-2 pt-6">
+          <p className="text-[10px] text-white/80 truncate">
+            {asset.filename}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => handleRequestDeleteBlogImage(asset)}
+          disabled={isDeleting}
+          className="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center transition-all border border-red-200/90 text-red-600 bg-white/90 hover:bg-red-600 hover:text-white hover:border-red-600 opacity-0 group-hover:opacity-100 disabled:opacity-60"
+          title="Delete this image from the project"
+        >
+          {isDeleting ? (
+            <span className="w-2.5 h-2.5 border-2 border-current/30 border-t-current rounded-full animate-spin" />
+          ) : (
+            <svg
+              className="w-3.5 h-3.5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+              />
+            </svg>
+          )}
+        </button>
+      </div>
+    );
+  };
+
+  const handleRemoveSceneImage = async (scene: Scene, assetId: number) => {
+    setRemovingAssetId(assetId);
+    try {
+      let descriptor: Record<string, unknown> = {};
+      if (scene.remotion_code) {
+        try {
+          descriptor = JSON.parse(scene.remotion_code);
+        } catch {
+          descriptor = {};
+        }
+      }
+      const layoutProps: Record<string, unknown> = {
+        ...((descriptor.layoutProps as Record<string, unknown>) || {}),
+        hideImage: true,
+        // "The user emptied this on purpose", which `hideImage` alone cannot
+        // say: write_remotion_data Step 5 stamps that flag on every empty
+        // image-capable scene. Without this marker a regenerate drops a spare
+        // clip straight back into the slot. See VISUAL_CLEARED_BY_USER in
+        // backend/app/routers/projects.py.
+        visualClearedByUser: true,
+      };
+      delete layoutProps.assignedImage;
+      delete layoutProps.imageFocusX;
+      delete layoutProps.imageFocusY;
+      delete layoutProps.imageZoom;
+      // The same ✕ removes a stock clip, which occupies the same visual slot.
+      // Without this the descriptor keeps assignedVideo alongside hideImage:
+      // the renderer honours hideImage and drops it, but the editor's resolvers
+      // key off assignedVideo and keep showing a clip the user already removed.
+      delete layoutProps.assignedVideo;
+      delete layoutProps.videoMuted;
+      delete layoutProps.videoVolume;
+      delete layoutProps.videoStartSeconds;
+      descriptor.layoutProps = layoutProps;
+      await updateScene(project.id, scene.id, {
+        remotion_code: JSON.stringify(descriptor),
+      });
+      await loadProject();
+    } finally {
+      setRemovingAssetId(null);
+    }
+  };
+
+  const handleAddSceneImage = async (sceneId: number, file: File) => {
+    setUploadingSceneId(sceneId);
+    try {
+      await updateSceneImage(project.id, sceneId, file);
+      await loadProject();
+    } finally {
+      setUploadingSceneId(null);
+    }
+  };
+
+  // Custom voiceover recording: apply (in-memory) and save (upload to R2).
+  const handleApplyRecording = (sceneId: number, blob: Blob, duration: number) => {
+    setPendingRecordings((prev) => {
+      const next = new Map(prev);
+      const existing = next.get(sceneId);
+      if (existing) URL.revokeObjectURL(existing.url);
+      next.set(sceneId, { blob, url: URL.createObjectURL(blob), duration });
+      return next;
+    });
+  };
+
+  // Scene length (seconds) for an applied recording — mirrors the backend/preview
+  // math: max(MIN_SCENE_DURATION_SECONDS=7, recordedDuration + DURATION_PAD=1) + extra_hold.
+  const pendingSceneDuration = (scene: Scene): number | undefined => {
+    const pending = pendingRecordings.get(scene.id);
+    if (!pending) return undefined;
+    return Math.max(7, pending.duration + 1.0) + (Number(scene.extra_hold_seconds) || 0);
+  };
+
+  const handleDiscardRecording = (sceneId: number) => {
+    setPendingRecordings((prev) => {
+      const existing = prev.get(sceneId);
+      if (!existing) return prev;
+      URL.revokeObjectURL(existing.url);
+      const next = new Map(prev);
+      next.delete(sceneId);
+      return next;
+    });
+  };
+
+  const handleDiscardAllRecordings = () => {
+    setPendingRecordings((prev) => {
+      prev.forEach(({ url }) => URL.revokeObjectURL(url));
+      return new Map();
+    });
+  };
+
+  const handleSaveRecordings = async () => {
+    if (pendingRecordings.size === 0) return;
+    setSavingRecordings(true);
+    try {
+      for (const [sceneId, { blob }] of pendingRecordings) {
+        await updateSceneVoiceover(project.id, sceneId, blob);
+      }
+      // Revoke all object URLs and clear pending state, then refetch.
+      pendingRecordings.forEach(({ url }) => URL.revokeObjectURL(url));
+      setPendingRecordings(new Map());
+      await loadProject();
+    } finally {
+      setSavingRecordings(false);
+    }
+  };
+
+  // Save a single scene's recording (per-scene Save button). Removes it from the
+  // pending map on success, which auto-updates the Save-all banner's count.
+  const handleSaveRecording = async (sceneId: number) => {
+    const pending = pendingRecordings.get(sceneId);
+    if (!pending || savingRecordingSceneId != null || savingRecordings) return;
+    setSavingRecordingSceneId(sceneId);
+    try {
+      await updateSceneVoiceover(project.id, sceneId, pending.blob);
+      URL.revokeObjectURL(pending.url);
+      setPendingRecordings((prev) => {
+        const next = new Map(prev);
+        next.delete(sceneId);
+        return next;
+      });
+      await loadProject();
+    } finally {
+      setSavingRecordingSceneId(null);
+    }
+  };
+
+  const handleOpenImageSourceChooser = (sceneId: number) => {
+    setImageSourceChooserSceneId(sceneId);
+    setSelectedExistingAssetId(null);
+  };
+
+  const handleChooseLocalUpload = () => {
+    if (!imageSourceChooserSceneId) return;
+    setLocalUploadTargetSceneId(imageSourceChooserSceneId);
+    setImageSourceChooserSceneId(null);
+    localSceneImageInputRef.current?.click();
+  };
+
+  const handleChooseScrapedImages = () => {
+    if (!imageSourceChooserSceneId) return;
+    setExistingPickerKind("image");
+    setScrapedImagesPickerSceneId(imageSourceChooserSceneId);
+    setImageSourceChooserSceneId(null);
+    setSelectedExistingAssetId(null);
+  };
+
+  /** Reuse a clip the project already owns — free, no search or transcode. */
+  const handleChooseExistingStockFootage = () => {
+    if (!stockSourceChooserSceneId) return;
+    setExistingPickerKind("video");
+    setScrapedImagesPickerSceneId(stockSourceChooserSceneId);
+    setStockSourceChooserSceneId(null);
+    setSelectedExistingAssetId(null);
+  };
+
+  /** Search for new footage — this is the path that costs credits. */
+  const handleChooseNewStockFootage = () => {
+    if (!stockSourceChooserSceneId) return;
+    const sceneId = stockSourceChooserSceneId;
+    setStockSourceChooserSceneId(null);
+    if (!canUseStockFootage) {
+      if (ownerBlocksStockFootage) notifyOwnerBlocked("adding new stock footage");
+      else setShowAiImageUpgradeModal(true);
+      return;
+    }
+    setStockFootagePickerSceneId(sceneId);
+  };
+
+  // Offered for every template (builtin, custom, and crafted). The backend
+  // still rejects layouts/scene types that can't render a clip (e.g. dataviz
+  // scenes), see upload_stock_footage in app/routers/projects.py.
+  const stockFootageSupported = true;
+
+  // Opened directly from each scene's own "Clip" plus card, so the scene id is
+  // passed in rather than read from the image-source chooser (stock footage is
+  // no longer one of that chooser's options).
+  // Opens the source chooser (reuse an owned clip vs. search a new one). The
+  // credit gate lives on the "search new" branch only — reusing a clip the
+  // project already paid for is free.
+  const handleChooseStockFootage = (sceneId: number) => {
+    if (!sceneId) return;
+    setStockSourceChooserSceneId(sceneId);
+  };
+
+  /**
+   * Assign a chosen clip to a scene, permanently, as a BACKGROUND task —
+   * mirroring AI image generation: the picker (and the scene edit modal, if it
+   * was the entry point) close immediately, a top-right toast reports progress,
+   * and the scene is locked from editing until it finishes.
+   *
+   * The clip is downloaded + transcoded to CFR 30 fps server-side (several
+   * seconds), then linked by writing assignedVideo + audio settings into the
+   * descriptor. Framing (imageFocusX/Y/zoom) is shared with images and left at
+   * its defaults.
+   */
+  const handleAssignStockFootageToScene = async (
+    sceneId: number,
+    clip: StockClip,
+    audio: { muted: boolean; volume: number },
+  ) => {
+    const scene = project.scenes.find((s) => s.id === sceneId);
+    if (!scene) return;
+    setStockFootagePickerSceneId(null);
+    // Close the scene edit modal: the assignment is committed server-side and
+    // runs in the background, so there is nothing left to Save in the modal.
+    setSceneEditModal(null);
+    setStockFootageBusySceneId(sceneId);
+    try {
+      const res = await uploadStockFootage(project.id, sceneId, clip);
+      let descriptor: Record<string, unknown> = {};
+      if (scene.remotion_code) {
+        try {
+          descriptor = JSON.parse(scene.remotion_code);
+        } catch {
+          descriptor = {};
+        }
+      }
+      const lp: Record<string, unknown> = {
+        ...((descriptor.layoutProps as Record<string, unknown>) || {}),
+      };
+      // A clip fills the visual slot: clear any still, keep no hideImage.
+      delete lp.assignedImage;
+      lp.hideImage = false;
+      lp.assignedVideo = res.data.filename;
+      lp.videoMuted = res.data.has_audio ? audio.muted : true;
+      lp.videoVolume = audio.volume;
+      if (lp.imageFocusX == null) lp.imageFocusX = 50;
+      if (lp.imageFocusY == null) lp.imageFocusY = 50;
+      descriptor.layoutProps = lp;
+      await updateScene(project.id, sceneId, {
+        remotion_code: JSON.stringify(descriptor),
+      });
+      await loadProject();
+      // The upload charged AI-edit credits, so refresh the balance the UI gates on.
+      void refreshUser();
+    } catch (err) {
+      showError(getErrorMessage(err) || DEFAULT_ERROR_MESSAGE);
+    } finally {
+      setStockFootageBusySceneId(null);
+    }
+  };
+
+  /** Update audio settings on a scene's already-assigned clip. */
+  const handleUpdateSceneClipAudio = async (
+    sceneId: number,
+    next: { muted?: boolean; volume?: number },
+  ) => {
+    const scene = project.scenes.find((s) => s.id === sceneId);
+    if (!scene?.remotion_code) return;
+    let descriptor: Record<string, unknown> = {};
+    try {
+      descriptor = JSON.parse(scene.remotion_code);
+    } catch {
+      return;
+    }
+    const lp = (descriptor.layoutProps as Record<string, unknown>) || {};
+    if (!lp.assignedVideo) return;
+    if (next.muted !== undefined) lp.videoMuted = next.muted;
+    if (next.volume !== undefined) lp.videoVolume = next.volume;
+    descriptor.layoutProps = lp;
+    await updateScene(project.id, sceneId, {
+      remotion_code: JSON.stringify(descriptor),
+    });
+    await loadProject();
+  };
+
+  const handleLocalSceneFilePicked = (file: File | null) => {
+    if (!file || !localUploadTargetSceneId) return;
+    handleAddSceneImage(localUploadTargetSceneId, file).catch((err) =>
+      showError(getErrorMessage(err) || DEFAULT_ERROR_MESSAGE)
+    );
+  };
+
+  const handleAssignExistingImageToScene = async () => {
+    if (!scrapedImagesPickerSceneId || !selectedExistingAssetId) return;
+    setAssigningExistingImage(true);
+    try {
+      const chosen = project.assets.find((a) => a.id === selectedExistingAssetId);
+
+      if (chosen?.asset_type === "video") {
+        // Reusing an already-processed clip: no download/transcode needed, just
+        // relink the descriptor. Mirrors handleAssignStockFootageToScene's write.
+        const scene = project.scenes.find((s) => s.id === scrapedImagesPickerSceneId);
+        let descriptor: Record<string, unknown> = {};
+        if (scene?.remotion_code) {
+          try {
+            descriptor = JSON.parse(scene.remotion_code);
+          } catch {
+            descriptor = {};
+          }
+        }
+        const lp: Record<string, unknown> = {
+          ...((descriptor.layoutProps as Record<string, unknown>) || {}),
+        };
+        delete lp.assignedImage;
+        lp.hideImage = false;
+        lp.assignedVideo = chosen.filename;
+        // Default to muted; a clip with no audio track can never be unmuted.
+        if (lp.videoMuted === undefined) lp.videoMuted = true;
+        if (lp.videoVolume === undefined) lp.videoVolume = 0.35;
+        if (lp.imageFocusX == null) lp.imageFocusX = 50;
+        if (lp.imageFocusY == null) lp.imageFocusY = 50;
+        descriptor.layoutProps = lp;
+        await updateScene(project.id, scrapedImagesPickerSceneId, {
+          remotion_code: JSON.stringify(descriptor),
+        });
+      } else {
+        await assignExistingImageToScene(project.id, scrapedImagesPickerSceneId, selectedExistingAssetId);
+      }
+
+      setScrapedImagesPickerSceneId(null);
+      setSelectedExistingAssetId(null);
+      await loadProject();
+    } catch (err) {
+      showError(getErrorMessage(err) || DEFAULT_ERROR_MESSAGE);
+    } finally {
+      setAssigningExistingImage(false);
+    }
+  };
+
+  const clampFocus = (value: number) => Math.max(0, Math.min(100, value));
+
+  const getSceneFocus = (scene: Scene): { x: number; y: number } => {
+    try {
+      if (!scene.remotion_code) return { x: 50, y: 50 };
+      const parsed = JSON.parse(scene.remotion_code) as { layoutProps?: { imageFocusX?: unknown; imageFocusY?: unknown } };
+      const xRaw = typeof parsed.layoutProps?.imageFocusX === "number" ? parsed.layoutProps.imageFocusX : 50;
+      const yRaw = typeof parsed.layoutProps?.imageFocusY === "number" ? parsed.layoutProps.imageFocusY : 50;
+      return { x: clampFocus(xRaw), y: clampFocus(yRaw) };
+    } catch {
+      return { x: 50, y: 50 };
+    }
+  };
+
+  const getSceneImageZoom = (scene: Scene): number => {
+    try {
+      if (!scene.remotion_code) return 1;
+      const parsed = JSON.parse(scene.remotion_code) as { layoutProps?: { imageZoom?: unknown } };
+      const zoomRaw = typeof parsed.layoutProps?.imageZoom === "number" ? parsed.layoutProps.imageZoom : 1;
+      return Math.max(IMAGE_ADJUST_ZOOM_MIN, zoomRaw);
+    } catch {
+      return 1;
+    }
+  };
+
+  const openSceneImageAdjustModal = (scene: Scene, src: string) => {
+    const focus = getSceneFocus(scene);
+    const zoom = getSceneImageZoom(scene);
+
+    // Compute the correct aspect ratio for the modal preview
+    let ar: string;
+    let circular = false;
+    if (project?.template?.startsWith("custom_") && project) {
+      ar = resolveCustomImageBoxAr(scene, project);
+    } else {
+      let layoutId: string | null = null;
+      try {
+        if (scene.remotion_code) {
+          const desc = JSON.parse(scene.remotion_code) as { layout?: string; layoutConfig?: { arrangement?: string } };
+          // Intentionally exclude sceneTypeOverride — "intro"/"content"/"outro" are not layout IDs
+          // and would incorrectly map to built-in layout dims via the alias table.
+          layoutId = desc.layoutConfig?.arrangement ?? desc.layout ?? null;
+        }
+      } catch { /* ignore */ }
+      const templateCfg = getTemplateConfig(project?.template || "default");
+      ar = getImageBoxAspectRatio(
+        layoutId ? normalizeLayoutId(layoutId) : null,
+        project?.aspect_ratio || "landscape",
+        templateCfg.baseWidth,
+        templateCfg.baseHeight,
+      );
+      circular = isImageBoxCircular(layoutId);
+    }
+    setImageAdjustAspectRatio(ar);
+    setImageAdjustCircular(circular);
+
+    setImageAdjustSceneId(scene.id);
+    setImageAdjustSrc(src);
+    setIsAdjustDragging(false);
+    setImageAdjustFocusX(focus.x);
+    setImageAdjustFocusY(focus.y);
+    setImageAdjustZoom(Math.min(IMAGE_ADJUST_ZOOM_MAX, Math.max(IMAGE_ADJUST_ZOOM_MIN, zoom)));
+    // Seed the clip trim from the descriptor (0 for stills / untrimmed clips).
+    let startSec = 0;
+    try {
+      if (scene.remotion_code) {
+        const lp = (JSON.parse(scene.remotion_code) as { layoutProps?: { videoStartSeconds?: unknown } }).layoutProps;
+        startSec = Math.max(0, Number(lp?.videoStartSeconds) || 0);
+      }
+    } catch { /* ignore */ }
+    setImageAdjustStartSeconds(startSec);
+    imageAdjustPanRef.current = null;
+  };
+
+  const closeSceneImageAdjustModal = () => {
+    if (savingImageAdjust) return;
+    setImageAdjustSceneId(null);
+    setImageAdjustSrc(null);
+    setIsAdjustDragging(false);
+    imageAdjustPanRef.current = null;
+  };
+
+  /** Whether the media open in the adjust modal is a stock clip (vs. a still).
+   *  Deliberately NOT a useMemo: this sits after the `if (!project)` early
+   *  return above, so a hook here would change the hook count between renders. */
+  const imageAdjustIsVideo = (() => {
+    if (imageAdjustSceneId == null) return false;
+    const s = project.scenes.find((sc) => sc.id === imageAdjustSceneId);
+    let assignedVideo: string | undefined;
+    try {
+      assignedVideo = s?.remotion_code
+        ? (JSON.parse(s.remotion_code) as { layoutProps?: { assignedVideo?: string } })
+            .layoutProps?.assignedVideo
+        : undefined;
+    } catch { /* ignore */ }
+    const asset = assignedVideo
+      ? project.assets.find(
+          (a) => a.asset_type === "video" && a.filename === assignedVideo && !a.excluded,
+        )
+      : undefined;
+    return isStockClipAdjustSource({
+      assignedVideoFilename: assignedVideo,
+      assetType: asset?.asset_type,
+      src: imageAdjustSrc,
+    });
+  })();
+
+  /**
+   * Swap the scene's visual kind straight from the adjust modal: close it, then
+   * open the corresponding source chooser for the same scene. Framing edits in
+   * progress are dropped — the media itself is being replaced.
+   */
+  const handleSwitchAdjustMedia = (to: "image" | "video") => {
+    if (savingImageAdjust || imageAdjustSceneId == null) return;
+    const sceneId = imageAdjustSceneId;
+    setImageAdjustSceneId(null);
+    setImageAdjustSrc(null);
+    setIsAdjustDragging(false);
+    imageAdjustPanRef.current = null;
+    if (to === "video") setStockSourceChooserSceneId(sceneId);
+    else handleOpenImageSourceChooser(sceneId);
+  };
+
+  const handleAdjustMouseDown = (e: ReactMouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    imageAdjustPanRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startFx: imageAdjustFocusRef.current.x,
+      startFy: imageAdjustFocusRef.current.y,
+    };
+    setIsAdjustDragging(true);
+  };
+
+  const handleAdjustTouchStart = (e: ReactTouchEvent<HTMLDivElement>) => {
+    const touch = e.touches[0];
+    if (!touch) return;
+    e.preventDefault();
+    imageAdjustPanRef.current = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      startFx: imageAdjustFocusRef.current.x,
+      startFy: imageAdjustFocusRef.current.y,
+    };
+    setIsAdjustDragging(true);
+  };
+
+  const saveSceneImageAdjust = async () => {
+    if (!imageAdjustSceneId) return;
+    setSavingImageAdjust(true);
+    try {
+      const zoomToSave = Math.max(IMAGE_ADJUST_ZOOM_MIN, Math.min(IMAGE_ADJUST_ZOOM_MAX, imageAdjustZoom));
+      const targetScene = project.scenes.find((s) => s.id === imageAdjustSceneId);
+      if (targetScene?.remotion_code) {
+        const descriptor = JSON.parse(targetScene.remotion_code) as { layoutProps?: Record<string, unknown> };
+        const layoutProps = { ...(descriptor.layoutProps || {}) };
+        layoutProps.imageFocusX = clampFocus(imageAdjustFocusX);
+        layoutProps.imageFocusY = clampFocus(imageAdjustFocusY);
+        layoutProps.imageZoom = zoomToSave;
+        layoutProps.hideImage = false;
+        // Clip trim — only meaningful for a scene that carries a clip.
+        if (layoutProps.assignedVideo) {
+          if (imageAdjustStartSeconds > 0) layoutProps.videoStartSeconds = Number(imageAdjustStartSeconds.toFixed(2));
+          else delete layoutProps.videoStartSeconds;
+        }
+        descriptor.layoutProps = layoutProps;
+        await updateScene(project.id, imageAdjustSceneId, {
+          remotion_code: JSON.stringify(descriptor),
+        });
+      } else {
+        await updateSceneImageFocus(
+          project.id,
+          imageAdjustSceneId,
+          clampFocus(imageAdjustFocusX),
+          clampFocus(imageAdjustFocusY),
+          zoomToSave
+        );
+      }
+      await loadProject();
+      setImageAdjustSceneId(null);
+      setImageAdjustSrc(null);
+      setIsAdjustDragging(false);
+      imageAdjustPanRef.current = null;
+    } catch (err) {
+      showError(getErrorMessage(err) || DEFAULT_ERROR_MESSAGE);
+    } finally {
+      setSavingImageAdjust(false);
+    }
+  };
+
+  // AI image generation costs AI_IMAGE_CREDIT_COST credits per image (all plans;
+  // charged to the OWNER on shared projects).
+  const aiImageCreditRemaining = useOwnerScopedAssets
+    ? (project?.owner_ai_edit_credits ?? 0) + (project?.owner_ai_edit_allowance_remaining ?? 0)
+    : (user?.ai_edit_credits ?? 0) + (user?.ai_edit_allowance_remaining ?? 0);
+  const canUseAiImage = aiImageCreditRemaining >= AI_IMAGE_CREDIT_COST;
+  // Adding a stock clip is charged like AI image generation, at its own rate.
+  const canUseStockFootage =
+    effectiveIsPro || aiImageCreditRemaining >= STOCK_FOOTAGE_CREDIT_COST;
+  // A collaborator blocked by the owner's exhausted access can't fix it by upgrading
+  // their own plan, so show the soft "Oops" warning instead of the self-upgrade modal.
+  const ownerBlocksProFeature = useOwnerScopedAssets && !canUseAiImage;
+  // Stock footage costs less than an AI image, so it has its own affordability
+  // check — an owner with 3-4 credits can afford a clip but not an image.
+  const ownerBlocksStockFootage = useOwnerScopedAssets && !canUseStockFootage;
+  // `feature` names what the collaborator was actually trying to do; passing the
+  // wrong one tells them AI image generation failed when they clicked stock footage.
+  const notifyOwnerBlocked = (feature = "AI image generation") =>
+    showError(
+      `The project owner is out of AI edit credits, so ${feature} isn't available now. Ask the owner to buy more credits or upgrade.`,
+      { variant: "warning" },
+    );
+
+  const handleGenerateSceneImageClick = (sceneId: number) => {
+    if (!canUseAiImage) {
+      if (ownerBlocksProFeature) notifyOwnerBlocked();
+      else setShowAiImageUpgradeModal(true);
+      return;
+    }
+    setGenerateImageError(null);
+    setGenerateErrorSceneId(null);
+    setImageGenModalSceneId(sceneId);
+  };
+
+  const handleSceneImageReady = (sceneId: number, imageBase64: string, refinedPrompt: string) => {
+    setGeneratedImageBase64(imageBase64);
+    setGeneratedPrompt(refinedPrompt);
+    setGeneratedImageSceneId(sceneId);
+    setGenerateImageError(null);
+    setGenerateErrorSceneId(null);
+  };
+
+  const handleKeepGeneratedSceneImage = (sceneId: number) => {
+    if (!generatedImageBase64) return;
+    const dataUrl = `data:image/png;base64,${generatedImageBase64}`;
+    // Keeping an image always saves it to the scene immediately — the tick is the
+    // confirm action, not a staging step. When the Scene Edit modal for this scene is
+    // still open, we also drop the file into its preview (already-saved) so the modal
+    // doesn't re-upload it again when the user later hits Save.
+    const stageIntoOpenModal =
+      sceneEditModal?.id === sceneId ? stageEditModalImageRef.current : null;
+    // Close preview modal immediately so the spinner shows in the scene row
+    setGeneratedImageSceneId(null);
+    setGeneratedImageBase64(null);
+    setGeneratedPrompt(null);
+    setGenerateImageError(null);
+    setGenerateErrorSceneId(null);
+    fetch(dataUrl)
+      .then((r) => r.blob())
+      .then((blob) => new File([blob], "generated.png", { type: "image/png" }))
+      .then((file) =>
+        handleAddSceneImage(sceneId, file).then(() => {
+          if (stageIntoOpenModal) stageIntoOpenModal(file);
+        }),
+      )
+      .catch(() => setGenerateImageError("Failed to use generated image"));
+  };
+
+  const handleDiscardGeneratedSceneImage = () => {
+    setGeneratedImageBase64(null);
+    setGeneratedPrompt(null);
+    setGenerateImageError(null);
+    setGenerateErrorSceneId(null);
+    setGeneratedImageSceneId(null);
+  };
+
+  const handleSaveLogo = async () => {
+    if (!project) return;
+    setLogoSaving(true);
+    try {
+      await updateProjectLogo(project.id, {
+        logo_position: logoPosition,
+        logo_size: logoSize,
+        logo_opacity: logoOpacity,
+      });
+      await loadProject();
+    } catch (err) {
+      showError(getErrorMessage(err, "Failed to save logo settings."));
+    } finally {
+      setLogoSaving(false);
+    }
+  };
+
+  const handleUploadLogo = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !project) return;
+    if (file.size > 2 * 1024 * 1024) {
+      showError("Logo must be under 2 MB.");
+      e.target.value = "";
+      return;
+    }
+    setLogoUploading(true);
+    try {
+      await uploadLogo(project.id, file);
+      await loadProject();
+      if (logoFileInputRef.current) logoFileInputRef.current.value = "";
+    } catch (err) {
+      showError(getErrorMessage(err, "Failed to upload logo."));
+    } finally {
+      setLogoUploading(false);
+    }
+  };
+
+  const handleRemoveLogo = async () => {
+    if (!project) return;
+    setLogoRemoving(true);
+    try {
+      await deleteLogo(project.id);
+      await loadProject();
+      if (logoFileInputRef.current) logoFileInputRef.current.value = "";
+    } catch (err) {
+      showError(getErrorMessage(err, "Failed to remove logo."));
+    } finally {
+      setLogoRemoving(false);
+    }
+  };
+
+  // Audio assets for R2 URL resolution
+  const audioAssets = project.assets.filter((a) => a.asset_type === "audio");
+
+  // Count audio scenes
+  const audioScenes = project.scenes.filter((s) => s.voiceover_path);
+  // Whether to surface the audio UI (Audio tab, per-scene players). True for
+  // AI-voiced projects, and also when the user has recorded/saved custom audio
+  // on a project whose voice_gender is "none" (so text-only projects with
+  // recordings can still preview them).
+  const hasVoiceoverContent =
+    project.voice_gender !== "none" ||
+    audioScenes.length > 0 ||
+    pendingRecordings.size > 0;
+  const totalAudioDuration = project.scenes.reduce(
+    (sum, s) => sum + (s.duration_seconds ?? 0) + (s.extra_hold_seconds ?? 0),
+    0
+  );
+
+  /**
+   * Length of the rendered VIDEO, in seconds.
+   *
+   * Not the same as `totalAudioDuration`: on TransitionSeries templates each
+   * transition overlaps its neighbours, so the composition is shorter than the sum
+   * of the scene durations. Chronicle project 1891 summed to 163s while the Player
+   * reported 2:31 (151s) — this is the number that matches the Player.
+   */
+  // Not memoised: this sits after an early return, so a hook here would break
+  // React's hook ordering. getCompositionSchedule is pure and cheap (arithmetic
+  // over the scene list), so recomputing per render is fine.
+  const totalVideoDuration = getCompositionSchedule(project).totalFrames / 30;
+
+  // ─── Generation loader ────────────────────────────────────
+  const templateRelayoutRunning =
+    templateRelayoutJob?.status === "running" || templateRelayoutJob?.status === "queued";
+  // Also treat the project's own "script_regenerating" status as running so the loader stays
+  // visible during the brief window before the job poll loads (and on resume after reload).
+  // "awaiting_review" must keep the loader up too: at the running→awaiting_review transition the
+  // job poll sets the status before loadProject refreshes project.status, so without this the
+  // loader would briefly drop out and flash the completed video.
+  const regenerateScriptRunning =
+    regenerateScriptJob?.status === "running" ||
+    regenerateScriptJob?.status === "queued" ||
+    regenerateScriptJob?.status === "awaiting_review" ||
+    project.status === "script_regenerating";
+  // Same reasoning as script_regenerating above: keep the loader up between a reload and
+  // the tracker's first poll, so the editor doesn't flash mid-translation.
+  const languageChangeRunning = languageOpRunning || project.status === "language_regenerating";
+  // The language change keeps its own badge ("Translating the project") rather than
+  // collapsing into the generic "Regenerating".
+  const statusForBadge =
+    templateRelayoutRunning || regenerateScriptRunning ? "regenerating" : project.status;
+
+  // Only the collaborator who initiated the regen may approve/regenerate the review.
+  // Legacy jobs have no initiator recorded — allow any editor so they aren't stuck.
+  const isRegenScriptReviewer =
+    regenerateScriptJob?.initiated_by_user_id == null ||
+    regenerateScriptJob.initiated_by_user_id === user?.id;
+
+  // Only one long-running job per project at a time (matches the backend's cross-type
+  // 409 guard). While any job is running, every other job trigger is disabled so a
+  // collaborator can't start a second one that the server would just reject.
+  const anyJobRunning =
+    templateRelayoutRunning ||
+    regenerateScriptRunning ||
+    voiceOpRunning ||
+    languageChangeRunning ||
+    rendering ||
+    project.status === "rendering";
+  const renderGenerationLoader = (
+    mode: "pipeline" | "template-relayout" | "regenerate-script" | "language-change" = "pipeline"
+  ) => {
+    // Language change runs two passes over the scenes; the backend reports which one is
+    // active via `phase`, and `progress` already spans both (total = 2 x scene count).
+    const LANGUAGE_STEPS = [
+      { id: "translating", label: "Translating scenes" },
+      { id: "voiceover", label: "Regenerating voiceovers" },
+    ] as const;
+    const languageStepIdx = languageProgress?.phase === "voiceover" ? 1 : 0;
+    const languageBarProgress = Math.max(6, Math.min(98, languageProgress?.progress ?? 0));
+    const relayoutProgressRaw =
+      templateRelayoutJob && templateRelayoutJob.total_scenes > 0
+        ? (templateRelayoutJob.processed_scenes / templateRelayoutJob.total_scenes) * 100
+        : templateRelayoutJob?.status === "queued"
+        ? 8
+        : 0;
+    const relayoutProgress = Math.max(8, Math.min(98, Math.round(relayoutProgressRaw)));
+    // Regenerate-script is shown as discrete backend phases instead of a percentage.
+    // The "verify" step is a user-gated pause between the script and scene stages.
+    const REGEN_SCRIPT_STEPS = [
+      { id: "analyzing_instruction", label: "Analyzing instruction" },
+      { id: "generating_script", label: "Generating script" },
+      { id: "verify", label: "Verify script" },
+      { id: "generating_scenes", label: "Generating scenes" },
+    ] as const;
+    const regenScriptAwaitingReview = regenerateScriptJob?.status === "awaiting_review";
+    const regenScriptStepId =
+      regenScriptAwaitingReview
+        ? "verify"
+        : regenerateScriptJob?.current_step ??
+          (regenerateScriptJob && regenerateScriptJob.total_scenes > 0
+            ? "generating_scenes"
+            : regenerateScriptJob?.status === "queued"
+            ? "analyzing_instruction"
+            : "generating_script");
+    const regenScriptCompleted = regenerateScriptJob?.status === "completed";
+    const regenScriptStepIdx =
+      regenScriptCompleted
+        ? REGEN_SCRIPT_STEPS.length
+        : Math.max(0, REGEN_SCRIPT_STEPS.findIndex((step) => step.id === regenScriptStepId));
+    // Fill for the progress bar above the step circles. Each step maps to a fixed percentage
+    // (the last step stays below 100% — it only completes when the run actually finishes).
+    const REGEN_SCRIPT_PROGRESS = [15, 40, 60, 80];
+    const regenScriptProgress = regenScriptCompleted
+      ? 100
+      : REGEN_SCRIPT_PROGRESS[Math.min(regenScriptStepIdx, REGEN_SCRIPT_PROGRESS.length - 1)];
+    const isCustomStepMode =
+      mode === "template-relayout" || mode === "regenerate-script" || mode === "language-change";
+    const stepLabels = isCustomStepMode ? [] : PIPELINE_STEPS.map((s) => s.label);
+    const currentStepIdx = isCustomStepMode ? 0 : Math.max(0, pipelineStep - 1);
+    const progress =
+      mode === "template-relayout"
+        ? relayoutProgress
+        : mode === "language-change"
+        ? languageBarProgress
+        : smoothProgress;
+
+    return (
+      <div
+        className="glass-card flex items-center justify-center"
+        style={{ minHeight: "60vh" }}
+      >
+          <div className="w-full max-w-md text-center px-4 sm:px-6 py-10 sm:py-12">
+          <div className="w-12 h-12 mx-auto mb-6 bg-purple-600 rounded-2xl flex items-center justify-center text-white font-bold text-xs animate-pulse">
+            B2V
+          </div>
+
+          <h2 className="text-base font-semibold text-gray-900 mb-1">
+            {mode === "regenerate-script"
+              ? "Regenerating script"
+              : mode === "template-relayout"
+              ? "Regenerating scene layouts"
+              : mode === "language-change"
+              ? `Translating to ${
+                  getLanguageName(languageProgress?.contentLanguage ?? project.content_language) ||
+                  "a new language"
+                }`
+              : "Generating your video"}
+          </h2>
+          <p className="text-xs text-gray-400 mb-8">{project.name}</p>
+
+          {mode !== "regenerate-script" && mode !== "language-change" && (
+            <div className="w-full bg-gray-100 rounded-full h-1.5 mb-6 overflow-hidden">
+              <div
+                className="h-full bg-purple-600 rounded-full transition-all duration-700 ease-out"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          )}
+
+          {/* Regenerate-script: a standalone progress bar (fills purple as the run proceeds)
+              above a row of independent step circles — the circles are NOT connected. */}
+          {mode === "regenerate-script" && (
+            <div className="mb-8 mt-2">
+              <div className="w-full bg-gray-100 rounded-full h-1.5 mb-6 overflow-hidden">
+                <div
+                  className="h-full bg-purple-600 rounded-full transition-all duration-700 ease-out"
+                  style={{ width: `${regenScriptProgress}%` }}
+                />
+              </div>
+              <div className="flex items-start justify-between">
+                {REGEN_SCRIPT_STEPS.map(({ id, label }, i) => {
+                  const isDone = i < regenScriptStepIdx;
+                  const isActive = i === regenScriptStepIdx;
+                  return (
+                    <div key={id} className="flex flex-col items-center gap-2 w-16 sm:w-20">
+                      <div
+                        className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium transition-all ${
+                          isDone
+                            ? "bg-green-100 text-green-600"
+                            : isActive
+                            ? "bg-purple-100 text-purple-600 ring-2 ring-purple-200"
+                            : "bg-gray-100 text-gray-400"
+                        }`}
+                      >
+                        {isDone ? (
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        ) : (
+                          i + 1
+                        )}
+                      </div>
+                      <span
+                        className={`text-[11px] sm:text-xs font-medium text-center leading-tight ${
+                          isDone ? "text-green-600" : isActive ? "text-purple-600" : "text-gray-400"
+                        }`}
+                      >
+                        {label}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Language change: progress bar over two independent step circles
+              (translate every scene, then regenerate every voiceover). */}
+          {mode === "language-change" && (
+            <div className="mb-8 mt-2">
+              <div className="w-full bg-gray-100 rounded-full h-1.5 mb-6 overflow-hidden">
+                <div
+                  className="h-full bg-purple-600 rounded-full transition-all duration-700 ease-out"
+                  style={{ width: `${languageBarProgress}%` }}
+                />
+              </div>
+              <div className="flex items-start justify-center gap-12 sm:gap-20">
+                {LANGUAGE_STEPS.map(({ id, label }, i) => {
+                  const isDone = i < languageStepIdx;
+                  const isActive = i === languageStepIdx;
+                  return (
+                    <div key={id} className="flex flex-col items-center gap-2 w-24 sm:w-28">
+                      <div
+                        className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium transition-all ${
+                          isDone
+                            ? "bg-green-100 text-green-600"
+                            : isActive
+                            ? "bg-purple-100 text-purple-600 ring-2 ring-purple-200"
+                            : "bg-gray-100 text-gray-400"
+                        }`}
+                      >
+                        {isDone ? (
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        ) : (
+                          i + 1
+                        )}
+                      </div>
+                      <span
+                        className={`text-[11px] sm:text-xs font-medium text-center leading-tight ${
+                          isDone ? "text-green-600" : isActive ? "text-purple-600" : "text-gray-400"
+                        }`}
+                      >
+                        {label}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              {languageProgress && languageProgress.total > 0 && (
+                <p className="mt-4 text-[11px] text-gray-400 tabular-nums">
+                  {languageProgress.completed} of {languageProgress.total} steps •{" "}
+                  {languageProgress.progress}%
+                </p>
+              )}
+            </div>
+          )}
+
+          {!isCustomStepMode && (
+            <div className="flex items-center justify-between mb-8">
+              {stepLabels.map((label, i) => {
+                const isActive = i === currentStepIdx;
+                const isDone =
+                  i < currentStepIdx ||
+                  pipelineStep > PIPELINE_STEPS.length;
+                return (
+                  <div
+                    key={label}
+                    className="flex flex-col items-center gap-2"
+                  >
+                    <div
+                      className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium transition-all ${
+                        isDone
+                          ? "bg-green-100 text-green-600"
+                          : isActive
+                          ? "bg-purple-100 text-purple-600 ring-2 ring-purple-200"
+                          : "bg-gray-100 text-gray-400"
+                      }`}
+                    >
+                      {isDone ? (
+                        <svg
+                          className="w-4 h-4"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M5 13l4 4L19 7"
+                          />
+                        </svg>
+                      ) : (
+                        i + 1
+                      )}
+                    </div>
+                    <span
+                      className={`text-xs font-medium ${
+                        isDone
+                          ? "text-green-600"
+                          : isActive
+                          ? "text-purple-600"
+                          : "text-gray-400"
+                      }`}
+                    >
+                      {label}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {mode === "regenerate-script" && regenScriptAwaitingReview ? (
+            /* Verify step — paused for review. Actions live in the (non-closeable) verify popup. */
+            <div className="flex flex-col items-center gap-1.5">
+              <span className="text-sm text-gray-700 font-medium">Verify the script</span>
+              <span className="text-xs text-gray-400 max-w-xs">
+                Review the changes in the popup, then proceed or regenerate.
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-2">
+              <span className="w-3 h-3 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin" />
+              <span className="text-xs text-gray-400">
+                {mode === "regenerate-script"
+                  ? regenScriptCompleted
+                    ? "Regeneration complete..."
+                    : `${REGEN_SCRIPT_STEPS[regenScriptStepIdx]?.label ?? "Finishing up"}...`
+                  : mode === "template-relayout"
+                  ? `${progress}% complete`
+                  : `${stepLabels[currentStepIdx] ?? "Finishing up"}...`}
+              </span>
+            </div>
+          )}
+
+          {!(mode === "regenerate-script" && regenScriptAwaitingReview) && (
+            <GenerationTips />
+          )}
+
+          {hasError && (
+            <div className="mt-6">
+              <button
+                onClick={kickOffGeneration}
+                className="px-4 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-medium rounded-lg transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── Completed view (video preview + actions + chat) ──────
+  const renderCompleted = () => {
+    return (
+      <div className="space-y-4">
+        {/* ── Phase 1: Rendering progress ── */}
+        {rendering && (
+          <div
+            className="glass-card flex items-center justify-center"
+            style={{ minHeight: "60vh" }}
+          >
+            <div className="w-full max-w-md text-center px-4 sm:px-6 py-10 sm:py-12">
+              <div className="w-14 h-14 mx-auto mb-6 bg-purple-600 rounded-2xl flex items-center justify-center">
+                <svg
+                  className="w-7 h-7 text-white"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"
+                  />
+                </svg>
+              </div>
+
+              <h2 className="text-base font-semibold text-gray-900 mb-1">
+                Creating your video
+              </h2>
+              <p className="text-xs text-gray-400 mb-6">
+                {renderFrames.total > 0
+                  ? `Frame ${renderFrames.rendered.toLocaleString()} of ${renderFrames.total.toLocaleString()}`
+                  : "Preparing..."}
+              </p>
+
+              <div className="w-full bg-gray-100 rounded-full h-2 mb-3 overflow-hidden">
+                <div
+                  className="h-full bg-purple-600 rounded-full transition-all duration-500 ease-out"
+                  style={{ width: `${renderProgress}%` }}
+                />
+              </div>
+
+              <div className="flex items-center justify-between text-xs text-gray-500">
+                <span>{renderProgress}%</span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin" />
+                  {renderEtaLabel
+                    ? renderEtaLabel.startsWith("~")
+                      ? `${renderEtaLabel} remaining`
+                      : renderEtaLabel
+                    : renderProgress > 0
+                      ? "Estimating…"
+                      : renderFrames.total > 0
+                        ? "Rendering…"
+                        : "Preparing…"}
+                </span>
+              </div>
+
+              <p className="mt-6 text-sm text-gray-400">
+                Feel free to browse other tabs — just don't close this one.
+              </p>
+
+              <GenerationTips />
+
+              {hasError && (
+                <div className="mt-4">
+                  <button
+                    onClick={() => handleRender()}
+                    className="px-4 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-medium rounded-lg transition-colors"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+              {!hasError && (
+                <div className="mt-4">
+                  <button
+                    onClick={() => setShowCancelRenderWarning(true)}
+                    disabled={cancellingRender}
+                    className="px-4 py-1.5 bg-gray-200 hover:bg-gray-300 disabled:opacity-60 text-gray-800 text-xs font-medium rounded-lg transition-colors"
+                  >
+                    {cancellingRender ? "Cancelling..." : "Cancel render"}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Phase 2: Saving to cloud ── */}
+        {saving && !rendering && (
+          <div
+            className="glass-card flex items-center justify-center"
+            style={{ minHeight: "60vh" }}
+          >
+            <div className="w-full max-w-sm text-center px-4 sm:px-6 py-10 sm:py-12">
+              <div className="w-14 h-14 mx-auto mb-6 bg-green-600 rounded-2xl flex items-center justify-center">
+                <svg
+                  className="w-7 h-7 text-white"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                  />
+                </svg>
+              </div>
+
+              <h2 className="text-base font-semibold text-gray-900 mb-1">
+                Finalizing your video
+              </h2>
+              <p className="text-xs text-gray-400 mb-6">
+                Encoding &amp; uploading to cloud...
+              </p>
+
+              <div className="w-full bg-gray-100 rounded-full h-2 mb-3 overflow-hidden">
+                <div className="h-full bg-green-500 rounded-full animate-pulse" style={{ width: "100%" }} />
+              </div>
+
+              <div className="flex items-center justify-center text-xs text-gray-500">
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 border-2 border-green-500/30 border-t-green-500 rounded-full animate-spin" />
+                  Almost done
+                </span>
+              </div>
+
+              <p className="mt-6 text-sm text-gray-400">
+                Hang tight — your download will start automatically.
+              </p>
+              <p className="mt-2 text-xs text-gray-500">
+                If your download doesn't start, allow popups for this site.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Main content (hidden while rendering or saving to cloud) */}
+        {!rendering && !saving && (
+          <CollabProvider
+            projectId={projectId}
+            projectName={project.name}
+            isOwner={project.user_id === user?.id}
+            onRemoteEdit={handleRemoteCollabEdit}
+            onRemoteComment={loadCommentCounts}
+            onRemoteReload={handleCollabRemoteReload}
+            onRemoteRevoked={(message) =>
+              showNotice(
+                message || "Oops, your access has been revoked, you cannot access the project.",
+                { title: "Access revoked", onClose: () => navigate("/dashboard", { replace: true }) },
+              )
+            }
+            onDraftResolved={handleCollabDraftResolved}
+          >
+          <div className="glass-card overflow-hidden flex flex-col">
+            {/* Header bar */}
+            <div className="flex flex-col sm:flex-row sm:items-center px-3 sm:px-5 py-3 sm:py-3.5 border-b border-gray-200/30 gap-2 sm:gap-3 min-w-0 max-w-full overflow-x-hidden">
+              {/* Row 1 (narrow): the title alone, clipped to one line with an
+                  ellipsis. From sm up it takes the leftover width (`flex-1`) so
+                  the action groups stay packed against the right edge rather
+                  than being spread out by `justify-between`. */}
+              <div className="flex items-center gap-3 min-w-0 sm:flex-1">
+                <h2 className="text-sm font-medium text-gray-900 truncate min-w-0" title={project.name}>
+                  {project.name}
+                </h2>
+                {/* From sm up the badge sits beside the title as before; narrow
+                    screens show it in row 2 instead. */}
+                <span className="hidden sm:block">
+                  <StatusBadge status={statusForBadge} />
+                </span>
+              </div>
+              {/* Row 2 (narrow): status, format toggle, download. Stays a flex
+                  row from sm up too — `contents` here would promote each button
+                  to a child of the header and let it spread them apart. */}
+              <div className="flex items-center flex-wrap gap-1 sm:gap-2 min-w-0 max-w-full sm:flex-nowrap sm:shrink-0">
+                <span className="sm:hidden">
+                  <StatusBadge status={statusForBadge} variant="pill" />
+                </span>
+                {/* Collaboration header controls: presence + invite. */}
+                <CollabToolbar />
+                {/* Video format (landscape / portrait) — left of download */}
+                <div className="flex items-center shrink-0" data-action="aspect-ratio">
+                  <div className="flex gap-0.5 sm:gap-1 p-0.5 sm:p-1 bg-gray-100/60 rounded-xl">
+                    <button
+                      type="button"
+                      title="Landscape for desktop / YouTube"
+                      disabled={
+                        !project ||
+                        rendering ||
+                        saving ||
+                        missingCustomTemplate ||
+                        aspectFormatSaving ||
+                        templateRelayoutRunning ||
+                        submittingTemplateRelayout
+                      }
+                      onClick={() => {
+                        if (!project) return;
+                        const cur = normalizeProjectAspectRatio(project.aspect_ratio);
+                        if (cur === "landscape") return;
+                        setAspectFormatPending("landscape");
+                        setShowAspectFormatConfirm(true);
+                      }}
+                      className={`px-3 sm:px-3 py-2 sm:py-1.5 rounded-lg flex items-center transition-all disabled:opacity-40 disabled:pointer-events-none ${
+                        project && normalizeProjectAspectRatio(project.aspect_ratio) === "landscape"
+                          ? "bg-white text-purple-600 shadow-sm"
+                          : "text-gray-400 hover:text-gray-600"
+                      }`}
+                    >
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                        strokeWidth={2}
+                        aria-hidden
+                      >
+                        <rect x="3" y="4" width="18" height="12" rx="2" />
+                        <path d="M8 20h8M12 16v4" strokeLinecap="round" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      title="Portrait for TikTok / Reels / mobile"
+                      disabled={
+                        !project ||
+                        rendering ||
+                        saving ||
+                        missingCustomTemplate ||
+                        aspectFormatSaving ||
+                        templateRelayoutRunning ||
+                        submittingTemplateRelayout
+                      }
+                      onClick={() => {
+                        if (!project) return;
+                        const cur = normalizeProjectAspectRatio(project.aspect_ratio);
+                        if (cur === "portrait") return;
+                        setAspectFormatPending("portrait");
+                        setShowAspectFormatConfirm(true);
+                      }}
+                      className={`px-3 sm:px-3 py-2 sm:py-1.5 rounded-lg flex items-center transition-all disabled:opacity-40 disabled:pointer-events-none ${
+                        project && normalizeProjectAspectRatio(project.aspect_ratio) === "portrait"
+                          ? "bg-white text-purple-600 shadow-sm"
+                          : "text-gray-400 hover:text-gray-600"
+                      }`}
+                    >
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                        strokeWidth={2}
+                        aria-hidden
+                      >
+                        <rect x="7" y="2" width="10" height="20" rx="2" />
+                        <circle cx="12" cy="18" r="1" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Open Studio — Pro or per-video paid (download workspace zip) */}
+                {/* {hasStudioAccess ? (
+                  <button
+                    onClick={handleOpenStudio}
+                    disabled={downloadingStudio}
+                    className="px-3 py-1.5 border border-purple-200 text-purple-600 hover:bg-purple-50 text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    {downloadingStudio ? (
+                      <span className="w-3 h-3 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin" />
+                    ) : (
+                      <svg
+                        className="w-3.5 h-3.5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+                        />
+                      </svg>
+                    )}
+                    Open Studio
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setShowUpgrade(true)}
+                    className="px-3 py-1.5 border border-gray-200 text-gray-400 hover:border-purple-200 hover:text-purple-500 text-xs font-medium rounded-lg flex items-center gap-1.5 transition-colors"
+                    title="Unlock Studio with per-video or Pro plan"
+                  >
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+                      />
+                    </svg>
+                    Studio
+                  </button>
+                )} */}
+
+                {/* Download — MP4 plus slide exports (PowerPoint, PDF, PNG) in one menu */}
+                <div className="relative min-w-0 shrink" ref={slidesExportAnchorRef}>
+                  <button
+                    type="button"
+                    data-action="render-button"
+                    onClick={() => {
+                      setShowShareDropdown(false);
+                      setShowSlidesExportMenu((v) => !v);
+                    }}
+                    disabled={missingCustomTemplate || sceneExporting || downloading}
+                    title="MP4 video, or slides — PowerPoint, PDF, or one PNG per scene (pick the frame per scene before export; default ~85%)."
+                    className={`px-2.5 sm:px-4 py-1.5 text-xs font-medium rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap ${
+                      missingCustomTemplate
+                        ? "bg-gray-300 text-white cursor-not-allowed"
+                        : !rendered
+                        ? hasError
+                          ? "bg-orange-500 hover:bg-orange-600 text-white"
+                          : "bg-purple-600 hover:bg-purple-700 text-white"
+                        : "bg-green-600 hover:bg-green-700 text-white disabled:bg-gray-100 disabled:text-gray-400"
+                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                  >
+                    {downloading ? (
+                      <>
+                        <span className="w-2.5 h-2.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Downloading…
+                      </>
+                    ) : sceneExporting ? (
+                      <>
+                        <span className="w-2.5 h-2.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Exporting…
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+                          />
+                        </svg>
+                        Download
+                        <svg className="w-3 h-3 ml-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Row 3 (narrow): re-render, share, and the publish icons. On a
+                  wide header this sits flush against row 2, so the actions read
+                  as one cluster on the right. */}
+              <div className="flex items-center flex-wrap gap-1.5 sm:gap-2 min-w-0 max-w-full sm:flex-nowrap sm:shrink-0">
+                {rendered && (
+                  <button
+                    onClick={() => {
+                      if (missingCustomTemplate) {
+                        showError("You can't re-render this video because its custom template has been deleted.");
+                        return;
+                      }
+                      setShowReRenderWarning(true);
+                    }}
+                    disabled={anyJobRunning || missingCustomTemplate}
+                    className="px-2.5 sm:px-4 py-1.5 border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-medium rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap"
+                  >
+                    <svg className="w-3 h-3 sm:w-3.5 sm:h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    Re-render
+                  </button>
+                )}
+
+                {/* Share — purple; menu includes rendered-video options when MP4 exists */}
+                {project?.scenes && project.scenes.length > 0 && (
+                  <div className="relative" ref={shareAnchorRef}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSlidesExportMenu(false);
+                        setShowShareDropdown((v) => !v);
+                      }}
+                      disabled={embedLoading}
+                      className="px-2.5 sm:px-4 py-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap"
+                    >
+                      <svg className="w-3 h-3 sm:w-3.5 sm:h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+                      </svg>
+                      {embedLoading ? "Loading..." : "Share & Invite"}
+                      <svg className="w-2.5 h-2.5 sm:w-3 sm:h-3 ml-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                  </div>
+                )}
+
+                {/* Publish — icon-only, to the right of Share & Invite rather
+                    than inside its menu, so a one-click action is one click.
+                    Same gating as the old menu entries: owner only, because a
+                    social connection is a personal credential, and still shown
+                    before a render since the unrendered flow starts one. */}
+                {project?.scenes &&
+                  project.scenes.length > 0 &&
+                  project.user_id === user?.id &&
+                  enabledPublishPlatforms.map((platform) => {
+                    const label = publishedPlatforms.has(platform)
+                      ? `Re-upload to ${platformLabel(platform)}`
+                      : rendered
+                        ? `Upload to ${platformLabel(platform)}`
+                        : `Render & upload to ${platformLabel(platform)}`;
+                    return (
+                      <button
+                        key={platform}
+                        type="button"
+                        onClick={() => {
+                          setShowShareDropdown(false);
+                          setShowSlidesExportMenu(false);
+                          setPublishPlatform(platform);
+                        }}
+                        title={label}
+                        aria-label={label}
+                        className="p-1.5 border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors flex items-center justify-center shrink-0"
+                      >
+                        <PlatformIcon
+                          platform={platform}
+                          className={
+                            platform === "youtube"
+                              ? "w-4 h-4 text-[#FF0000]"
+                              : platform === "x"
+                                ? "w-3.5 h-3.5 text-black"
+                                : "w-4 h-4 text-[#0A66C2]"
+                          }
+                        />
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+
+
+            {/* Video player area + Chat */}
+            <div className="flex flex-1 min-h-0">
+              {/* Video preview — always shows live preview when scenes exist */}
+              <div className="flex-1 flex flex-col min-w-0 min-h-0">
+                {missingCustomTemplate && (
+                  <div className="mx-4 mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                    This project's custom template has been deleted. You can't render or re-render this video because the template no longer exists.
+                  </div>
+                )}
+                {project.scenes.length > 0 ? (
+                  <div className="flex-1 flex flex-col p-4 gap-3 min-h-0">
+                    <div
+                      ref={videoPreviewContainerRef}
+                      className="flex-1 min-h-0 w-full flex items-center justify-center overflow-hidden"
+                      style={{
+                        position: "relative",
+                        ...(project.aspect_ratio === "portrait" ? { minHeight: "70vh" } : {}),
+                      }}
+                    >
+                      <VideoPreview
+                        ref={previewPlayerRef}
+                        project={project}
+                        layoutPropSchema={layoutPropSchema !== null ? layoutPropSchema : undefined}
+                        logoSizeOverride={logoSize}
+                        logoOpacityOverride={logoOpacity}
+                        logoPositionOverride={logoPosition}
+                        onPlaybackSpeedChange={handlePreviewPlaybackSpeedChange}
+                        playbackSpeedSaving={savingPlaybackSpeed}
+                        onCaptionSettingsChange={handleCaptionSettingsChange}
+                        captionsSaving={savingCaptions}
+                        captionSettingsKey={captionSettingsKey}
+                        ownerScopedProjectId={useOwnerScopedAssets ? projectId : undefined}
+                        precompiledCraftedDetail={ownerScopedCraftedDetail}
+                        precompiledTemplateData={currentCustomTemplateCode}
+                        pendingVoiceovers={pendingVoiceovers}
+                      />
+                    </div>
+                    {/* Unsaved recorded voiceovers — save-all bar */}
+                    {pendingRecordings.size > 0 && (
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-gray-100 pt-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-gray-900">
+                            {pendingRecordings.size} recorded voiceover{pendingRecordings.size > 1 ? "s" : ""} not saved
+                          </p>
+                          <p className="text-[11px] text-gray-400">
+                            Save all to replace the voiceovers for {pendingRecordings.size} scene{pendingRecordings.size > 1 ? "s" : ""}, or save each scene individually from its row.
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <button
+                            type="button"
+                            onClick={handleDiscardAllRecordings}
+                            disabled={savingRecordings || savingRecordingSceneId != null}
+                            className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-red-600 hover:text-red-700 hover:underline disabled:opacity-50 transition-colors"
+                          >
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                            Discard all
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleSaveRecordings}
+                            disabled={savingRecordings || savingRecordingSceneId != null}
+                            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 transition-colors"
+                          >
+                            {savingRecordings ? (
+                              <>
+                                <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                </svg>
+                                Saving…
+                              </>
+                            ) : (
+                              <>
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                </svg>
+                                Save all
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {/* Upload status — visible with the publish modal closed, so
+                        a background upload is never invisible. Deliberately says
+                        nothing while the job is `pending_render`: the render has
+                        its own progress UI and two bars would compete. */}
+                    {visiblePublishJob && (
+                      <PublishStatusBanner
+                        job={visiblePublishJob}
+                        onRetry={handleRetryPublish}
+                        onDismiss={() => dismissPublishJob(visiblePublishJob.id)}
+                      />
+                    )}
+                    <div className={`flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between lg:gap-4${pendingRecordings.size > 0 ? " mt-2" : ""}`}>
+                      <p className="text-[11px] text-gray-400 flex-shrink-0">
+                        Preview · {project.scenes.length} scenes
+                        {totalVideoDuration > 0 &&
+                          ` · ${Math.round(totalVideoDuration)}s`}
+                      </p>
+                      {showInlineReviewPrompt && (
+                        <ProjectReviewPrompt
+                          submitted={inlineReviewSubmitted}
+                          submitting={reviewSubmitting}
+                          error={reviewError}
+                          onSubmit={handleInlineSubmitReview}
+                          onStarClick={(value) => {
+                            setStarReviewModalRating(value);
+                            setStarReviewModalOpen(true);
+                          }}
+                        />
+                      )}
+                    </div>
+                    {imageAssets.some((a) => /\.gif(\?.*)?$/i.test(a.filename)) && (
+                      <p className="text-[10px] text-amber-500 flex items-center gap-1">
+                        <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        GIF images detected — animation may vary in the final render
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center gap-4 p-6">
+                    <div className="w-full max-w-lg aspect-video bg-gray-900 rounded-xl flex items-center justify-center relative overflow-hidden">
+                      <div className="absolute inset-0 bg-gradient-to-br from-purple-900/20 to-gray-900/80" />
+                      <div className="relative text-center">
+                        <div className="w-6 h-6 mx-auto mb-2 border-2 border-white/20 border-t-white/50 rounded-full animate-spin" />
+                        <p className="text-xs text-white/40">
+                          Generating scenes...
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+          </CollabProvider>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <>
+    <div className="space-y-6">
+      <UpgradePlanModal
+        open={showUpgrade}
+        onClose={() => setShowUpgrade(false)}
+        projectId={projectId}
+        title="Upgrade to use your crafted templates"
+        subtitle="Custom templates and the template builder require a paid plan. Pick a plan to continue."
+      />
+
+      <OutOfVideosOfferModal
+        open={offer.isOpen}
+        onClose={offer.dismiss}
+        secondsRemaining={offer.secondsRemaining}
+        isWindowLive={offer.isWindowLive}
+        onExpand={offer.expand}
+      />
+
+      {/* Page-level voiceover add/change/delete progress — survives tab switches and
+          page refresh (it re-detects an in-flight op from the server on mount). */}
+      <VoiceOperationModal
+        projectId={projectId}
+        onComplete={async () => {
+          await loadProject();
+          setVoiceOpKickstart(null);
+        }}
+        onError={(msg) => {
+          setVoiceOpKickstart(null);
+          showError(msg);
+        }}
+        onRunningChange={setVoiceOpRunning}
+        kickstart={voiceOpKickstart}
+      />
+      <LanguageChangeTracker
+        projectId={projectId}
+        onComplete={async () => {
+          await loadProject();
+          setLanguageOpKickstart(null);
+          setLanguageProgress(null);
+        }}
+        onError={(msg) => {
+          setLanguageOpKickstart(null);
+          setLanguageProgress(null);
+          showError(msg);
+        }}
+        onRunningChange={setLanguageOpRunning}
+        onProgress={setLanguageProgress}
+        kickstart={languageOpKickstart}
+      />
+
+      {showReviewPopup && ReactDOM.createPortal(
+        <div className="fixed inset-0 z-[9997] flex items-center justify-center px-4">
+          <div
+            className="absolute inset-0 bg-black/45 backdrop-blur-sm"
+            onClick={handleDismissReviewPopup}
+          />
+          <div className="relative w-full max-w-md" onClick={(event) => event.stopPropagation()}>
+            <ProjectReviewPrompt
+              variant="modal"
+              submitted={false}
+              submitting={reviewSubmitting}
+              error={reviewError}
+              onDismiss={handleDismissReviewPopup}
+              onSubmit={handlePopupSubmitReview}
+            />
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {starReviewModalOpen && ReactDOM.createPortal(
+        <div className="fixed inset-0 z-[9997] flex items-center justify-center px-4">
+          <div
+            className="absolute inset-0 bg-black/45 backdrop-blur-sm"
+            onClick={handleDismissStarReviewModal}
+          />
+          <div className="relative w-full max-w-md" onClick={(event) => event.stopPropagation()}>
+            <ProjectReviewPrompt
+              variant="modal"
+              initialRating={starReviewModalRating}
+              submitted={false}
+              submitting={reviewSubmitting}
+              error={reviewError}
+              onDismiss={handleDismissStarReviewModal}
+              onSubmit={handleStarModalSubmitReview}
+            />
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Video format change confirmation */}
+      {showAspectFormatConfirm && project && ReactDOM.createPortal(
+        <div className="fixed inset-0 z-[9998] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={() => !aspectFormatSaving && setShowAspectFormatConfirm(false)}
+            aria-hidden
+          />
+          <div
+            className="relative bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 p-7"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="aspect-format-confirm-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="aspect-format-confirm-title" className="text-lg font-semibold text-gray-900 mb-2">
+              Change video format?
+            </h3>
+            <p className="text-sm text-gray-600 mb-6">
+              Are you sure you want to change the format?
+              {aspectFormatPending &&
+                (aspectFormatPending === "portrait"
+                  ? " Preview will use vertical (9:16)."
+                  : " Preview will use horizontal (16:9).")}
+              {project.r2_video_url ? (
+                <span className="block mt-2 text-amber-800/90">
+                 You will need to re render to get the video downloaded in the new format.
+                </span>
+              ) : null}
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                type="button"
+                disabled={aspectFormatSaving}
+                onClick={() => {
+                  if (!aspectFormatSaving) {
+                    setShowAspectFormatConfirm(false);
+                    setAspectFormatPending(null);
+                  }
+                }}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={aspectFormatSaving || aspectFormatPending === null}
+                onClick={async () => {
+                  if (!project || aspectFormatPending === null) return;
+                  setAspectFormatSaving(true);
+                  try {
+                    await updateProject(project.id, { aspect_ratio: aspectFormatPending });
+                    await loadProject();
+                    setShowAspectFormatConfirm(false);
+                    setAspectFormatPending(null);
+                  } catch (err) {
+                    showError(getErrorMessage(err, "Failed to update video format."));
+                  } finally {
+                    setAspectFormatSaving(false);
+                  }
+                }}
+                className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg disabled:opacity-50 disabled:cursor-wait flex items-center gap-2"
+              >
+                {aspectFormatSaving ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Saving…
+                  </>
+                ) : (
+                  "Proceed"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Download warning — show before starting download when video is already rendered */}
+      {showEmbedModal && embedToken && ReactDOM.createPortal(
+        <div className="fixed inset-0 z-[9998] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => { setShowEmbedModal(false); setEmbedCopied(false); }} />
+          <div className="relative bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 p-7 transition-all" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={() => { setShowEmbedModal(false); setEmbedCopied(false); }}
+              className="absolute top-4 right-4 w-7 h-7 flex items-center justify-center rounded-full border border-purple-500/80 text-purple-600 hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Embed this video</h3>
+            <p className="text-sm text-gray-600 mb-5">Paste this snippet into your website to show the live preview — no rendering required.</p>
+            <div className="relative">
+              <textarea
+                readOnly
+                className="w-full rounded-xl border border-gray-200 bg-gray-50 p-3 pr-10 text-xs font-mono text-gray-700 resize-none focus:outline-none"
+                rows={5}
+                value={`<iframe\n  src="${(import.meta.env.VITE_APP_URL || window.location.origin)}/preview/${embedToken}"\n  width="800"\n  height="${project?.aspect_ratio === 'portrait' ? '711' : '450'}"\n  frameborder="0"\n  allowfullscreen\n  style="border:none;"\n  data-powered-by="https://blog2video.app"\n  data-creator="https://www.firebird-technologies.com/about"\n></iframe>`}
+              />
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(
+                    `<iframe\n  src="${(import.meta.env.VITE_APP_URL || window.location.origin)}/preview/${embedToken}"\n  width="800"\n  height="${project?.aspect_ratio === 'portrait' ? '711' : '450'}"\n  frameborder="0"\n  allowfullscreen\n  style="border:none;"\n  data-powered-by="https://blog2video.app"\n  data-creator="https://www.firebird-technologies.com/about"\n></iframe>`
+                  );
+                  setEmbedCopied(true);
+                  setTimeout(() => setEmbedCopied(false), 2000);
+                }}
+                className="absolute top-2 right-2 p-1.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-colors"
+                title="Copy to clipboard"
+              >
+                {embedCopied ? (
+                  <svg className="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                )}
+              </button>
+            </div>
+    
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {showPreviewLinkModal && previewLinkUrl && ReactDOM.createPortal(
+        <div className="fixed inset-0 z-[9998] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => { setShowPreviewLinkModal(false); setPreviewLinkCopied(false); }} />
+          <div className="relative bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 p-7 transition-all" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={() => { setShowPreviewLinkModal(false); setPreviewLinkCopied(false); }}
+              className="absolute top-4 right-4 w-7 h-7 flex items-center justify-center rounded-full border border-purple-500/80 text-purple-600 hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Link to Preview</h3>
+            <p className="text-sm text-gray-600 mb-5">Share this link to let anyone view the video preview — no account required.</p>
+            <div className="relative">
+              <input
+                readOnly
+                className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 pr-10 text-xs font-mono text-gray-700 focus:outline-none"
+                value={previewLinkUrl}
+                onFocus={(e) => e.target.select()}
+              />
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(previewLinkUrl).then(() => {
+                    setPreviewLinkCopied(true);
+                    setTimeout(() => setPreviewLinkCopied(false), 2000);
+                  }).catch(() => {
+                    // clipboard blocked — user can select and copy manually
+                  });
+                }}
+                className="absolute top-1/2 -translate-y-1/2 right-2 p-1.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-colors"
+                title="Copy to clipboard"
+              >
+                {previewLinkCopied ? (
+                  <svg className="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {showDownloadWarning && ReactDOM.createPortal(
+        <div className="fixed inset-0 z-[9998] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowDownloadWarning(false)} />
+          <div className="relative bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 p-7 transition-all" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+              {downloadWarningMode === "download" ? "Before you download" : "Before you render"}
+            </h3>
+            <p className="text-sm text-gray-600 mb-6">
+              {downloadWarningMode === "download" ? (
+                "If you have made changes/edits after your last render, you need to re-render to get them in the downloaded video."
+              ) : (
+                <>
+                  <span>
+                    Make sure you have made all the changes/edits before rendering. Re-rendering of video later will result in deduction of a video count.
+                  </span>
+                  {playbackSpeedDraft !== 1 && (() => {
+                    const renderedSecs = totalVideoDuration / playbackSpeedDraft;
+                    const mins = Math.floor(renderedSecs / 60);
+                    const secs = Math.round(renderedSecs % 60);
+                    const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                    return <><br /><br /><span className="text-xs text-yellow-600">Your video will be rendered at <strong>{playbackSpeedDraft}×</strong> speed — approximately <strong>{timeStr}</strong> long.</span></>;
+                  })()}
+                </>
+              )}
+            </p>
+
+
+            {downloadWarningMode === "download" && (
+              <div className="mb-5 p-4 bg-gray-50 rounded-xl border border-gray-200">
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-xs text-gray-600 leading-relaxed">
+                    Having trouble downloading? Copy the link and paste it into a new browser tab.
+                  </p>
+
+                  <button
+                    type="button"
+                    onClick={handleCopyDownloadLink}
+                    className={`flex items-center gap-1 text-xs font-medium transition ${
+                      copyStatus === "success"
+                        ? "text-green-600"
+                        : copyStatus === "error"
+                        ? "text-red-600"
+                        : "text-blue-600 hover:text-blue-700"
+                    }`}
+                  >
+                    {copyStatus === "success" ? (
+                      <>
+                        ✓ Copied
+                      </>
+                    ) : copyStatus === "error" ? (
+                      <>
+                        ⚠ Failed
+                      </>
+                    ) : (
+                      <>
+                        🔗 Copy 
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                disabled={downloadWarningMode === "render" && renderConfirmLoading}
+                onClick={() => {
+                  if (downloadWarningMode === "render") {
+                    setHasError(false);
+                    setRenderConfirmLoading(true);
+                    handleRender(false, () => {
+                      setShowDownloadWarning(false);
+                      setRenderConfirmLoading(false);
+                    });
+                  } else {
+                    setShowDownloadWarning(false);
+                    handleDownload();
+                  }
+                }}
+                className="flex-1 px-4 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-70 disabled:cursor-wait flex items-center justify-center gap-2"
+              >
+                {downloadWarningMode === "render" && renderConfirmLoading ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Starting…
+                  </>
+                ) : downloadWarningMode === "render" ? (
+                  "Render & download"
+                ) : (
+                  "Download"
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowDownloadWarning(false); setRenderConfirmLoading(false); }}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Re-render warning — deducts video count; continue only if user has new changes */}
+      {showReRenderWarning && ReactDOM.createPortal(
+        <div className="fixed inset-0 z-[9998] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => { setShowReRenderWarning(false); setRenderConfirmLoading(false); }} />
+          <div className="relative bg-white rounded-2xl shadow-2xl max-w-sm w-full mx-4 p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Re-render video</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              This will deduct your video count. Continue only if you have new changes in your video.
+            </p>
+            {playbackSpeedDraft !== 1 && (() => {
+              const renderedSecs = totalVideoDuration / playbackSpeedDraft;
+              const mins = Math.floor(renderedSecs / 60);
+              const secs = Math.round(renderedSecs % 60);
+              const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+              return <p className="text-xs text-yellow-600 mb-6">Your video will be re-rendered at <strong>{playbackSpeedDraft}×</strong> speed — approximately <strong>{timeStr}</strong> long.</p>;
+            })()}
+            <div className="flex gap-3">
+              <button
+                type="button"
+                disabled={renderConfirmLoading}
+                onClick={() => {
+                  setHasError(false);
+                  setRenderConfirmLoading(true);
+                  handleRender(true, () => {
+                    setShowReRenderWarning(false);
+                    setRenderConfirmLoading(false);
+                  });
+                }}
+                className="flex-1 px-4 py-2 text-sm font-medium bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-70 disabled:cursor-wait flex items-center justify-center gap-2"
+              >
+                {renderConfirmLoading ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Starting…
+                  </>
+                ) : (
+                  "Re-render"
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowReRenderWarning(false); setRenderConfirmLoading(false); }}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Cancel render warning */}
+      {showCancelRenderWarning && ReactDOM.createPortal(
+        <div className="fixed inset-0 z-[9998] flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={() => {
+              if (!cancellingRender) setShowCancelRenderWarning(false);
+            }}
+          />
+          <div
+            className="relative bg-white rounded-2xl shadow-2xl max-w-sm w-full mx-4 p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Cancel rendering?</h3>
+            <p className="text-sm text-gray-600 mb-6">
+              This will stop your current render process. You can start rendering again anytime.
+            </p>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                disabled={cancellingRender}
+                onClick={async () => {
+                  await handleCancelRender();
+                  setShowCancelRenderWarning(false);
+                }}
+                className="flex-1 px-4 py-2 text-sm font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-70 disabled:cursor-wait flex items-center justify-center gap-2"
+              >
+                {cancellingRender ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Cancelling…
+                  </>
+                ) : (
+                  "Yes, cancel render"
+                )}
+              </button>
+              <button
+                type="button"
+                disabled={cancellingRender}
+                onClick={() => setShowCancelRenderWarning(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg disabled:opacity-60"
+              >
+                Keep rendering
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      <GetMoreTemplatesModal
+        open={showGetMoreTemplates}
+        onClose={() => setShowGetMoreTemplates(false)}
+        onChooseLink={() => {
+          setShowGetMoreTemplates(false);
+          openCraftCustomTemplateFromProjectSettings();
+        }}
+        onChooseDesigner={() => {
+          setShowGetMoreTemplates(false);
+          setShowDesignerRequest(true);
+        }}
+      />
+      <DesignerTemplateRequestModal
+        open={showDesignerRequest}
+        onClose={() => setShowDesignerRequest(false)}
+      />
+
+      <ConfirmDeleteModal
+        open={showTemplateRelayoutWarning}
+        onClose={() => {
+          setShowTemplateRelayoutWarning(false);
+          setTemplateRelayoutPendingId(null);
+        }}
+        title="Proceed with video regeneration?"
+        subtitle={project?.name}
+        warningMessage="This will deduct 1 video count from your quota. Do you want to continue?"
+        confirmLabel="Proceed"
+        confirmLoadingLabel="Starting..."
+        iconVariant="warning"
+        onConfirm={applyTemplateRelayout}
+      />
+
+      <RegenerateScriptModal
+        open={showRegenerateScriptConfirm}
+        projectName={project?.name}
+        onClose={() => setShowRegenerateScriptConfirm(false)}
+        onConfirm={async (instruction) => {
+          await applyRegenerateScript(instruction);
+        }}
+      />
+
+      {/* Verify-step "Regenerate": re-run the script (optionally with an edited instruction),
+          pre-filled with the instruction the paused job used. */}
+      <RegenerateScriptModal
+        open={showRegenerateScriptRetry && isRegenScriptReviewer}
+        projectName={project?.name}
+        initialInstruction={regenerateScriptJob?.user_instruction ?? ""}
+        confirmLabel="Regenerate"
+        // Re-running the already-paid paused job — no credit is charged (the
+        // reject endpoint does not deduct), so don't show the credit warning.
+        showsCreditWarning={false}
+        onClose={() => setShowRegenerateScriptRetry(false)}
+        onConfirm={async (instruction) => {
+          await applyRejectRegenerateScript(instruction);
+        }}
+      />
+
+      {/* Non-closeable verify popup — walks the user through new-vs-old scene comparisons.
+          Shown whenever the regeneration is paused awaiting review (persists across reloads). */}
+      <VerifyScriptModal
+        open={regenerateScriptJob?.status === "awaiting_review" && !showRegenerateScriptRetry}
+        projectName={project?.name}
+        newScenes={project?.scenes ?? []}
+        previousScenes={regenScriptPreviousScenes}
+        verifying={regenerateScriptVerifying}
+        canReview={isRegenScriptReviewer}
+        onProceed={handleVerifyRegenerateScript}
+        onRegenerate={() => setShowRegenerateScriptRetry(true)}
+      />
+
+      {/* The modal's own confirmation screen survives `open` flipping false (see
+          its sticky-render guard), but a `project` that goes falsy here would
+          still unmount it entirely — no current code path does that while this
+          modal could be showing, but keep it that way if this render gets touched. */}
+      {project && (
+        <InitialScriptReviewModal
+          open={project.status === "awaiting_script_review"}
+          project={project}
+          saving={initialScriptReviewSaving}
+          onSave={handleApproveInitialScriptReview}
+          onDone={handleInitialScriptReviewDone}
+        />
+      )}
+
+      <ConfirmDeleteModal
+        open={imageAssetDeletePending != null}
+        onClose={() => setImageAssetDeletePending(null)}
+        title="Delete this image?"
+        subtitle={imageAssetDeletePending?.filename}
+        warningMessage="This removes the file from the project. Scenes that used it will hide their image. This cannot be undone."
+        confirmLabel="Yes, delete"
+        confirmLoadingLabel="Deleting…"
+        onConfirm={handleConfirmDeleteBlogImage}
+      />
+
+      {/* Post-generation gate: review the auto-picked clips before finalizing.
+          The video already exists (scenes + remotion data are fully written) —
+          approve/change/reject just resolves the review, no pipeline to resume. */}
+      {awaitingStockFootageReview && project && (
+        <StockFootageVerifyModal
+          projectId={project.id}
+          templateId={project.template}
+          projectAspectRatio={project.aspect_ratio}
+          isPro={isPro}
+          onResolved={async () => {
+            setAwaitingStockFootageReview(false);
+            await loadProject({ silent404: true });
+          }}
+        />
+      )}
+
+      {/* Legacy: a project still parked at the OLD pre-scene-gen gate when this
+          shipped. TODO(cleanup): remove once no rows remain at that status. */}
+      {awaitingFootageLegacy && project && (
+        <StockFootageVerifyModalLegacy
+          projectId={project.id}
+          templateId={project.template}
+          isPro={isPro}
+          onApproved={() => {
+            setAwaitingFootageLegacy(false);
+            setPipelineRunning(true);
+            setPipelineStep(3);
+            pipelineTerminalFailureHandledRef.current = false;
+            startPolling();
+          }}
+        />
+      )}
+
+      {/* Unassign (not delete) a scene's image/clip from the expanded section. */}
+      <ConfirmDeleteModal
+        open={sceneMediaRemovePending != null}
+        onClose={() => setSceneMediaRemovePending(null)}
+        title={sceneMediaRemovePending?.isClip ? "Remove this clip?" : "Remove this image?"}
+        subtitle={`Scene ${sceneMediaRemovePending?.scene.order ?? ""}`}
+        warningMessage={
+          sceneMediaRemovePending?.isClip
+            ? "The clip is removed from this scene and the scene renders without it. The clip stays in your media list and can be reused."
+            : "The image is removed from this scene and the scene renders without it. The image stays in your media list and can be reused."
+        }
+        confirmLabel="Yes, remove"
+        confirmLoadingLabel="Removing…"
+        onConfirm={async () => {
+          if (!sceneMediaRemovePending) return;
+          const { scene, assetId } = sceneMediaRemovePending;
+          await handleRemoveSceneImage(scene, assetId);
+          setSceneMediaRemovePending(null);
+        }}
+      />
+
+      {showTemplateChangeModal &&
+        project &&
+        ReactDOM.createPortal(
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+            <div
+              className="absolute inset-0 bg-black/45 backdrop-blur-sm"
+              onClick={() => !submittingTemplateRelayout && setShowTemplateChangeModal(false)}
+              aria-hidden
+            />
+            <div
+              className="relative w-full max-w-lg max-h-[90vh] flex flex-col rounded-2xl border border-gray-200/80 bg-white shadow-2xl overflow-hidden"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="template-change-title"
+            >
+              <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+                <h3 id="template-change-title" className="text-base font-semibold text-gray-900">
+                  Change template
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowTemplateChangeModal(false)}
+                  className="text-gray-400 hover:text-gray-600 p-1 rounded-lg"
+                  aria-label="Close"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 flex flex-col gap-4">
+                <div className="flex gap-1 p-1 bg-gray-100/60 rounded-xl w-fit">
+                  <button
+                    type="button"
+                    onClick={() => setTemplateChangePickerTab("builtin")}
+                    className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      templateChangePickerTab === "builtin"
+                        ? "bg-white text-purple-600 shadow-sm"
+                        : "text-gray-400 hover:text-gray-600"
+                    }`}
+                  >
+                    Built-in
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTemplateChangePickerTab("custom")}
+                    className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      templateChangePickerTab === "custom"
+                        ? "bg-white text-purple-600 shadow-sm"
+                        : "text-gray-400 hover:text-gray-600"
+                    }`}
+                  >
+                    Custom
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTemplateChangePickerTab("crafted")}
+                    className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      templateChangePickerTab === "crafted"
+                        ? "bg-white text-purple-600 shadow-sm"
+                        : "text-gray-400 hover:text-gray-600"
+                    }`}
+                  >
+                    Designer Templates
+                  </button>
+                </div>
+
+                <div>
+                  <p className="text-[10px] font-medium uppercase tracking-wide text-gray-400 mb-2">Selected preview</p>
+                  <div className="rounded-xl overflow-hidden border-2 border-purple-500 shadow-[0_0_0_3px_rgba(124,58,237,0.08)]">
+                    <div className="relative aspect-video overflow-hidden">
+                      <TemplateAssignPreview
+                        templateId={templateChangeDraft}
+                        customTemplates={customTemplatesList}
+                        craftedTemplates={readyCraftedForPicker}
+                        projectCustomTheme={project.custom_theme ?? null}
+                        projectName={project.name}
+                        variant="large"
+                        previewCompileScope={user?.id != null ? String(user.id) : undefined}
+                      />
+                    </div>
+                    <div className="px-3 py-2 bg-purple-50/80 flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-gray-800 truncate">
+                        {templateChangeDraft.startsWith("custom_")
+                          ? customTemplatesList.find(
+                              (c) => c.id === parseInt(templateChangeDraft.replace("custom_", ""), 10)
+                            )?.name ?? "Custom"
+                          : templateChangeDraft.startsWith("crafted_")
+                            ? readyCraftedForPicker.find((c) => c.id === templateChangeDraft)?.name ?? "Designer"
+                          : TEMPLATE_DESCRIPTIONS[templateChangeDraft]?.title ?? templateMetas.find((m) => m.id === templateChangeDraft)?.name ?? templateChangeDraft}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-[10px] font-medium uppercase tracking-wide text-gray-400 mb-2">
+                    All{" "}
+                    {ownerAssetLabel && templateChangePickerTab !== "builtin" ? `${ownerAssetLabel} ` : ""}
+                    {templateChangePickerTab === "builtin" ? "built-in" : templateChangePickerTab === "custom" ? "custom" : "designer"} templates
+                  </p>
+                  <div className="border border-gray-200/60 rounded-xl p-4 max-h-[240px] overflow-y-auto bg-gray-50/40">
+                    {templateChangePickerTab === "builtin" ? (
+                      templateMetas.length > 0 ? (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                          {[...templateMetas].sort((a, b) => {
+                            const rank = (t: typeof a) => (t.new_template ? 0 : t.new_scenes ? 1 : t.popular_template ? 2 : 3);
+                            return rank(a) - rank(b);
+                          }).map((t) => {
+                            const PreviewComp = TEMPLATE_PREVIEWS[t.id];
+                            const desc = TEMPLATE_DESCRIPTIONS[t.id];
+                            const isSel = templateChangeDraft === t.id;
+                            const isNew = t.new_template === true;
+                            const isNewScenes = t.new_scenes === true;
+                            const isPopular = t.popular_template === true;
+                            return (
+                              <button
+                                key={t.id}
+                                type="button"
+                                onClick={() => setTemplateChangeDraft(t.id)}
+                                className={`text-left rounded-lg overflow-hidden transition-all ${
+                                  isSel
+                                    ? "ring-2 ring-purple-500 ring-offset-1 ring-offset-gray-50"
+                                    : isNew
+                                    ? "ring-1 ring-purple-400/60 hover:ring-purple-500"
+                                    : isNewScenes
+                                    ? "ring-1 ring-sky-400/60 hover:ring-sky-500"
+                                    : isPopular
+                                    ? "ring-1 ring-amber-400/60 hover:ring-amber-500"
+                                    : "ring-1 ring-gray-200/60 hover:ring-purple-300/60"
+                                }`}
+                              >
+                                <div className="relative h-[70px] overflow-hidden">
+                                  {PreviewComp ? (
+                                    <PreviewComp key={`pick-${t.id}`} thumbnailMode />
+                                  ) : (
+                                    <div className="w-full min-h-[56px] bg-gray-100 flex items-center justify-center text-[10px] text-gray-400 px-1">
+                                      {t.name}
+                                    </div>
+                                  )}
+                                  {isNew && (
+                                    <div className="absolute top-0.5 left-0.5 z-[1]">
+                                      <NewTemplateBadge />
+                                    </div>
+                                  )}
+                                  {!isNew && isNewScenes && (
+                                    <div className="absolute top-0 left-0.5 z-[1]">
+                                      <NewScenesTemplateBadge />
+                                    </div>
+                                  )}
+                                  {!isNew && !isNewScenes && isPopular && (
+                                    <div className="absolute top-0.5 left-0.5 z-[1]">
+                                      <PopularTemplateBadge />
+                                    </div>
+                                  )}
+                                </div>
+                                <div className={`px-2 py-1 ${isSel ? "bg-purple-50/90" : "bg-white/90"}`}>
+                                  <div className="text-[10px] font-semibold text-gray-800 truncate">{desc?.title ?? t.name}</div>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-500 py-6 text-center">No built-in templates loaded.</p>
+                      )
+                    ) : templateChangePickerTab === "custom" ? (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                        <CraftYourTemplateCard
+                          variant="default"
+                          isPro={isPro}
+                          onClick={() => {
+                            setShowGetMoreTemplates(true);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setShowGetMoreTemplates(true);
+                            }
+                          }}
+                        />
+                        {readyCustomForPicker.map((ct) => {
+                          const cid = `custom_${ct.id}`;
+                          const isSel = templateChangeDraft === cid;
+                          return (
+                            <button
+                              key={cid}
+                              type="button"
+                              onClick={() => {
+                                setTemplateChangeDraft(cid);
+                              }}
+                              className={`text-left rounded-lg overflow-hidden border-2 transition-all ${
+                                isSel ? "border-purple-500 shadow-[0_0_0_2px_rgba(124,58,237,0.12)]" : "border-gray-200/60 hover:border-purple-300/60"
+                              }`}
+                            >
+                              <div className="relative isolate h-[70px] overflow-hidden">
+                                {/* Previews use canvas/Remotion; without pointer-events-none clicks never reach the button. */}
+                                <div className="relative z-0 h-full pointer-events-none">
+                                  <CustomPreviewLandscape
+                                    theme={ct.theme}
+                                    name={ct.name}
+                                    introCode={ct.intro_code || undefined}
+                                    outroCode={ct.outro_code || undefined}
+                                    contentCodes={ct.content_codes || undefined}
+                                    contentArchetypeIds={ct.content_archetype_ids || undefined}
+                                    designVersion={(ct.design_blueprint as { version?: number } | null)?.version}
+                                    sceneSampleContent={ct.scene_sample_content}
+                                    previewImageUrl={ct.preview_image_url}
+                                    logoUrls={ct.logo_urls}
+                                    ogImage={ct.og_image}
+                                    thumbnailMode
+                                    staticThumb={isMobile}
+                                  />
+                                </div>
+                              </div>
+                              <div className={`px-2 py-1 ${isSel ? "bg-purple-50/80" : "bg-white/80"}`}>
+                                <div className="text-[10px] font-semibold text-gray-800 truncate">{ct.name}</div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                        {customTemplatesLoading && (
+                          <div
+                            className="rounded-lg border border-dashed border-gray-200/80 bg-white/70 flex flex-col items-center justify-center gap-2 min-h-[88px] px-2 py-3 text-center"
+                            role="status"
+                            aria-live="polite"
+                          >
+                            <span className="w-4 h-4 border-2 border-purple-200 border-t-purple-600 rounded-full animate-spin shrink-0" aria-hidden />
+                            <p className="text-[10px] text-gray-500 leading-snug">
+                              Loading custom templates, please wait.
+                            </p>
+                          </div>
+                        )}
+                        {!customTemplatesLoading && readyCustomForPicker.length === 0 && (
+                          <p className="col-span-2 sm:col-span-3 text-xs text-gray-500 py-4 text-center flex items-center justify-center">
+                            No custom templates ready yet.
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                        {readyCraftedForPicker.map((ct) => {
+                          const craftedId = ct.id;
+                          const isSel = templateChangeDraft === craftedId;
+                          return (
+                            <button
+                              key={craftedId}
+                              type="button"
+                              onClick={() => setTemplateChangeDraft(craftedId)}
+                              className={`text-left rounded-lg overflow-hidden border-2 transition-all ${
+                                isSel ? "border-purple-500 shadow-[0_0_0_2px_rgba(124,58,237,0.12)]" : "border-gray-200/60 hover:border-purple-300/60"
+                              }`}
+                            >
+                              <div className="relative isolate h-[70px] overflow-hidden">
+                                <div className="relative z-0 h-full pointer-events-none">
+                                  <CraftedTemplatePreview
+                                    templateId={craftedId}
+                                    compileCacheScope={user?.id != null ? String(user.id) : undefined}
+                                    previewSource={ct.preview_file ?? null}
+                                    previewImageUrl={ct.preview_image_url ?? null}
+                                    name={ct.name}
+                                    theme={ct.theme}
+                                    thumbnailMode
+                                    staticThumb={isMobile}
+                                    showLoaderOnEmptyOrError
+                                  />
+                                </div>
+                                <div className="pointer-events-none absolute top-1 left-1 z-20 px-1.5 py-0.5 rounded text-[8px] font-bold bg-amber-500 text-white shadow-sm">
+                                  Designer
+                                </div>
+                              </div>
+                              <div className={`px-2 py-1 ${isSel ? "bg-purple-50/80" : "bg-white/80"}`}>
+                                <div className="text-[10px] font-semibold text-gray-800 truncate">{ct.name}</div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                        {craftedTemplatesLoading && (
+                          <div
+                            className="rounded-lg border border-dashed border-gray-200/80 bg-white/70 flex flex-col items-center justify-center gap-2 min-h-[88px] px-2 py-3 text-center"
+                            role="status"
+                            aria-live="polite"
+                          >
+                            <span className="w-4 h-4 border-2 border-amber-200 border-t-amber-500 rounded-full animate-spin shrink-0" aria-hidden />
+                            <p className="text-[10px] text-gray-500 leading-snug">
+                              Loading designer templates, please wait.
+                            </p>
+                          </div>
+                        )}
+                        {!craftedTemplatesLoading && readyCraftedForPicker.length === 0 && (
+                          <p className="col-span-2 sm:col-span-3 text-xs text-gray-500 py-4 text-center flex items-center justify-center">
+                            No designer templates available.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 px-5 py-4 border-t border-gray-100 bg-gray-50/50">
+                <button
+                  type="button"
+                  onClick={() => setShowTemplateChangeModal(false)}
+                  className="px-4 py-2 text-xs font-medium text-gray-600 hover:bg-gray-100 rounded-xl"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={templateChangeDraft === assignedTemplateId || anyJobRunning}
+                  onClick={() => {
+                    if (templateChangeDraft === assignedTemplateId) return;
+                    setTemplateRelayoutPendingId(templateChangeDraft);
+                    setShowTemplateChangeModal(false);
+                    setShowTemplateRelayoutWarning(true);
+                  }}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 disabled:cursor-not-allowed rounded-xl"
+                >
+                  Confirm
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {showShareDropdown &&
+        project?.scenes &&
+        project.scenes.length > 0 &&
+        ReactDOM.createPortal(
+          <>
+            <div className="fixed inset-0 z-[9998]" onClick={() => setShowShareDropdown(false)} />
+            <div
+              className="fixed z-[9999] w-56 bg-white rounded-xl shadow-lg border border-gray-100 py-1 overflow-hidden"
+              style={(() => {
+                const el = shareAnchorRef.current;
+                if (!el) return {};
+                const rect = el.getBoundingClientRect();
+                const panelW = 224;
+                let left = rect.right - panelW;
+                if (left < 8) left = 8;
+                if (left + panelW > window.innerWidth - 8) {
+                  left = Math.max(8, window.innerWidth - panelW - 8);
+                }
+                return { top: rect.bottom + 8, left };
+              })()}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setShowShareDropdown(false);
+                  setInviteOpen(true);
+                }}
+                className="w-full text-left px-4 py-2.5 text-xs text-gray-700 hover:bg-purple-50 hover:text-purple-700 transition-colors flex items-center gap-2.5"
+              >
+                <svg className="w-3.5 h-3.5 text-purple-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+                </svg>
+                Invite collaborators
+              </button>
+              <div className="border-t border-gray-100 my-0.5" />
+              <button
+                type="button"
+                disabled={embedLoading}
+                onClick={() => {
+                  void handleCopyPreviewLink();
+                }}
+                className="w-full text-left px-4 py-2.5 text-xs text-gray-700 hover:bg-purple-50 hover:text-purple-700 transition-colors flex items-center gap-2.5 disabled:opacity-50 disabled:pointer-events-none"
+              >
+                <svg className="w-3.5 h-3.5 text-purple-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                </svg>
+                Share Preview Link
+              </button>
+              <button
+                type="button"
+                disabled={embedLoading}
+                onClick={() => {
+                  void handleGetEmbedLink();
+                }}
+                className="w-full text-left px-4 py-2.5 text-xs text-gray-700 hover:bg-purple-50 hover:text-purple-700 transition-colors flex items-center gap-2.5 disabled:opacity-50 disabled:pointer-events-none"
+              >
+                <svg className="w-3.5 h-3.5 text-purple-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                </svg>
+                Embed
+              </button>
+              {/* Publishing lives in the toolbar now, as icon buttons beside
+                  the Share & Invite trigger — see the header above. */}
+            </div>
+          </>,
+          document.body
+        )}
+
+      {/* Invite collaborators — opened from the Share menu, or after submitting a star review. */}
+      <ShareProjectModal
+        open={inviteOpen || showPostReviewInvite}
+        onClose={() => {
+          setInviteOpen(false);
+          setShowPostReviewInvite(false);
+        }}
+        projectId={projectId}
+        projectName={project.name}
+        isOwner={project.user_id === user?.id}
+        onLeft={() => navigate("/dashboard", { replace: true })}
+        successNote={showPostReviewInvite ? "Thanks for your review! You can also invite collaborators to help edit this video." : undefined}
+      />
+
+      {/* Publish to YouTube / X — opened from the Share menu. */}
+      {publishPlatform && (
+        <PublishToSocialModal
+          open
+          platform={publishPlatform}
+          projectId={Number(projectId)}
+          projectName={project.name}
+          // The source of truth for "is there an MP4", not `rendered`, which is
+          // also true partway through a render.
+          hasRenderedVideo={Boolean(project.r2_video_url)}
+          job={latestPublishJobByPlatform.get(publishPlatform) ?? null}
+          jobs={publishJobs}
+          // The render's own percentage, so the modal's "Rendering" step can
+          // show it rather than being an indeterminate spinner.
+          renderProgress={rendering ? renderProgress : null}
+          isOwner={project.user_id === user?.id}
+          onClose={() => setPublishPlatform(null)}
+          onJobChanged={() => void refreshPublishJobs()}
+          onRenderStarted={(runId) => {
+            // The publish endpoint already started the render, so adopt its run
+            // id and drive the existing progress UI rather than starting a
+            // second render.
+            if (runId) expectedRenderRunIdRef.current = runId;
+            setHasError(false);
+            setRendered(false);
+            setRendering(true);
+            setRenderProgress(0);
+            startRenderPollingLoop();
+          }}
+        />
+      )}
+
+      {/* Edit history + comments (opens from any tab). */}
+      <EditHistoryPanel
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        projectId={project.id}
+        scenes={project.scenes.map((s) => ({ id: s.id, order: s.order, title: s.title }))}
+        isOwner={project.user_id === user?.id}
+        currentUserId={user?.id}
+        onReverted={handleCollabDraftResolved}
+      />
+
+      {showSlidesExportMenu &&
+        !missingCustomTemplate &&
+        ReactDOM.createPortal(
+          <>
+            <div
+              className="fixed inset-0 z-[9998]"
+              onClick={() => setShowSlidesExportMenu(false)}
+            />
+            <div
+              className="fixed z-[9999] w-56 bg-white rounded-xl shadow-lg border border-gray-100 py-1 overflow-hidden"
+              style={(() => {
+                const el = slidesExportAnchorRef.current;
+                if (!el) return {};
+                const rect = el.getBoundingClientRect();
+                const panelW = 224;
+                let left = rect.right - panelW;
+                if (left < 8) left = 8;
+                if (left + panelW > window.innerWidth - 8) {
+                  left = Math.max(8, window.innerWidth - panelW - 8);
+                }
+                return { top: rect.bottom + 8, left };
+              })()}
+            >
+              <button
+                type="button"
+                data-action="render-button"
+                data-action-download="download-video"
+                disabled={downloading || sceneExporting || (!rendered && anyJobRunning)}
+                onClick={() => {
+                  setShowSlidesExportMenu(false);
+                  if (!rendered) {
+                    setHasError(false);
+                    setDownloadWarningMode("render");
+                    setShowDownloadWarning(true);
+                  } else {
+                    setDownloadWarningMode("download");
+                    setShowDownloadWarning(true);
+                  }
+                }}
+                className="w-full text-left px-4 py-2.5 text-xs text-gray-700 hover:bg-violet-50 hover:text-violet-800 transition-colors disabled:opacity-50"
+              >
+                {hasError && !rendered ? "Resume MP4 download" : "MP4 video"}
+              </button>
+              {project?.scenes && project.scenes.length > 0 && (
+                <>
+                  <div className="border-t border-gray-100 my-0.5" />
+                  <button
+                    type="button"
+                    disabled={sceneExporting || downloading}
+                    onClick={() => openSlideExportWizard("pptx")}
+                    className="w-full text-left px-4 py-2.5 text-xs text-gray-700 hover:bg-violet-50 hover:text-violet-800 transition-colors disabled:opacity-50"
+                  >
+                    PowerPoint (.pptx)
+                  </button>
+                  <button
+                    type="button"
+                    disabled={sceneExporting || downloading}
+                    onClick={() => openSlideExportWizard("pdf")}
+                    className="w-full text-left px-4 py-2.5 text-xs text-gray-700 hover:bg-violet-50 hover:text-violet-800 transition-colors disabled:opacity-50"
+                  >
+                    PDF
+                  </button>
+                  <button
+                    type="button"
+                    disabled={sceneExporting || downloading}
+                    onClick={() => openSlideExportWizard("zip")}
+                    className="w-full text-left px-4 py-2.5 text-xs text-gray-700 hover:bg-violet-50 hover:text-violet-800 transition-colors disabled:opacity-50"
+                  >
+                    PNG images (one per scene)
+                  </button>
+                </>
+              )}
+            </div>
+          </>,
+          document.body
+        )}
+
+
+      {slideExportWizard &&
+        project?.scenes?.length &&
+        ReactDOM.createPortal(
+          <div className="fixed inset-0 z-[10000] flex items-end sm:items-center justify-center sm:p-6">
+            <button
+              type="button"
+              className="absolute inset-0 bg-black/50 backdrop-blur-[2px] border-0 cursor-default"
+              aria-label="Close"
+              // Closing mid-capture unmounts the player being captured.
+              disabled={sceneExporting}
+              onClick={() => { if (!sceneExporting) setSlideExportWizard(null); }}
+            />
+            <div
+              className="relative w-full sm:max-w-2xl bg-white rounded-t-2xl sm:rounded-2xl shadow-xl border border-gray-100 p-5 sm:p-7"
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="slide-export-wizard-title"
+            >
+              <h2 id="slide-export-wizard-title" className="text-sm font-semibold text-gray-900">
+                Choose the frame for each slide
+              </h2>
+              <p className="mt-1 text-xs text-gray-500 leading-snug">
+                The preview below updates while you adjust the slider. Go through each scene, then download — your choices are used for PowerPoint, PDF, and PNG export.
+              </p>
+              {(() => {
+                const w = slideExportWizard;
+                const scenes = project.scenes;
+                const idx = w.stepIndex;
+                const scene = scenes[idx]!;
+                const title = scene.title?.trim() || `Scene ${idx + 1}`;
+                const n = scenes.length;
+                const rawFraction = w.fractions[idx];
+                const safeFraction = Number.isFinite(rawFraction)
+                  ? Math.max(0, Math.min(1, Number(rawFraction)))
+                  : SCENE_EXPORT_TIMELINE_FRACTION;
+                const pct = Math.round(safeFraction * 100);
+                const downloadLabel =
+                  w.format === "pptx"
+                    ? "Download PowerPoint"
+                    : w.format === "pdf"
+                    ? "Download PDF"
+                    : "Download PNGs";
+                return (
+                  <>
+                    <div className="mt-3">
+                      <div>
+                        <p className="text-xs font-medium text-gray-800">
+                          Scene {idx + 1} of {n}
+                          <span className="font-normal text-gray-500"> · {title}</span>
+                        </p>
+                        <p className="mt-1 text-[11px] text-gray-500">
+                          Preview at <span className="font-medium text-gray-700">{pct}%</span> of this scene
+                        </p>
+                      </div>
+                    </div>
+                    {/* Live Remotion player — pixel-perfect, no html2canvas needed.
+                        Key includes frame so it remounts (and seeks) on every change. */}
+                    <div className="relative mt-4 rounded-xl overflow-hidden w-full aspect-video bg-black">
+                      <VideoPreview
+                        key={`modal-preview-${idx}-${pct}`}
+                        ref={modalPreviewPlayerRef}
+                        project={project}
+                        layoutPropSchema={layoutPropSchema !== null ? layoutPropSchema : undefined}
+                        logoSizeOverride={logoSize}
+                        logoOpacityOverride={logoOpacity}
+                        logoPositionOverride={logoPosition}
+                        initialFrame={getSceneExportGlobalFrame(project, idx, safeFraction)}
+                        hideControls
+                        ownerScopedProjectId={useOwnerScopedAssets ? projectId : undefined}
+                        precompiledCraftedDetail={ownerScopedCraftedDetail}
+                        precompiledTemplateData={currentCustomTemplateCode}
+                        pendingVoiceovers={pendingVoiceovers}
+                      />
+                      {sceneExporting && (
+                        <div
+                          className="pointer-events-none absolute inset-x-0 bottom-0 z-50 flex items-center justify-center pb-3"
+                          aria-live="polite"
+                        >
+                          {/* A badge, not a cover: the wizard advances through the
+                              scenes as they render, so the slides must stay visible
+                              behind it (an opaque backdrop hid the whole export). */}
+                          <div className="flex items-center gap-2 rounded-lg bg-black/70 px-3 py-2 text-xs font-medium text-white shadow-lg">
+                            <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                            {sceneExportProgress
+                              ? `Rendering slide ${Math.min(
+                                  sceneExportProgress.completed + 1,
+                                  sceneExportProgress.total
+                                )} of ${sceneExportProgress.total}…`
+                              : "Rendering slides…"}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <div className="mt-3">
+                      <div className="flex items-center justify-between text-[11px] text-gray-500 mb-1">
+                        <span>Position in scene</span>
+                        <span className="tabular-nums font-medium text-gray-700">{pct}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={pct}
+                        onChange={(e) => {
+                          const v = Number(e.target.value) / 100;
+                          setSlideExportWizard((prev) => {
+                            if (!prev) return prev;
+                            const fractions = [...prev.fractions];
+                            fractions[prev.stepIndex] = v;
+                            return { ...prev, fractions };
+                          });
+                        }}
+                        // Changing this mid-export remounts the preview (the value
+                        // feeds both the VideoPreview key and the Player's
+                        // initialFrame key), which empties the very container the
+                        // capture is reading and yields blank slides.
+                        disabled={sceneExporting}
+                        className="w-full h-2 accent-purple-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                      />
+                    </div>
+                    <div className="mt-3 flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSlideExportWizard((prev) =>
+                            prev && prev.stepIndex > 0 ? { ...prev, stepIndex: prev.stepIndex - 1 } : prev
+                          )
+                        }
+                        disabled={idx <= 0 || sceneExporting}
+                        className="px-3 py-2 text-xs font-medium rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Back
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSlideExportWizard((prev) =>
+                            prev && prev.stepIndex < n - 1
+                              ? { ...prev, stepIndex: prev.stepIndex + 1 }
+                              : prev
+                          )
+                        }
+                        disabled={idx >= n - 1 || sceneExporting}
+                        className="px-3 py-2 text-xs font-medium rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Next
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void runSlideExportWithFractions(
+                          w.format,
+                          w.fractions.map((v) =>
+                            Number.isFinite(v) ? Math.max(0, Math.min(1, Number(v))) : SCENE_EXPORT_TIMELINE_FRACTION
+                          )
+                        )
+                      }
+                      disabled={sceneExporting}
+                      className="mt-4 w-full py-2.5 text-xs font-semibold rounded-xl bg-purple-600 hover:bg-purple-700 text-white disabled:opacity-50"
+                    >
+                      {downloadLabel}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { if (!sceneExporting) setSlideExportWizard(null); }}
+                      disabled={sceneExporting}
+                      className="mt-2 w-full py-2 text-xs font-medium text-gray-500 hover:text-gray-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Cancel
+                    </button>
+                  </>
+                );
+              })()}
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* Upper area: loader when running, editor when complete */}
+      {pipelineRunning || templateRelayoutRunning || regenerateScriptRunning || languageChangeRunning ? (
+        renderGenerationLoader(
+          languageChangeRunning ? "language-change"
+          : regenerateScriptRunning ? "regenerate-script"
+          : templateRelayoutRunning ? "template-relayout"
+          : "pipeline"
+        )
+      ) : pipelineComplete && project.scenes.length > 0 ? (
+        renderCompleted()
+      ) : (
+        <div className="glass-card p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="flex items-center gap-3 mb-1">
+                <h1 className="text-lg font-semibold text-gray-900">
+                  {project.name}
+                </h1>
+                <StatusBadge status={statusForBadge} />
+              </div>
+              {project.blog_url && !project.blog_url.startsWith("upload://") ? (
+                <a
+                  href={project.blog_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-gray-400 hover:text-purple-600 transition-colors"
+                >
+                  {project.blog_url}
+                </a>
+              ) : (
+                <span className="text-xs text-gray-400">
+                  {project.blog_url?.startsWith("upload://")
+                    ? "Created from uploaded documents"
+                    : ""}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              {hasError && (
+                <button
+                  onClick={kickOffGeneration}
+                  className="px-4 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-medium rounded-lg transition-colors"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {runProjectTour && (
+        <Joyride
+          steps={projectTourSteps}
+          run={true}
+          stepIndex={tabsTourStepIndex}
+          continuous
+          showSkipButton={true}
+          callback={handleProjectTourCallback}
+          scrollToFirstStep={true}
+          disableScrolling={false}
+          spotlightClicks={false}
+          styles={PROJECT_JOYRIDE_STYLES}
+          locale={{ back: "Back", close: "Close", last: "Done", next: "Next", skip: "Skip" }}
+        />
+      )}
+      {/* Pill tabs + edit-history trigger. On small screens the button wraps to the
+          next row and right-aligns; on ≥sm it sits inline on the right. */}
+      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+        <ProjectTabs tabs={tabs} active={activeTab} onChange={handleTabChange} containerDataTour="tabs-container" />
+        <button
+          type="button"
+          onClick={() => setHistoryOpen(true)}
+          className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs sm:text-sm font-medium text-gray-700 border border-gray-300 hover:border-gray-400 rounded-lg transition-colors shrink-0 mr-auto sm:mr-0 sm:ml-auto"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          Edit history
+        </button>
+        {/* AI-edit credits remaining — monthly allowance + purchased pool (owner on shared projects).
+            Hidden on the avatar tab: that flow states its own price per scene and
+            the running total on the Generate button, so a second, differently
+            scoped credit figure beside it just reads as a contradiction. */}
+        {activeTab !== "avatar" && (() => {
+          const total = useOwnerScopedAssets
+            ? (project.owner_ai_edit_credits ?? 0) + (project.owner_ai_edit_allowance_remaining ?? 0)
+            : (user?.ai_edit_credits ?? 0) + (user?.ai_edit_allowance_remaining ?? 0);
+          // A non-paid owner who has run out of credits sees a red upgrade prompt
+          // linking to pricing. Collaborators can't fix it by upgrading their own
+          // plan (they see the "Oops" flow instead), so keep the neutral display.
+          const ownerOutOfCredits =
+            !effectiveIsPro && !useOwnerScopedAssets && total <= 0;
+          if (ownerOutOfCredits) {
+            return (
+              <span className="text-[10px] sm:text-xs font-semibold text-red-600 shrink-0 self-end pb-1">
+                You're out of AI edit credits.{" "}
+                <button
+                  type="button"
+                  onClick={() => navigate("/subscription")}
+                  className="text-purple-600 underline hover:text-purple-700"
+                >
+                  Upgrade now
+                </button>
+              </span>
+            );
+          }
+          return (
+            <span
+              className="text-[10px] sm:text-xs font-medium text-gray-400 shrink-0 self-end pb-1"
+              title={
+                useOwnerScopedAssets
+                  ? "The project owner's AI-edit budget."
+                  : "AI-assisted edits remaining. Buy a video for +20 edits, or upgrade for a larger monthly allowance."
+              }
+            >
+              {useOwnerScopedAssets ? "Project owner's AI edit credits:" : "AI edit credits:"}{" "}
+              <span className="text-md leading-none align-middle relative -top-0.5">
+                {formatAiEditCreditsDisplay(total)}
+              </span>
+            </span>
+          );
+        })()}
+
+      </div>
+
+      {/* Tab content */}
+      <div>
+        {activeTab === "script" && (
+          <ScriptPanel
+            scenes={project.scenes}
+            projectName={project.name}
+            projectId={project.id}
+            onSceneUpdate={(updatedScene) => {
+              setProject((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      scenes: prev.scenes.map((s) =>
+                        s.id === updatedScene.id ? updatedScene : s
+                      ),
+                    }
+                  : prev
+              );
+            }}
+            onRegenerateScript={() => setShowRegenerateScriptConfirm(true)}
+            isRegenerating={regenerateScriptRunning}
+            disabled={anyJobRunning || !["generated", "done"].includes(project.status)}
+            onEditScene={(scene) => setSceneEditModal(scene)}
+          />
+        )}
+
+        {activeTab === "scenes" && (
+          <div>
+            {project.scenes.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 gap-3">
+                <div className="flex items-center gap-1">
+                  {[0, 1, 2].map((i) => (
+                    <span
+                      key={i}
+                      className="w-2 h-2 rounded-full bg-purple-400 animate-bounce"
+                      style={{ animationDelay: `${i * 0.15}s` }}
+                    />
+                  ))}
+                </div>
+                <p className="text-xs text-gray-400">Scenes are being generated, please wait…</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex items-baseline gap-4 mb-2 min-w-0">
+                  <h2 className="text-base font-medium text-gray-900 truncate max-w-[40%] shrink-0" title={project.name}>
+                    {project.name}
+                  </h2>
+                  <span className="text-xs text-gray-400">
+                    {project.scenes.length} scenes — {imageAssets.length} images. Click <span className="font-medium text-purple-600">Edit</span> on any scene to change its settings. Drag from left to reorder.
+                  </span>
+                </div>
+
+                <div className="relative">
+                  {reorderSaving && (
+                    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-xl bg-white/80 backdrop-blur-sm">
+                      <div className="w-10 h-10 border-2 border-purple-200 border-t-purple-600 rounded-full animate-spin" />
+                      <p className="mt-3 text-sm font-medium text-gray-700">Saving order…</p>
+                    </div>
+                  )}
+                  <SceneGroupAccordion
+                    items={project.scenes.map((scene, idx) => ({ scene, idx }))}
+                    getOrder={({ scene }) => scene.order}
+                    expandedGroupIndex={expandedGroupIndex}
+                    onToggleGroup={(groupIdx, groupScenes) => {
+                      if (expandedGroupIndex === groupIdx) {
+                        setExpandedGroupIndex(null);
+                        return;
+                      }
+                      setExpandedGroupIndex(groupIdx);
+                      if (
+                        expandedScene != null &&
+                        !groupScenes.some(({ scene }) => scene.id === expandedScene)
+                      ) {
+                        setExpandedScene(null);
+                      }
+                    }}
+                    renderGroupBody={(groupScenes, groupIdx) => (
+                      <>
+                  {groupScenes.map(({ scene, idx }) => {
+                    const isExpanded = expandedScene === scene.id;
+                    const sceneImages = sceneImageMap[idx] || [];
+                    // Use latest audio asset by id (regenerated scene = new asset) and cache-bust so new voiceover loads
+                    const audioFilename = extractAudioFilename(scene.voiceover_path) || `scene_${scene.order}.mp3`;
+                    const audioUrl = scene.voiceover_path
+                      ? resolveVoiceoverUrl(project.id, audioFilename, audioAssets)
+                      : null;
+                    const isDragging = draggedSceneId === scene.id;
+                    const isDropTarget = dragOverSceneId === scene.id && !isDragging;
+
+                    return (
+                      <Fragment key={scene.id}>
+                      <SceneListRow
+                        scene={scene}
+                        index={idx}
+                        expanded={isExpanded}
+                        showAudio={hasVoiceoverContent}
+                        durationOverride={pendingSceneDuration(scene)}
+                        isDragging={isDragging}
+                        isDropTarget={isDropTarget}
+                        onToggleExpand={() => setExpandedScene(isExpanded ? null : scene.id)}
+                        onEdit={() => setSceneEditModal(scene)}
+                        onDelete={() => {
+                          // A video must keep at least one scene, so the last one
+                          // gets an explanatory notice instead of the confirm modal.
+                          if (project.scenes.length <= 1) {
+                            showNotice(
+                              "At least one scene is required for a video.",
+                              { title: "Can't delete this scene" }
+                            );
+                            return;
+                          }
+                          setSceneToDelete(scene);
+                        }}
+                        onAddAfter={() => { setAddSceneAnchor(scene); setAddSceneOpen(true); }}
+                        addDisabled={addSceneRunning}
+                        addDisabledReason="A scene is already being added."
+                        onComment={project.is_shared ? () => setCommentScene(scene) : undefined}
+                        commentCount={commentCounts[scene.id] ?? 0}
+                        onDragHandleStart={(e) => {
+                          setDraggedSceneId(scene.id);
+                          e.dataTransfer.setData("text/plain", String(scene.id));
+                          e.dataTransfer.effectAllowed = "move";
+                          const row = (e.currentTarget as HTMLElement).closest("[data-scene-row]");
+                          if (row) {
+                            const rect = row.getBoundingClientRect();
+                            e.dataTransfer.setDragImage(row as Element, e.clientX - rect.left, e.clientY - rect.top);
+                          }
+                        }}
+                        onDragHandleEnd={() => {
+                          setDraggedSceneId(null);
+                          setDragOverSceneId(null);
+                        }}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          e.dataTransfer.dropEffect = "move";
+                          setDragOverSceneId(scene.id);
+                        }}
+                        onDragLeave={(e) => {
+                          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                            setDragOverSceneId(null);
+                          }
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          setDragOverSceneId(null);
+                          const sourceId = Number(e.dataTransfer.getData("text/plain"));
+                          if (!sourceId || sourceId === scene.id) return;
+                          const fromIdx = project.scenes.findIndex((s) => s.id === sourceId);
+                          const toIdx = project.scenes.findIndex((s) => s.id === scene.id);
+                          if (fromIdx < 0 || toIdx < 0) return;
+                          const reordered = [...project.scenes];
+                          const [removed] = reordered.splice(fromIdx, 1);
+                          reordered.splice(toIdx, 0, removed);
+                          setReorderSaving(true);
+                          reorderScenes(
+                            project.id,
+                            reordered.map((s, i) => ({ scene_id: s.id, order: i + 1 }))
+                          )
+                            .then(() => loadProject())
+                            .finally(() => setReorderSaving(false));
+                        }}
+                      >
+                        {isExpanded && (
+                              <div className="ml-4 mt-1 glass-card p-5 border-l-2 border-l-purple-100 space-y-4 rounded-r-lg border border-t-0">
+                                {/* Title — the scene's main on-screen label, and
+                                    what the Title font-size slider below drives.
+                                    It was missing from this card entirely: the
+                                    only place it appeared was the collapsed
+                                    row's heading, so a user editing type sizes
+                                    could not see the text they were sizing. */}
+                                <div>
+                                  <h4 className="text-[11px] font-medium text-gray-400 uppercase tracking-wider mb-1.5">
+                                    Title
+                                  </h4>
+                                  <p className="text-sm text-gray-700 leading-relaxed">
+                                    {scene.title || (
+                                      <span className="italic text-gray-300">
+                                        No title
+                                      </span>
+                                    )}
+                                  </p>
+                                </div>
+
+                                {/* Display text.
+                                    NOT `display_text ?? narration_text`. That
+                                    fallback printed the VOICEOVER SCRIPT under a
+                                    "Display text" heading whenever a scene had no
+                                    display text of its own — a field that is
+                                    contractually never rendered on screen, shown
+                                    as though it were the on-screen copy. The
+                                    preview does not do this (see VideoPreview:
+                                    displayText falls back to the TITLE, never to
+                                    narration), so the card was describing a scene
+                                    the video does not contain. */}
+                                <div>
+                                  <h4 className="text-[11px] font-medium text-gray-400 uppercase tracking-wider mb-1.5">
+                                    Display text
+                                  </h4>
+                                  <p className="text-sm text-gray-700 leading-relaxed">
+                                    {scene.display_text || (
+                                      <span className="italic text-gray-300">
+                                        Not set — the title is shown instead
+                                      </span>
+                                    )}
+                                  </p>
+                                </div>
+
+                                {/* Visual Description */}
+                                <div>
+                                  <h4 className="text-[11px] font-medium text-gray-400 uppercase tracking-wider mb-1.5">
+                                    Visual Description
+                                  </h4>
+                                  <p className="text-xs text-gray-500 italic leading-relaxed">
+                                    {scene.visual_description || "—"}
+                                  </p>
+                                </div>
+
+                                {/* Layout (from remotion_code JSON) */}
+                                {scene.remotion_code && (() => {
+                                  try {
+                                    const desc = JSON.parse(scene.remotion_code);
+                                    // Custom templates write NONE of `layout`,
+                                    // `contentArchetype` or `layoutConfig.arrangement` —
+                                    // they mark scenes with sceneType / contentVariantIndex.
+                                    // Reading only those three keys left every custom
+                                    // scene's layout null here, which is why the intro and
+                                    // outro rows showed a placeholder instead of their
+                                    // name. Fall back to the shared resolver, which the
+                                    // image-capability check further down already uses.
+                                    // The backend's resolution is consulted FIRST for
+                                    // custom templates: it knows the archetype-matched
+                                    // content variant, which is exactly the case the
+                                    // descriptor cannot express and which made every
+                                    // middle scene fall through to "Default layout".
+                                    const layoutId =
+                                      project.custom_scene_layouts?.[idx] ||
+                                      desc.layout ||
+                                      desc.contentArchetype ||
+                                      desc.layoutConfig?.arrangement ||
+                                      customSceneLayoutId(scene.remotion_code, idx, project.scenes.length) ||
+                                      null;
+                                    return (
+                                      <div>
+                                        <h4 className="text-[11px] font-medium text-gray-400 uppercase tracking-wider mb-1.5">
+                                          Layout
+                                        </h4>
+                                        <span className="inline-block px-2.5 py-1 bg-purple-50 text-purple-600 rounded-lg text-xs font-medium">
+                                          {/* The template's OWN name for this layout wins.
+                                              `layout_names` is what the template editor's
+                                              scene list shows ("Metrics Quadrant"), built
+                                              from the archetype ids; without it this fell
+                                              back to the de-underscored raw id and read
+                                              "content 1". The response was already being
+                                              fetched and its names thrown away. */}
+                                          {getSceneLayoutLabel(
+                                            project.template,
+                                            layoutId,
+                                            (layoutId ? projectLayouts?.layout_names?.[layoutId] : undefined) ??
+                                              layoutId?.replace(/_/g, " "),
+                                          ) || "text narration"}
+                                        </span>
+                                      </div>
+                                    );
+                                  } catch {
+                                    return null;
+                                  }
+                                })()}
+
+                                {/* Typography — font size sliders with live preview and debounced save */}
+                                {scene.remotion_code && project && (() => {
+                                  try {
+                                    const desc = JSON.parse(scene.remotion_code) as {
+                                      layout?: string;
+                                      layoutConfig?: {
+                                        arrangement?: string;
+                                        titleFontSize?: number;
+                                        descriptionFontSize?: number;
+                                      };
+                                      layoutProps?: { titleFontSize?: number; descriptionFontSize?: number };
+                                      // How a custom scene says which generated component
+                                      // renders it — the key its stored font defaults sit under.
+                                      sceneTypeOverride?: string;
+                                      contentVariantIndex?: number;
+                                    };
+                                    const layoutId = desc.layoutConfig?.arrangement ?? desc.layout ?? "text_narration";
+                                    const template = project.template ?? "default";
+                                    const aspectRatio = project.aspect_ratio ?? "landscape";
+                                    const craftedFrontendFiles =
+                                      template.startsWith("crafted_")
+                                        ? (craftedTemplates.find((ct) => ct.id === template)?.frontend_files as Record<string, string> | null) || null
+                                        : null;
+                                    const isCustomTpl = (template).startsWith("custom_");
+                                    // THIS scene's stored default sizes, by the same role +
+                                    // variant lookup the render and both previews use. Without
+                                    // it the resolver fell through to a hardcoded 72/30 that had
+                                    // nothing to do with the template — and since a value EQUAL
+                                    // to the default is deleted below, a deliberate 72 vanished.
+                                    const sceneFontDefaults = isCustomTpl
+                                      ? sceneFontConfig(
+                                          projectLayouts?.scene_font_defaults,
+                                          {
+                                            sceneType: desc.sceneTypeOverride ?? scene.scene_type ?? null,
+                                            contentVariantIndex: desc.contentVariantIndex ?? null,
+                                            index: idx,
+                                            total: project.scenes?.length ?? 0,
+                                          },
+                                          aspectRatio === "portrait" ? "portrait" : "landscape",
+                                        )
+                                      : null;
+                                    const defaults = resolveDefaultFontSizesForScene({
+                                      template,
+                                      layoutId,
+                                      aspectRatio,
+                                      layoutPropSchema: layoutPropSchema ?? undefined,
+                                      craftedFrontendFiles,
+                                      sceneFontDefaults,
+                                    });
+                                    const override = sceneFontOverrides[scene.id];
+                                    const storedTitle = isCustomTpl ? desc.layoutConfig?.titleFontSize : desc.layoutProps?.titleFontSize;
+                                    const storedDesc = isCustomTpl ? desc.layoutConfig?.descriptionFontSize : desc.layoutProps?.descriptionFontSize;
+                                    const titleFontSize = override?.title ?? storedTitle ?? defaults.title;
+                                    const descFontSize = override?.desc ?? storedDesc ?? defaults.desc;
+                                    // The sliders offer the USER bands — what a person may set —
+                                    // not the generation bands, which bound what the model may bake
+                                    // into a scene. They were the same map, so the control stopped
+                                    // mattering at the generator's own ceiling. See kit/typeBands.ts.
+                                    //
+                                    // WHICH TEXT THE TOP SLIDER DRIVES depends on the design
+                                    // version: v3 binds props.titleFontSize to the scene TITLE,
+                                    // v1/v2 bound it to props.displayText. Built-in templates keep
+                                    // the historical 20-200 / 12-80 ranges: their scenes are
+                                    // hand-written and do not follow the generated-scene contract.
+                                    const isTwoTierType =
+                                      isCustomTpl && (projectLayouts?.design_version ?? 1) >= 3;
+                                    const bandOf = (tier: "title" | "description"): [number, number] =>
+                                      isCustomTpl
+                                        ? (USER_BANDS[tier][aspectRatio === "portrait" ? "portrait" : "landscape"] as unknown as [number, number])
+                                        : tier === "title"
+                                          ? [20, 200]
+                                          : [12, 80];
+                                    const [titleMin, titleMax] = bandOf("title");
+                                    const [descMin, descMax] = bandOf("description");
+                                    const titleClamped = Math.min(titleMax, Math.max(titleMin, Number(titleFontSize) || defaults.title));
+                                    const descClamped = Math.min(descMax, Math.max(descMin, Number(descFontSize) || defaults.desc));
+
+                                    const scheduleFontSave = () => {
+                                      const sceneId = scene.id;
+                                      const tid = fontSaveTimeoutRef.current[sceneId];
+                                      if (tid) clearTimeout(tid);
+                                      fontSaveTimeoutRef.current[sceneId] = setTimeout(() => {
+                                        const proj = projectRef.current;
+                                        const pending = fontPendingRef.current[sceneId];
+                                        if (!proj || !pending) return;
+                                        const sc = proj.scenes?.find((s) => s.id === sceneId);
+                                        if (!sc?.remotion_code) return;
+                                        setSavingFontSizes(sceneId);
+                                        try {
+                                          const d = JSON.parse(sc.remotion_code) as { layout?: string; layoutProps?: Record<string, unknown>; layoutConfig?: Record<string, unknown> };
+                                          const isCustom = (proj.template || "").startsWith("custom_");
+                                          // A value EQUAL to the default is stored as no value at all.
+                                          //
+                                          // This used to write unconditionally, so the first nudge of a
+                                          // slider pinned a number forever — even sliding straight back.
+                                          // That matters now that defaults are per-scene and change when a
+                                          // template is regenerated: a pinned value silently overrides the
+                                          // new sizing. Deleting on equal keeps "never touched"
+                                          // distinguishable from "deliberately set", which is what
+                                          // SceneEditModal already does.
+                                          const bag = { ...((isCustom ? d.layoutConfig : d.layoutProps) ?? {}) };
+                                          if (pending.title === defaults.title) delete bag.titleFontSize;
+                                          else bag.titleFontSize = pending.title;
+                                          if (pending.desc === defaults.desc) delete bag.descriptionFontSize;
+                                          else bag.descriptionFontSize = pending.desc;
+                                          // On a custom template the headline slider also pins the
+                                          // body, at the contract's headline:body ratio, so dragging
+                                          // the headline up cannot leave the body at a size that
+                                          // inverts the hierarchy — the same inversion the validator
+                                          // rejects at generation time. Only when the body has not
+                                          // been set deliberately.
+                                          if (isCustom && pending.title !== defaults.title && pending.desc === defaults.desc) {
+                                            bag.descriptionFontSize = bodySizeForHeadline(pending.title, proj.aspect_ratio === "portrait" ? "portrait" : "landscape");
+                                          }
+                                          const next = isCustom
+                                            ? { ...d, layoutConfig: bag }
+                                            : { ...d, layoutProps: bag };
+                                          updateScene(proj.id, sceneId, { remotion_code: JSON.stringify(next) }).then(() => {
+                                            loadProject();
+                                            setSceneFontOverrides((prev) => {
+                                              const u = { ...prev };
+                                              delete u[sceneId];
+                                              return u;
+                                            });
+                                            setSavingFontSizes((prev) => prev === sceneId ? null : prev);
+                                          }).catch(() => {
+                                            setSavingFontSizes((prev) => prev === sceneId ? null : prev);
+                                          });
+                                        } catch {
+                                          setSavingFontSizes((prev) => prev === sceneId ? null : prev);
+                                        }
+                                        delete fontSaveTimeoutRef.current[sceneId];
+                                        delete fontPendingRef.current[sceneId];
+                                      }, 400);
+                                    };
+
+                                    return (
+                                      <div>
+                                        <h4 className="text-[11px] font-medium text-gray-400 uppercase tracking-wider mb-2.5">
+                                          Typography
+                                        </h4>
+                                        <div className="space-y-3">
+                                          <div>
+                                            <label className="text-xs text-gray-400 mb-1 block">{layoutId === "mosaic_metric" ? "Metric size" : layoutId === "mosaic_punch" ? "Punch size" : isTwoTierType ? "Title" : isCustomTpl ? "Display text (headline)" : "Title font size"}</label>
+                                            <div className="flex items-center gap-2">
+                                              <input
+                                                type="range"
+                                                min={titleMin}
+                                                max={titleMax}
+                                                step={1}
+                                                value={titleClamped}
+                                                onChange={(e) => {
+                                                  const v = Number(e.target.value);
+                                                  fontPendingRef.current[scene.id] = { title: v, desc: descClamped };
+                                                  setSceneFontOverrides((prev) => ({ ...prev, [scene.id]: { ...(prev[scene.id] ?? { title: titleClamped, desc: descClamped }), title: v } }));
+                                                  scheduleFontSave();
+                                                }}
+                                                className="w-64 h-1 rounded-full appearance-none bg-gray-200 accent-purple-600"
+                                              />
+                                              <div className="flex items-center gap-1.5">
+                                                {savingFontSizes === scene.id ? (
+                                                  <svg className="animate-spin h-3 w-3 text-purple-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                  </svg>
+                                                ) : null}
+                                                <span className="text-xs font-medium text-purple-600 tabular-nums">
+                                                  {titleClamped}
+                                                  {storedTitle == null && override?.title == null && (
+                                                    <span className="ml-1 text-[10px] font-normal text-gray-300">(default)</span>
+                                                  )}
+                                                </span>
+                                              </div>
+                                            </div>
+                                          </div>
+                                          <div>
+                                            <label className="text-xs text-gray-400 mb-1 block">{layoutId === "mosaic_metric" ? "Label size" : isTwoTierType ? "Display text & content" : isCustomTpl ? "Body text" : "Display text font size"}</label>
+                                            <div className="flex items-center gap-2">
+                                              <input
+                                                type="range"
+                                                min={descMin}
+                                                max={descMax}
+                                                step={1}
+                                                value={descClamped}
+                                                onChange={(e) => {
+                                                  const v = Number(e.target.value);
+                                                  fontPendingRef.current[scene.id] = { title: titleClamped, desc: v };
+                                                  setSceneFontOverrides((prev) => ({ ...prev, [scene.id]: { ...(prev[scene.id] ?? { title: titleClamped, desc: descClamped }), desc: v } }));
+                                                  scheduleFontSave();
+                                                }}
+                                                className="w-64 h-1 rounded-full appearance-none bg-gray-200 accent-purple-600"
+                                              />
+                                              <div className="flex items-center gap-1.5">
+                                                {savingFontSizes === scene.id ? (
+                                                  <svg className="animate-spin h-3 w-3 text-purple-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                  </svg>
+                                                ) : null}
+                                                <span className="text-xs font-medium text-purple-600 tabular-nums">
+                                                  {descClamped}
+                                                  {storedDesc == null && override?.desc == null && (
+                                                    <span className="ml-1 text-[10px] font-normal text-gray-300">(default)</span>
+                                                  )}
+                                                </span>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    );
+                                  } catch {
+                                    return null;
+                                  }
+                                })()}
+
+                                {/* Audio player (inline) + record-your-own-voice control.
+                                    A pending (applied, unsaved) recording takes precedence over
+                                    the existing AI/saved voiceover. */}
+                                {(() => {
+                                  const pending = pendingRecordings.get(scene.id);
+                                  const playUrl = pending?.url ?? audioUrl;
+                                  return (
+                                    <div>
+                                      <h4 className="text-[11px] font-medium text-gray-400 uppercase tracking-wider mb-1.5">
+                                        Audio
+                                      </h4>
+                                      <div className="flex items-center gap-2">
+                                        {playUrl ? (
+                                          <audio
+                                            controls
+                                            src={playUrl}
+                                            preload="metadata"
+                                            className="w-full h-8"
+                                            style={{ maxWidth: 400 }}
+                                          />
+                                        ) : (
+                                          <span className="text-xs text-gray-400 italic">
+                                            No voiceover yet
+                                          </span>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => setRecordModalScene(scene)}
+                                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 hover:border-purple-300 transition-colors flex-shrink-0"
+                                          title="Record your own voice"
+                                        >
+                                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none">
+                                            <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor" />
+                                            <path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v3M8.5 21h7" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+                                          </svg>
+                                          <span className="text-xs font-medium hidden sm:inline">Record</span>
+                                        </button>
+                                      </div>
+                                      {pending && (() => {
+                                        const isSavingThis = savingRecordingSceneId === scene.id;
+                                        const disabled = savingRecordings || (savingRecordingSceneId != null && !isSavingThis);
+                                        return (
+                                          <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-purple-50 border border-purple-100 px-2.5 py-1.5">
+                                            <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-purple-700 min-w-0">
+                                              <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                              </svg>
+                                              <span className="truncate">Recorded voice applied to the preview.</span>
+                                            </span>
+                                            <div className="flex items-center gap-2 flex-shrink-0">
+                                              <button
+                                                type="button"
+                                                onClick={() => handleSaveRecording(scene.id)}
+                                                disabled={disabled}
+                                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold text-white bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 transition-colors"
+                                              >
+                                                {isSavingThis ? (
+                                                  <>
+                                                    <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                                    </svg>
+                                                    Saving…
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                                                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                                    </svg>
+                                                    Save
+                                                  </>
+                                                )}
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() => handleDiscardRecording(scene.id)}
+                                                disabled={disabled}
+                                                className="inline-flex items-center gap-1 text-[11px] font-medium text-red-600 hover:text-red-700 hover:underline disabled:opacity-50 transition-colors"
+                                              >
+                                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                                                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                                </svg>
+                                                Discard
+                                              </button>
+                                            </div>
+                                          </div>
+                                        );
+                                      })()}
+                                    </div>
+                                  );
+                                })()}
+
+                                {/* Scene images + avatar. Side by side when there is room,
+                                    stacked when there is not.
+
+                                    This row used to be an unconditional `flex` whose two
+                                    children pulled in opposite directions: the images block
+                                    is `min-w-0` (shrinks without limit) and the avatar block
+                                    is `flex-shrink-0` (never gives up a pixel). In a narrow
+                                    card the images column was therefore crushed toward zero
+                                    width while the avatar kept its full size — the "IMAGES
+                                    (n)" heading wrapped onto two lines inside a sliver of a
+                                    column and collided with "AVATAR", and the avatar's helper
+                                    text ran past the card edge.
+
+                                    `flex-wrap` is what fixes it: once the two columns cannot
+                                    both fit, the avatar drops to its own line instead of
+                                    squeezing its neighbour. `basis-*` on the images block
+                                    gives it a real preferred width so it is never the one
+                                    that collapses. Note this is NOT aspect-ratio specific —
+                                    the trigger is the card's width, which is why a landscape
+                                    project shows the same break once its column is narrow. */}
+                                <div className="flex flex-wrap items-start gap-x-6 gap-y-5">
+                                {(() => {
+                                  // Read the layout through the shared resolver, which understands
+                                  // the custom-template scene-type markers and falls back
+                                  // positionally. This used to read `descriptor.layout` only — a
+                                  // key custom templates never write — so `sceneLayout` was null
+                                  // for every custom scene, `!sceneLayout` short-circuited
+                                  // `sceneSupportsImage` to true, and the OUTRO rendered an image
+                                  // picker even though meta lists it in layouts_without_image.
+                                  // The BACKEND's resolution wins where present: it
+                                  // ran the archetype matching, so it knows the
+                                  // content variant a descriptor with a null
+                                  // contentVariantIndex cannot name. The client-side
+                                  // resolver stays as the fallback.
+                                  const sceneLayout =
+                                    project.custom_scene_layouts?.[idx] ??
+                                    customSceneLayoutId(
+                                      scene.remotion_code,
+                                      idx,
+                                      project.scenes.length,
+                                    );
+                                  // `layoutsWithoutImage` is keyed by BASE layout, so a `__vN`
+                                  // variant (e.g. `ending_socials__v2`) must be resolved first —
+                                  // otherwise it misses the set and the image section shows on a
+                                  // layout that can't render one. Matches SceneEditModal.
+                                  // The server's answer wins, and it arrives with the
+                                  // PROJECT — so the controls are right on first paint
+                                  // instead of waiting on the non-blocking /layouts
+                                  // fetch. Only fall back to the client-side lookup
+                                  // for a template the server did not resolve (a
+                                  // built-in, or a custom one with no blueprint).
+                                  const serverSupportsImage =
+                                    project.custom_scene_supports_image?.[idx];
+                                  const sceneSupportsImage =
+                                    typeof serverSupportsImage === "boolean"
+                                      ? serverSupportsImage
+                                      : customSceneSupportsImage(
+                                          sceneLayout,
+                                          layoutsWithoutImage,
+                                          layoutsLoaded,
+                                        );
+                                  const isCustomTpl = (project.template || "").startsWith("custom_");
+                                  const ctId = isCustomTpl ? parseInt((project.template || "").replace("custom_", ""), 10) : NaN;
+                                  const ctOgImage = isCustomTpl
+                                    ? (customTemplatesList.find((ct) => ct.id === ctId)?.og_image || "")
+                                    : "";
+                                  // Resolve a stock clip assigned to this scene (from the
+                                  // descriptor + project assets). A clip fills the visual
+                                  // slot, so when present the image controls are hidden.
+                                  const sceneClip = (() => {
+                                    let lp: Record<string, unknown> = {};
+                                    try {
+                                      lp = scene.remotion_code
+                                        ? JSON.parse(scene.remotion_code).layoutProps || {}
+                                        : {};
+                                    } catch { /* legacy */ }
+                                    // hideImage empties the visual slot — honour it
+                                    // like the renderer does, so a removed clip does
+                                    // not linger in the editor.
+                                    if (lp.hideImage) return null;
+                                    const fn = lp.assignedVideo as string | undefined;
+                                    if (!fn) return null;
+                                    const asset = project.assets.find(
+                                      (a) => a.asset_type === "video" && a.filename === fn && !a.excluded,
+                                    );
+                                    if (!asset) return null;
+                                    const audioFn = (asset as { audio_variant_filename?: string | null })
+                                      .audio_variant_filename;
+                                    const url = resolveAssetUrl(asset, project.id);
+                                    // Audio lives in the AAC sibling; derive its URL by
+                                    // swapping the last path segment (same dir), so the
+                                    // preview can actually play sound when unmuted.
+                                    const audioUrl = audioFn
+                                      ? url.slice(0, url.lastIndexOf("/") + 1) + audioFn
+                                      : null;
+                                    return {
+                                      asset,
+                                      url,
+                                      audioUrl,
+                                      hasAudio: Boolean(audioFn),
+                                      muted: lp.videoMuted === undefined ? true : Boolean(lp.videoMuted),
+                                      volume: Number.isFinite(Number(lp.videoVolume))
+                                        ? Number(lp.videoVolume)
+                                        : 0.35,
+                                    };
+                                  })();
+                                  // Live audio state: the draft while this scene is expanded,
+                                  // else the persisted values.
+                                  const clipAudioActive =
+                                    expandedScene === scene.id && stockAudioDraft
+                                      ? stockAudioDraft
+                                      : sceneClip
+                                        ? { muted: sceneClip.muted, volume: sceneClip.volume }
+                                        : null;
+                                  const clipUnmuted = Boolean(clipAudioActive && !clipAudioActive.muted);
+                                  const stockAudioDirty =
+                                    expandedScene === scene.id &&
+                                    stockAudioDraft &&
+                                    sceneClip &&
+                                    (stockAudioDraft.muted !== sceneClip.muted ||
+                                      Math.abs(stockAudioDraft.volume - sceneClip.volume) > 0.001);
+                                  // One tile-width rule for every tile below. Both formats are
+                                  // now a free-wrapping flex row, where a tile must keep its own
+                                  // fixed width or it would stretch across the whole row.
+                                  // (Portrait was `w-full` while it laid tiles out in a 2-col
+                                  // grid and each tile filled its cell.)
+                                  const tileW = "w-20";
+                                  // The column PREFERS to be wide enough to hold every tile on
+                                  // one row, so its width is COMPUTED from how many tiles this
+                                  // scene actually renders rather than fixed.
+                                  //
+                                  // A fixed width cannot work: the tile count varies per scene.
+                                  // The old basis-56 (224px) fitted two, so four tiles broke
+                                  // into a 2x2 block. Widening it to a flat 384px fixed the
+                                  // image-only case (4 tiles = 344px) but still wrapped a scene
+                                  // carrying a CLIP, because the clip tile does not replace the
+                                  // image tiles — it renders alongside them, so that scene shows
+                                  // 5+ tiles and needs 432px.
+                                  //
+                                  // Tiles are w-20 (80px) with gap-2 (8px): n tiles need
+                                  // n*80 + (n-1)*8 px. Counted below in render order.
+                                  const visualsTileCount =
+                                    (sceneClip ? 1 : 0) +
+                                    (isCustomTpl &&
+                                    !(sceneImageAssetsMap[idx] || []).length &&
+                                    ctOgImage
+                                      ? 1
+                                      : 0) +
+                                    (sceneImageAssetsMap[idx] || []).length +
+                                    (stockFootageBusySceneId === scene.id ? 1 : 0) +
+                                    // AI + Image plus-cards are always present; Stock Footage
+                                    // is gated on support.
+                                    2 +
+                                    (stockFootageSupported ? 1 : 0);
+                                  // The tile row's natural width.
+                                  const visualsRowPx =
+                                    visualsTileCount * 80 +
+                                    Math.max(0, visualsTileCount - 1) * 8;
+                                  const isPortraitProject =
+                                    project.aspect_ratio === "portrait";
+                                  // LANDSCAPE also pins `minWidth`. A basis is only a PREFERRED
+                                  // width, so with `min-w-0` this column was free to shrink to
+                                  // nothing; the avatar beside it is `flex-shrink-0` and gives up
+                                  // no space, so whenever basis + avatar exceeded the card, the
+                                  // visuals column absorbed the whole overflow and its tiles
+                                  // wrapped. Pinning `minWidth` makes it incompressible, so the
+                                  // parent's `flex-wrap` does the only thing left: drops the
+                                  // avatar to its own line. The card is wide enough to afford it.
+                                  //
+                                  // PORTRAIT DELIBERATELY DOES NOT PIN IT. Its card is narrow —
+                                  // often narrower than a full row of tiles — so an
+                                  // incompressible column would push the tiles straight out past
+                                  // the card edge. Portrait keeps `min-w-0` and only the basis:
+                                  // it fits everything on one row where the width allows, and
+                                  // where it does not, the last tile wraps to the next row
+                                  // instead of overflowing.
+                                  //
+                                  // The landscape pin is capped at the card's own width
+                                  // (`min(rowPx, 100%)`). A bare px minWidth made the column
+                                  // wider than the card on narrow screens (phones, a squeezed
+                                  // window), so the tiles ran out past the card edge. With the
+                                  // cap it still stays on one row whenever the card can hold
+                                  // it, and wraps inside the card when it cannot.
+                                  const visualsBasisStyle = isPortraitProject
+                                    ? { flexBasis: `${visualsRowPx}px` }
+                                    : {
+                                        flexBasis: `${visualsRowPx}px`,
+                                        minWidth: `min(${visualsRowPx}px, 100%)`,
+                                      };
+                                  return (
+                                    <div
+                                      className={`grow max-w-full${isPortraitProject ? " min-w-0" : ""}`}
+                                      style={visualsBasisStyle}
+                                      data-tour={idx === 0 ? "scene-visuals-first" : undefined}
+                                    >
+                                      <h4 className="text-[11px] font-medium text-gray-400 uppercase tracking-wider mb-1.5">
+                                        {sceneClip
+                                          ? "Stock footage"
+                                          : sceneSupportsImage
+                                            ? `Images (${(sceneImageAssetsMap[idx] || []).length})`
+                                            : "Images — not supported"}
+                                      </h4>
+                                      {sceneSupportsImage ? (
+                                        <>
+                                        {/* One free-wrapping row of w-20 tiles, in BOTH formats.
+                                            Nothing here is keyed off the aspect ratio any more;
+                                            what decides how many tiles land on a line is the
+                                            column's width, set above.
+
+                                            Portrait used to branch to `grid-cols-2` capped at
+                                            184px, which HARD-CAPPED the row at two tiles: a
+                                            scene with four (clip + AI + Image + Stock Footage)
+                                            always broke into a 2x2 block with empty space to
+                                            its right, while a three-tile image scene happened
+                                            to fit. The cap existed to stop grid cells from
+                                            inflating to ~220px each — a `grid` problem that
+                                            does not arise here, because these tiles carry their
+                                            own fixed w-20 and never stretch. Portrait still
+                                            wraps when the card is genuinely too narrow; it just
+                                            wraps at the real width instead of always at two. */}
+                                        <div className="flex flex-wrap items-start gap-2">
+                                          {/* When a clip is assigned it occupies the visual slot
+                                              and renders first. Its own edit icon opens the shared
+                                              framing modal (same positioning as images); picking any
+                                              image/AI/upload below replaces the clip. */}
+                                          {sceneClip && (
+                                            <div className={`relative group rounded-lg overflow-hidden border-2 border-purple-400 ${tileW} h-24 flex-shrink-0 bg-black`}>
+                                              {(() => {
+                                                let focusX = 50; let focusY = 50; let zoom = 1;
+                                                let clipStartSec = 0;
+                                                try {
+                                                  if (scene.remotion_code) {
+                                                    const p = JSON.parse(scene.remotion_code) as {
+                                                      layoutProps?: {
+                                                        imageFocusX?: unknown;
+                                                        imageFocusY?: unknown;
+                                                        imageZoom?: unknown;
+                                                        videoStartSeconds?: unknown;
+                                                      };
+                                                    };
+                                                    if (typeof p.layoutProps?.imageFocusX === "number") focusX = clampFocus(p.layoutProps.imageFocusX);
+                                                    if (typeof p.layoutProps?.imageFocusY === "number") focusY = clampFocus(p.layoutProps.imageFocusY);
+                                                    if (typeof p.layoutProps?.imageZoom === "number") zoom = Math.max(IMAGE_ADJUST_ZOOM_MIN, p.layoutProps.imageZoom);
+                                                    clipStartSec = Math.max(0, Number(p.layoutProps?.videoStartSeconds) || 0);
+                                                  }
+                                                } catch { /* ignore */ }
+                                                const zoomedOut = zoom < 1;
+                                                return (
+                                                  <TrimmedClipVideo
+                                                    ref={expandedClipVideoRef}
+                                                    src={clipUnmuted && sceneClip.audioUrl ? sceneClip.audioUrl : sceneClip.url}
+                                                    muted={!clipUnmuted}
+                                                    autoPlay={expandedClipPlaying}
+                                                    playsInline
+                                                    onLoadedMetadata={(e) => {
+                                                      e.currentTarget.volume = Math.max(0, Math.min(1, clipAudioActive?.volume ?? 0.35));
+                                                    }}
+                                                    onPlay={(e) => {
+                                                      e.currentTarget.volume = Math.max(0, Math.min(1, clipAudioActive?.volume ?? 0.35));
+                                                      setExpandedClipPlaying(true);
+                                                    }}
+                                                    onPause={() => setExpandedClipPlaying(false)}
+                                                    preload="auto"
+                                                    className="w-full h-full"
+                                                    style={{
+                                                      objectFit: zoomedOut ? "contain" : "cover",
+                                                      objectPosition: zoomedOut ? "center" : `${focusX}% ${focusY}%`,
+                                                      transform: `scale(${zoom})`,
+                                                      transformOrigin: zoomedOut ? "center center" : `${focusX}% ${focusY}%`,
+                                                    }}
+                                                    clipDurationSeconds={sceneClip.asset.duration_seconds ?? undefined}
+                                                    sceneDurationSeconds={Number(scene.duration_seconds) || undefined}
+                                                    startSeconds={clipStartSec}
+                                                  />
+                                                );
+                                              })()}
+                                              <span className="absolute bottom-1 left-1 px-1 py-0.5 rounded bg-black/70 text-white text-[9px] font-medium uppercase tracking-wide">
+                                                Clip
+                                              </span>
+                                              {/* Play/pause acts on this preview, so it lives on the
+                                                  thumbnail rather than in the audio row below. */}
+                                              <button
+                                                type="button"
+                                                onClick={toggleExpandedClipPlaying}
+                                                className="absolute bottom-1 right-1 z-10 w-6 h-6 flex items-center justify-center rounded-full border border-white/90 bg-white/95 text-purple-700 shadow-sm hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+                                                title={expandedClipPlaying ? "Pause clip" : "Play clip"}
+                                              >
+                                                {expandedClipPlaying ? (
+                                                  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                                                    <path d="M6 5h4v14H6zM14 5h4v14h-4z" />
+                                                  </svg>
+                                                ) : (
+                                                  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                                                    <path d="M8 5v14l11-7z" />
+                                                  </svg>
+                                                )}
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() => openSceneImageAdjustModal(scene, sceneClip.url)}
+                                                className="absolute top-1 right-8 z-10 w-6 h-6 flex items-center justify-center rounded-full border border-white/90 bg-white/95 text-purple-700 shadow-sm hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+                                                title="Adjust framing"
+                                              >
+                                                <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+                                                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536M16.5 3.964a2.5 2.5 0 113.536 3.536L7 20.5H3v-4L16.5 3.964z" />
+                                                </svg>
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  setSceneMediaRemovePending({
+                                                    scene,
+                                                    assetId: sceneClip.asset.id,
+                                                    isClip: true,
+                                                  })
+                                                }
+                                                className="absolute top-1 right-1 z-10 w-6 h-6 flex items-center justify-center rounded-full border border-white/90 bg-white/95 text-purple-700 shadow-sm hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+                                                title="Remove clip"
+                                              >
+                                                <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                                                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                                </svg>
+                                              </button>
+                                            </div>
+                                          )}
+                                          {isCustomTpl && !(sceneImageAssetsMap[idx] || []).length && ctOgImage && (
+                                            <div className={`relative group rounded-lg overflow-hidden border border-gray-200/40 flex-shrink-0 ${tileW}`}>
+                                              {(() => {
+                                                let focusX = 50; let focusY = 50; let zoom = 1;
+                                                try {
+                                                  if (scene.remotion_code) {
+                                                    const p = JSON.parse(scene.remotion_code) as { layoutProps?: { imageFocusX?: unknown; imageFocusY?: unknown; imageZoom?: unknown } };
+                                                    if (typeof p.layoutProps?.imageFocusX === "number") focusX = p.layoutProps.imageFocusX;
+                                                    if (typeof p.layoutProps?.imageFocusY === "number") focusY = p.layoutProps.imageFocusY;
+                                                    if (typeof p.layoutProps?.imageZoom === "number") zoom = Math.max(IMAGE_ADJUST_ZOOM_MIN, p.layoutProps.imageZoom);
+                                                  }
+                                                } catch { /* ignore */ }
+                                                return (
+                                                  <img
+                                                    src={ctOgImage}
+                                                    alt=""
+                                                    className={`h-24 ${tileW} object-cover`}
+                                                    style={{ objectPosition: `${focusX}% ${focusY}%`, transform: `scale(${zoom})`, transformOrigin: "center center" }}
+                                                    loading="lazy"
+                                                    onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                                                  />
+                                                );
+                                              })()}
+                                              <button
+                                                type="button"
+                                                onClick={() => openSceneImageAdjustModal(scene, ctOgImage)}
+                                                className="absolute top-1 right-1 z-10 w-6 h-6 flex items-center justify-center rounded-full border border-white/90 bg-white/95 text-purple-700 shadow-sm hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+                                                title="Adjust image"
+                                              >
+                                                <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+                                                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536M16.5 3.964a2.5 2.5 0 113.536 3.536L7 20.5H3v-4L16.5 3.964z" />
+                                                </svg>
+                                              </button>
+                                            </div>
+                                          )}
+                                          {(sceneImageAssetsMap[idx] || []).map(({ url, asset }) => (
+                                            <div
+                                              key={asset.id}
+                                              className={`relative group rounded-lg overflow-hidden border border-gray-200/40 flex-shrink-0 ${tileW}`}
+                                            >
+                                              {(generatingImageSceneId === scene.id || uploadingSceneId === scene.id) && (
+                                                <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/60 backdrop-blur-[2px]">
+                                                  <span className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                                                </div>
+                                              )}
+                                              {(() => {
+                                                let focusX = 50;
+                                                let focusY = 50;
+                                                let zoom = 1;
+                                                try {
+                                                  if (scene.remotion_code) {
+                                                    const parsed = JSON.parse(scene.remotion_code) as {
+                                                      layoutProps?: { imageFocusX?: unknown; imageFocusY?: unknown; imageZoom?: unknown };
+                                                    };
+                                                    if (typeof parsed.layoutProps?.imageFocusX === "number") focusX = clampFocus(parsed.layoutProps.imageFocusX);
+                                                    if (typeof parsed.layoutProps?.imageFocusY === "number") focusY = clampFocus(parsed.layoutProps.imageFocusY);
+                                                    if (typeof parsed.layoutProps?.imageZoom === "number") zoom = Math.max(IMAGE_ADJUST_ZOOM_MIN, parsed.layoutProps.imageZoom);
+                                                  }
+                                                } catch {
+                                                  /* ignore */
+                                                }
+                                                return (
+                                              <img
+                                                src={url}
+                                                alt=""
+                                                className={`h-24 ${tileW} object-cover`}
+                                                style={{
+                                                  objectPosition: `${focusX}% ${focusY}%`,
+                                                  transform: `scale(${zoom})`,
+                                                  transformOrigin: "center center",
+                                                }}
+                                                loading="lazy"
+                                                onError={(e) => {
+                                                  (e.target as HTMLImageElement).style.display = "none";
+                                                }}
+                                              />
+                                                );
+                                              })()}
+                                              <button
+                                                type="button"
+                                                onClick={() => openSceneImageAdjustModal(scene, url)}
+                                                className="absolute top-1 right-8 z-10 w-6 h-6 flex items-center justify-center rounded-full border border-white/90 bg-white/95 text-purple-700 shadow-sm hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+                                                title="Adjust image"
+                                              >
+                                                <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+                                                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536M16.5 3.964a2.5 2.5 0 113.536 3.536L7 20.5H3v-4L16.5 3.964z" />
+                                                </svg>
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  setSceneMediaRemovePending({
+                                                    scene,
+                                                    assetId: asset.id,
+                                                    isClip: false,
+                                                  })
+                                                }
+                                                disabled={removingAssetId === asset.id}
+                                                className="absolute top-1 right-1 z-10 w-6 h-6 flex items-center justify-center rounded-full border border-white/90 bg-white/95 text-purple-700 shadow-sm hover:bg-purple-600 hover:text-white hover:border-purple-600 disabled:opacity-50 transition-colors"
+                                              >
+                                                {removingAssetId === asset.id ? (
+                                                  <span className="text-[10px]">…</span>
+                                                ) : (
+                                                  <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                                  </svg>
+                                                )}
+                                              </button>
+                                            </div>
+                                          ))}
+                                          {/* Clip is being downloaded + transcoded in the
+                                              background: show a loader card in its slot. */}
+                                          {stockFootageBusySceneId === scene.id && (
+                                            <div className={`flex flex-col items-center justify-center gap-1 ${tileW} h-24 rounded-lg border-2 border-purple-300 bg-purple-50/60 flex-shrink-0`}>
+                                              <span className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                                              <span className="text-[9px] font-medium text-purple-600 uppercase tracking-wide">Clip</span>
+                                            </div>
+                                          )}
+                                          {(generatingImageSceneId === scene.id || uploadingSceneId === scene.id) && !(sceneImageAssetsMap[idx] || []).length && !(isCustomTpl && ctOgImage) && (
+                                            <div className={`flex items-center justify-center ${tileW} h-24 rounded-lg border-2 border-purple-200 bg-purple-50/50 flex-shrink-0`}>
+                                              <span className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                                            </div>
+                                          )}
+                                          <button
+                                            type="button"
+                                            onClick={() => handleGenerateSceneImageClick(scene.id)}
+                                            disabled={stockFootageBusySceneId === scene.id}
+                                            className={`group relative flex items-center justify-center ${tileW} h-24 rounded-lg border-2 border-dashed border-purple-300 bg-purple-50/50 hover:bg-purple-100/50 transition-colors text-purple-700 flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed`}
+                                            title="Generate image with AI"
+                                          >
+                                            <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                                            </svg>
+                                            <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-1 text-[10px] font-medium text-white bg-gray-900 rounded opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity whitespace-nowrap max-w-[180px] text-center z-10">
+                                              Generate image with AI
+                                            </span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => handleOpenImageSourceChooser(scene.id)}
+                                            disabled={uploadingSceneId === scene.id || stockFootageBusySceneId === scene.id}
+                                            className={`flex flex-col items-center justify-center gap-1 ${tileW} h-24 border-2 border-dashed border-gray-300 bg-gray-50/50 hover:bg-gray-100/50 rounded-lg flex-shrink-0 transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
+                                            title="Add image"
+                                          >
+                                            <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                            </svg>
+                                            <span className="text-[10px] font-medium text-gray-400">Image</span>
+                                          </button>
+                                          {stockFootageSupported && (
+                                            <button
+                                              type="button"
+                                              onClick={() => handleChooseStockFootage(scene.id)}
+                                              disabled={uploadingSceneId === scene.id || stockFootageBusySceneId === scene.id}
+                                              className={`flex flex-col items-center justify-center gap-1 ${tileW} h-24 border-2 border-dashed border-gray-300 bg-gray-50/50 hover:bg-gray-100/50 rounded-lg flex-shrink-0 transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
+                                              title="Add stock footage"
+                                            >
+                                              <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                              </svg>
+                                              <span className="text-[10px] font-medium text-gray-400 leading-tight text-center px-1">Stock Footage</span>
+                                            </button>
+                                          )}
+                                        </div>
+                                        {/* Audio-only row now that play/pause sits on the
+                                            thumbnail — skipped entirely for a silent clip. */}
+                                        {sceneClip && sceneClip.hasAudio && stockAudioDraft && expandedScene === scene.id && (
+                                          <div className="mt-2 space-y-2">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                      setStockAudioDraft((d) =>
+                                                        d ? { ...d, muted: !d.muted } : d,
+                                                      )
+                                                    }
+                                                    disabled={stockAudioSaving}
+                                                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs transition-colors disabled:opacity-50 ${
+                                                      stockAudioDraft.muted
+                                                        ? "border-gray-300 text-gray-600 hover:border-purple-300"
+                                                        : "border-purple-300 bg-purple-50 text-purple-700"
+                                                    }`}
+                                                    title={stockAudioDraft.muted ? "Unmute clip audio" : "Mute clip audio"}
+                                                  >
+                                                    {stockAudioDraft.muted ? (
+                                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M17 14l-4-4m0 4l4-4" />
+                                                      </svg>
+                                                    ) : (
+                                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                                                      </svg>
+                                                    )}
+                                                    {stockAudioDraft.muted ? "Muted" : "Audio on"}
+                                                  </button>
+                                                  <label className="flex items-center gap-2 text-xs text-gray-500">
+                                                    Volume
+                                                    <input
+                                                      type="range"
+                                                      min={0}
+                                                      max={1}
+                                                      step={0.05}
+                                                      value={stockAudioDraft.volume}
+                                                      onChange={(e) => {
+                                                        const v = Number(e.target.value);
+                                                        setStockAudioDraft((d) =>
+                                                          d ? { ...d, volume: v } : d,
+                                                        );
+                                                      }}
+                                                      disabled={stockAudioSaving}
+                                                      className="w-28 h-1 cursor-pointer appearance-none accent-purple-600 [&::-webkit-slider-runnable-track]:h-0.5 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-gray-200 [&::-webkit-slider-thumb]:-mt-1 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-purple-600 [&::-moz-range-track]:h-0.5 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-gray-200 [&::-moz-range-thumb]:h-2.5 [&::-moz-range-thumb]:w-2.5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-purple-600"
+                                                    />
+                                                    <span className="tabular-nums w-8">
+                                                      {Math.round(stockAudioDraft.volume * 100)}%
+                                                    </span>
+                                                  </label>
+                                                  {stockAudioDirty && (
+                                                    <div className="flex items-center gap-2">
+                                                      <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                          setStockAudioDraft({
+                                                            muted: sceneClip.muted,
+                                                            volume: sceneClip.volume,
+                                                          })
+                                                        }
+                                                        disabled={stockAudioSaving}
+                                                        className="text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                                                      >
+                                                        Cancel
+                                                      </button>
+                                                      <button
+                                                        type="button"
+                                                        disabled={stockAudioSaving}
+                                                        onClick={async () => {
+                                                          setStockAudioSaving(true);
+                                                          try {
+                                                            await handleUpdateSceneClipAudio(scene.id, {
+                                                              muted: stockAudioDraft.muted,
+                                                              volume: stockAudioDraft.volume,
+                                                            });
+                                                          } finally {
+                                                            setStockAudioSaving(false);
+                                                          }
+                                                        }}
+                                                        className="px-2.5 py-1.5 rounded-lg bg-purple-600 text-white text-xs hover:bg-purple-700 transition-colors disabled:opacity-60"
+                                                      >
+                                                        {stockAudioSaving ? "Saving…" : "Save"}
+                                                      </button>
+                                                    </div>
+                                                  )}
+                                                </>
+                                            </div>
+                                          </div>
+                                        )}
+                                        {generatingImageSceneId === scene.id && (
+                                          <p className="text-xs text-purple-500 mt-1.5 flex items-center gap-1.5">
+                                            <span className="w-3 h-3 border border-purple-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                                            Generating image…
+                                          </p>
+                                        )}
+                                        </>
+                                      ) : (
+                                        <p className="text-xs text-gray-400 italic">
+                                          This layout does not support images. You can change the layout through AI assisted editing to an image supporting layout.
+                                        </p>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+
+                                {/* Scene avatar — a compact status row, not a full
+                                    editor. A scene that already has a clip opens the
+                                    per-scene AvatarEditModal; a scene with none yet
+                                    jumps to the project-wide Avatar tab instead, since
+                                    generating an avatar is a whole-video decision (one
+                                    presenter for every scene), not a per-scene one. */}
+                                {(() => {
+                                  const preset = AVATAR_PRESETS.find(
+                                    (p) => p.id === scene.avatar_preset,
+                                  );
+                                  const hasAvatar = !!scene.avatar_video_path;
+                                  // A user-uploaded portrait is the CUSTOM sentinel, which
+                                  // is deliberately absent from AVATAR_PRESETS — so `preset`
+                                  // is undefined here and /avatars/custom.jpg does not exist.
+                                  // Its photo lives on the project instead. Without this the
+                                  // thumbnail fell through to the empty dashed placeholder
+                                  // and the label to a bare "Presenter".
+                                  const isCustomPreset =
+                                    scene.avatar_preset === AVATAR_CUSTOM_PRESET_ID;
+                                  const avatarImgSrc = isCustomPreset
+                                    ? project.avatar_custom_image_url ?? null
+                                    : preset
+                                      ? `/avatars/${preset.id}.jpg`
+                                      : null;
+                                  const avatarLabel = isCustomPreset
+                                    ? "Your portrait"
+                                    : (preset?.label ?? "Presenter");
+                                  // Compares VALUES, not null-ness: saving the
+                                  // project-wide Avatar tab stamps its settings
+                                  // onto every scene, so `!= null` would report
+                                  // "custom" on every scene of any project saved
+                                  // even once. A scene is custom iff it actually
+                                  // looks different from the project.
+                                  const overrides =
+                                    (scene.avatar_shape != null &&
+                                      scene.avatar_shape !== project.avatar_shape) ||
+                                    (scene.avatar_size != null &&
+                                      scene.avatar_size !== project.avatar_size) ||
+                                    (scene.avatar_position != null &&
+                                      scene.avatar_position !== project.avatar_position) ||
+                                    (scene.avatar_bg != null &&
+                                      scene.avatar_bg !== project.avatar_bg) ||
+                                    // Opacity is a per-scene override like the rest;
+                                    // omitting it labelled a scene that differs ONLY
+                                    // in opacity as "Project default".
+                                    (scene.avatar_opacity != null &&
+                                      scene.avatar_opacity !== project.avatar_opacity);
+                                  const shape =
+                                    scene.avatar_shape ?? project.avatar_shape ?? "circle";
+                                  const bg = scene.avatar_bg ?? project.avatar_bg ?? null;
+                                  // min-w-0 + basis-56: was flex-shrink-0, which is what let this
+                                  // column keep its full width and crush the images column next
+                                  // to it. It now wraps to its own line instead.
+                                  return (
+                                    <div className="min-w-0 basis-56 grow">
+                                      <h4 className="text-[11px] font-medium text-gray-400 uppercase tracking-wider mb-1.5">
+                                        Avatar
+                                      </h4>
+                                      {!scene.voiceover_path ? (
+                                        <p className="text-xs text-gray-400 italic">
+                                          An avatar is lip-synced to the narration — add narration audio first.
+                                        </p>
+                                      ) : (
+                                        <div className="flex items-center gap-3">
+                                          <div className="relative group flex-shrink-0">
+                                            {hasAvatar && avatarImgSrc ? (
+                                              <div
+                                                style={{
+                                                  width: 80,
+                                                  height: shape === "rounded" ? 96 : 80,
+                                                  borderRadius:
+                                                    shape === "circle" ? "50%" : shape === "square" ? 0 : 8,
+                                                  overflow: "hidden",
+                                                  backgroundColor:
+                                                    bg && bg !== "transparent" ? bg : undefined,
+                                                }}
+                                                className="border border-gray-200/60"
+                                              >
+                                                <img
+                                                  src={avatarImgSrc}
+                                                  alt={avatarLabel}
+                                                  className="w-full h-full object-cover"
+                                                />
+                                              </div>
+                                            ) : (
+                                              <div className="w-20 h-20 rounded-full bg-gray-50 border border-dashed border-gray-300" />
+                                            )}
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                hasAvatar
+                                                  ? setAvatarEditScene(scene)
+                                                  : handleTabChange("avatar")
+                                              }
+                                              className="absolute top-1 right-1 z-10 w-6 h-6 flex items-center justify-center rounded-full border border-white/90 bg-white/95 text-purple-700 shadow-sm hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+                                              title={hasAvatar ? "Edit avatar" : "Generate avatar"}
+                                            >
+                                              {/* A pencil promises in-place editing, but with no clip
+                                                  to edit this button navigates to the Avatar tab — so
+                                                  show the generate icon instead and let the affordance
+                                                  match the "Generate avatar" title it already carries. */}
+                                              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+                                                {hasAvatar ? (
+                                                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536M16.5 3.964a2.5 2.5 0 113.536 3.536L7 20.5H3v-4L16.5 3.964z" />
+                                                ) : (
+                                                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                                                )}
+                                              </svg>
+                                            </button>
+                                          </div>
+                                          <div className="min-w-0 flex-1">
+                                            <p className="text-xs text-gray-600 truncate">
+                                              {hasAvatar ? avatarLabel : "No avatar"}
+                                            </p>
+                                            {hasAvatar && (
+                                              <span className="text-[10px] text-gray-400">
+                                                {overrides ? "Custom" : "Project default"}
+                                                {/* BG-REMOVAL-DISABLED: no cutout is ever owed now, so this
+                                                    would flag every scene with a legacy avatar_bg forever.
+                                                    TO RE-ENABLE: uncomment.
+                                                {bg && !scene.has_matte ? " · needs cutout" : ""} */}
+                                              </span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+                                </div>
+                              </div>
+                            )}
+                      </SceneListRow>
+                      {addSceneRunning && addScenePosition === scene.order + 1 && (
+                        <AddScenePlaceholderRow />
+                      )}
+                      </Fragment>
+                    );
+                  })}
+                  {/* Placeholder for an append (position past the last scene), shown at the end of the last group. */}
+                  {groupScenes.some(({ idx }) => idx === project.scenes.length - 1) &&
+                    addSceneRunning &&
+                    addScenePosition != null &&
+                    addScenePosition > project.scenes.length && (
+                      <AddScenePlaceholderRow />
+                    )}
+                      </>
+                    )}
+                  />
+                </div>
+
+                <input
+                  ref={localSceneImageInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/jpg"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] || null;
+                    handleLocalSceneFilePicked(file);
+                    e.target.value = "";
+                    setLocalUploadTargetSceneId(null);
+                  }}
+                />
+
+                {imageSourceChooserSceneId !== null && ReactDOM.createPortal(
+                  <div className="fixed inset-0 z-[125] flex items-center justify-center p-4">
+                    <div
+                      className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+                      onClick={() => setImageSourceChooserSceneId(null)}
+                    />
+                    <div className="relative w-full max-w-md rounded-2xl bg-white shadow-2xl p-5">
+                        <h3 className="text-lg font-semibold text-gray-900">Add scene image</h3>
+                        <p className="text-xs text-gray-500 mt-1">Choose where to pick the image from.</p>
+                        <div className="mt-4 grid gap-3 grid-cols-2">
+                          <button
+                            type="button"
+                            onClick={handleChooseScrapedImages}
+                            className="w-full h-24 p-3 rounded-xl border border-gray-300 text-gray-700 hover:border-purple-300 hover:text-purple-700 hover:bg-purple-50/40 transition-colors text-sm flex flex-col items-center justify-center text-center gap-2"
+                          >
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M4 7h16M4 12h16M4 17h16" />
+                            </svg>
+                            Use existing images
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleChooseLocalUpload}
+                            className="w-full h-24 p-3 rounded-xl border border-gray-300 text-gray-700 hover:border-purple-300 hover:text-purple-700 hover:bg-purple-50/40 transition-colors text-sm flex flex-col items-center justify-center text-center gap-2"
+                          >
+                            {/* Upload arrow rising out of a tray. */}
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 16V4m0 0L8 8m4-4l4 4" />
+                            </svg>
+                            Upload image file
+                          </button>
+                        </div>
+                      </div>
+                  </div>,
+                  document.body
+                )}
+
+                {/* Stock-footage source chooser: reuse an owned clip (free) or
+                    search for new footage (costs credits). */}
+                {stockSourceChooserSceneId !== null && ReactDOM.createPortal(
+                  <div className="fixed inset-0 z-[125] flex items-center justify-center p-4">
+                    <div
+                      className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+                      onClick={() => setStockSourceChooserSceneId(null)}
+                    />
+                    <div className="relative w-full max-w-md rounded-2xl bg-white shadow-2xl p-5">
+                      <h3 className="text-lg font-semibold text-gray-900">Add stock footage</h3>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Reuse a clip this project already has, or find a new one.
+                      </p>
+                      <div className="mt-4 grid gap-3 grid-cols-2">
+                        <button
+                          type="button"
+                          onClick={handleChooseExistingStockFootage}
+                          disabled={!hasReusableClips}
+                          className="w-full h-24 p-3 rounded-xl border border-gray-300 text-gray-700 hover:border-purple-300 hover:text-purple-700 hover:bg-purple-50/40 transition-colors text-sm flex flex-col items-center justify-center text-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-gray-300 disabled:hover:text-gray-700 disabled:hover:bg-transparent"
+                          title={
+                            hasReusableClips
+                              ? "Reuse a clip already in this project — free"
+                              : "This project has no clips yet"
+                          }
+                        >
+                          <svg className="w-6 h-6 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M4 7h16M4 12h16M4 17h16" />
+                          </svg>
+                          Choose existing stock footage
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleChooseNewStockFootage}
+                          className="w-full h-24 p-3 rounded-xl border border-gray-300 text-gray-700 hover:border-purple-300 hover:text-purple-700 hover:bg-purple-50/40 transition-colors text-sm flex flex-col items-center justify-center text-center gap-2"
+                        >
+                          <svg className="w-6 h-6 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                          </svg>
+                          Add a new one
+                          {!effectiveIsPro && (
+                            <span className="text-[10px] font-medium text-gray-400">
+                              {STOCK_FOOTAGE_CREDIT_COST} AI edits
+                            </span>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </div>,
+                  document.body
+                )}
+
+                {stockFootagePickerSceneId !== null && (
+                  <StockFootageModal
+                    projectId={project.id}
+                    initialQuery={
+                      project.scenes.find((s) => s.id === stockFootagePickerSceneId)?.title ||
+                      project.scenes.find((s) => s.id === stockFootagePickerSceneId)
+                        ?.visual_description ||
+                      ""
+                    }
+                    // The scene's image box steers orientation + rendition size.
+                    boxAspect={(() => {
+                      const s = project.scenes.find((x) => x.id === stockFootagePickerSceneId);
+                      let layoutId: string | null = null;
+                      try {
+                        if (s?.remotion_code) layoutId = JSON.parse(s.remotion_code).layout ?? null;
+                      } catch { /* legacy descriptor */ }
+                      const cfg = getTemplateConfig(project.template || "default");
+                      return getImageBoxAspectRatio(
+                        layoutId ? normalizeLayoutId(layoutId) : null,
+                        project.aspect_ratio || "landscape",
+                        cfg.baseWidth,
+                        cfg.baseHeight,
+                      );
+                    })()}
+                    onClose={() => setStockFootagePickerSceneId(null)}
+                    onSelect={(clip, audio) =>
+                      handleAssignStockFootageToScene(stockFootagePickerSceneId, clip, audio)
+                    }
+                  />
+                )}
+
+                {/* Progress is reported by the top-right toast (see below) —
+                    the assignment runs in the background, so no blocking overlay. */}
+
+                {scrapedImagesPickerSceneId !== null && ReactDOM.createPortal(
+                  <div className="fixed inset-0 z-[126] flex items-center justify-center p-4">
+                    <div
+                      className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+                      onClick={() => !assigningExistingImage && setScrapedImagesPickerSceneId(null)}
+                    />
+                    <div className="relative w-full max-w-4xl rounded-2xl bg-white shadow-2xl overflow-hidden">
+                      <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+                        <div>
+                          <h3 className="text-lg font-semibold text-gray-900">
+                            {existingPickerKind === "video"
+                              ? "Select existing stock footage"
+                              : "Select existing image"}
+                          </h3>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            {existingPickerKind === "video"
+                              ? "Pick a clip already in this project — reusing it is free."
+                              : "Pick an image to assign to this scene."}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setScrapedImagesPickerSceneId(null)}
+                          disabled={assigningExistingImage}
+                          className="w-8 h-8 flex items-center justify-center rounded-full border border-gray-200 text-gray-500 hover:text-gray-700 hover:border-gray-300 transition-colors disabled:opacity-50"
+                          title="Close"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                      <div className="p-5 bg-gray-50 max-h-[60vh] overflow-auto">
+                        {scrapedImageOptions.length === 0 ? (
+                          <p className="text-sm text-gray-500">
+                            {existingPickerKind === "video"
+                              ? "This project has no stock footage clips yet."
+                              : "No images available."}
+                          </p>
+                        ) : (
+                          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                            {scrapedImageOptions.map(({ asset, url }) => {
+                              const selected = selectedExistingAssetId === asset.id;
+                              const isClip = asset.asset_type === "video";
+                              return (
+                                <button
+                                  key={`${asset.asset_type}-${asset.id}`}
+                                  type="button"
+                                  onClick={() => setSelectedExistingAssetId(asset.id)}
+                                  className={`relative rounded-xl overflow-hidden border-2 transition-colors ${
+                                    selected ? "border-purple-500" : "border-gray-200 hover:border-purple-300"
+                                  }`}
+                                >
+                                  {isClip ? (
+                                    <>
+                                      <video
+                                        src={url}
+                                        muted
+                                        loop
+                                        playsInline
+                                        preload="metadata"
+                                        className="w-full h-24 object-cover bg-black"
+                                        onMouseEnter={(e) => {
+                                          void (e.currentTarget as HTMLVideoElement).play().catch(() => {});
+                                        }}
+                                        onMouseLeave={(e) => (e.currentTarget as HTMLVideoElement).pause()}
+                                      />
+                                      <span className="absolute bottom-1 left-1 px-1 py-0.5 rounded bg-black/70 text-white text-[9px] font-medium uppercase tracking-wide">
+                                        Clip
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <img src={url} alt="" className="w-full h-24 object-cover" loading="lazy" />
+                                  )}
+                                  {selected && (
+                                    <span className="absolute top-1 right-1 w-5 h-5 rounded-full bg-purple-600 text-white flex items-center justify-center">
+                                      <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                      </svg>
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                      <div className="px-5 py-4 border-t border-gray-200 flex justify-end gap-2 bg-white">
+                        <button
+                          type="button"
+                          onClick={() => setScrapedImagesPickerSceneId(null)}
+                          disabled={assigningExistingImage}
+                          className="px-3 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition-colors text-sm disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleAssignExistingImageToScene}
+                          disabled={!selectedExistingAssetId || assigningExistingImage}
+                          className="px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 transition-colors text-sm disabled:opacity-60"
+                        >
+                          {assigningExistingImage ? "Saving..." : "Save"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>,
+                  document.body
+                )}
+
+                {/* Scene image adjust modal (from expanded images section) */}
+                {imageAdjustSceneId !== null && imageAdjustSrc && ReactDOM.createPortal(
+                  <div className="fixed inset-0 z-[130] flex items-center justify-center p-2 sm:p-4 min-h-0">
+                    <div
+                      className="absolute inset-0 bg-black/55 backdrop-blur-sm"
+                      onClick={closeSceneImageAdjustModal}
+                    />
+                    <div
+                      className="relative w-full max-w-3xl max-h-[calc(100dvh-0.75rem)] sm:max-h-[calc(100dvh-2rem)] flex flex-col rounded-2xl bg-white shadow-2xl overflow-hidden min-h-0"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="shrink-0 px-4 py-3 sm:px-5 sm:py-4 border-b border-gray-200 flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <h3 className="text-base sm:text-lg font-semibold text-gray-900">Adjust image framing</h3>
+                          <p className="text-xs text-gray-500 mt-0.5 leading-snug">
+                            Drag to pan when zoomed in. Use the slider or scroll wheel to zoom, then save.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={closeSceneImageAdjustModal}
+                          className="shrink-0 w-8 h-8 flex items-center justify-center rounded-full border border-gray-200 text-gray-500 hover:text-gray-700 hover:border-gray-300 transition-colors"
+                          title="Close"
+                          disabled={savingImageAdjust}
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                      <div ref={imageAdjustScrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain bg-gray-50">
+                        <div className="p-4 sm:p-5">
+                        <ImageAdjustStage
+                          src={imageAdjustSrc}
+                          isVideo={imageAdjustIsVideo}
+                          focusX={imageAdjustFocusX}
+                          focusY={imageAdjustFocusY}
+                          zoom={imageAdjustZoom}
+                          aspectRatio={imageAdjustAspectRatio}
+                          circular={imageAdjustCircular}
+                          dragging={isAdjustDragging}
+                          onMouseDown={handleAdjustMouseDown}
+                          onTouchStart={handleAdjustTouchStart}
+                          windowRef={imageAdjustPreviewRef}
+                          {...(() => {
+                            // Clip trim needs the clip length + scene length for
+                            // the current adjust scene. Only relevant for clips.
+                            const s = project.scenes.find((sc) => sc.id === imageAdjustSceneId);
+                            let clipDur: number | undefined;
+                            try {
+                              const fn = s?.remotion_code
+                                ? (JSON.parse(s.remotion_code) as { layoutProps?: { assignedVideo?: string } }).layoutProps?.assignedVideo
+                                : undefined;
+                              const asset = fn
+                                ? project.assets.find((a) => a.asset_type === "video" && a.filename === fn && !a.excluded)
+                                : undefined;
+                              clipDur = asset?.duration_seconds ?? undefined;
+                            } catch { /* ignore */ }
+                            return {
+                              clipDurationSeconds: clipDur,
+                              sceneDurationSeconds: Number(s?.duration_seconds) || undefined,
+                              startSeconds: imageAdjustStartSeconds,
+                              onStartChange: setImageAdjustStartSeconds,
+                            };
+                          })()}
+                        />
+                        {/* Replace the media itself rather than its framing. The
+                            labels flip so the current kind reads as "change" and
+                            the other as "switch to". */}
+                        <div className="mt-4 flex flex-col gap-2 max-w-2xl mx-auto w-full">
+                          <label className="flex items-center gap-3 text-sm text-gray-700">
+                            <span className="w-14 shrink-0 text-sm font-normal text-gray-900">Zoom</span>
+                            <input
+                              type="range"
+                              min={IMAGE_ADJUST_ZOOM_MIN}
+                              max={IMAGE_ADJUST_ZOOM_MAX}
+                              step={0.05}
+                              value={imageAdjustZoom}
+                              onChange={(e) =>
+                                setImageAdjustZoom(
+                                  Math.min(
+                                    IMAGE_ADJUST_ZOOM_MAX,
+                                    Math.max(IMAGE_ADJUST_ZOOM_MIN, Number(e.target.value))
+                                  )
+                                )
+                              }
+                              className="flex-1 min-w-0 h-4 w-full cursor-pointer appearance-none bg-transparent accent-purple-600 [&::-webkit-slider-runnable-track]:h-1.5 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-gray-200 [&::-webkit-slider-thumb]:-mt-1.5 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-purple-600 [&::-webkit-slider-thumb]:shadow [&::-moz-range-track]:h-1.5 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-gray-200 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-purple-600"
+                            />
+                            <span className="w-14 text-right text-sm font-normal text-gray-900 tabular-nums">
+                              {imageAdjustZoom.toFixed(2)}×
+                            </span>
+                          </label>
+                        </div>
+                        {/* Replace the media itself rather than its framing. Own row
+                            below the zoom slider at every breakpoint; the labels flip
+                            so the current kind reads as "change" and the other as
+                            "switch to". */}
+                        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-2xl mx-auto w-full">
+                          <button
+                            type="button"
+                            onClick={() => handleSwitchAdjustMedia(imageAdjustIsVideo ? "video" : "image")}
+                            className="w-full px-4 py-2 rounded-lg border border-purple-300 bg-purple-50 text-purple-700 font-medium hover:bg-purple-100 hover:border-purple-400 transition-colors text-sm disabled:opacity-50"
+                            disabled={savingImageAdjust}
+                          >
+                            {imageAdjustIsVideo ? "Change stock footage" : "Change image"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSwitchAdjustMedia(imageAdjustIsVideo ? "image" : "video")}
+                            className="w-full px-4 py-2 rounded-lg border border-purple-300 bg-purple-50 text-purple-700 font-medium hover:bg-purple-100 hover:border-purple-400 transition-colors text-sm disabled:opacity-50"
+                            disabled={savingImageAdjust}
+                          >
+                            {imageAdjustIsVideo ? "Switch to image" : "Switch to stock footage"}
+                          </button>
+                        </div>
+                        <div className="mt-3 text-xs text-gray-500 text-center tabular-nums">
+                          Position: X {Math.round(imageAdjustFocusX)}% · Y {Math.round(imageAdjustFocusY)}% · Zoom{" "}
+                          {imageAdjustZoom.toFixed(2)}×
+                        </div>
+                        </div>
+                      </div>
+                      <div className="shrink-0 px-4 py-3 sm:px-5 sm:py-4 border-t border-gray-200 flex justify-end gap-2 bg-white">
+                        <button
+                          type="button"
+                          onClick={closeSceneImageAdjustModal}
+                          className="px-3 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition-colors text-sm"
+                          disabled={savingImageAdjust}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={saveSceneImageAdjust}
+                          className="px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 transition-colors text-sm disabled:opacity-60"
+                          disabled={savingImageAdjust}
+                        >
+                          {savingImageAdjust ? "Saving..." : "Save framing"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>,
+                  document.body
+                )}
+
+                {/* Per-scene comments (shared projects only) */}
+                <SceneCommentModal
+                  open={commentScene != null}
+                  onClose={() => setCommentScene(null)}
+                  projectId={project.id}
+                  sceneId={commentScene?.id ?? 0}
+                  sceneTitle={commentScene?.title ?? ""}
+                  currentUserId={user?.id}
+                  ownerId={project.user_id}
+                  onChanged={loadCommentCounts}
+                />
+
+
+                {/* Delete scene confirmation modal */}
+                <ConfirmDeleteModal
+                  open={sceneToDelete != null}
+                  onClose={() => setSceneToDelete(null)}
+                  title="Delete this scene?"
+                  subtitle={sceneToDelete?.title}
+                  warningMessage="You can restore this scene later from Edit History."
+                  onConfirm={async () => {
+                    if (!sceneToDelete) return;
+                    try {
+                      await deleteScene(project.id, sceneToDelete.id);
+                      if (sceneEditModal?.id === sceneToDelete.id) setSceneEditModal(null);
+                      if (expandedScene === sceneToDelete.id) setExpandedScene(null);
+                      await loadProject();
+                    } catch (err) {
+                      showError(getErrorMessage(err) || DEFAULT_ERROR_MESSAGE);
+                      throw err;
+                    }
+                  }}
+                />
+
+
+                {/* AI image generation modal + preview are rendered at page top-level
+                    (below, near the Scene Edit modal) so they work from every tab and
+                    survive the Scene Edit modal closing mid-generation. */}
+
+                {/* AI image upgrade modal (scenes tab) */}
+                <UpgradePlanModal
+                  open={showAiImageUpgradeModal}
+                  onClose={() => setShowAiImageUpgradeModal(false)}
+                  projectId={project?.id}
+                  title="You're out of AI edit credits"
+                  subtitle="Upgrade for a larger monthly AI-edit allowance, or buy a video for +20 AI edits."
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Scene edit modal — rendered outside the tab blocks so it opens from both
+            the Edit Scenes tab and the Script tab. */}
+        {sceneEditModal && (
+          <SceneEditModal
+            open={!!sceneEditModal}
+            onClose={() => setSceneEditModal(null)}
+            // Already fetched on project load — passing it through means the
+            // layout name is correct on first paint, with no per-open request.
+            prefetchedLayouts={projectLayouts}
+            onGoToAvatarTab={() => handleTabChange("avatar")}
+            // Re-derive from the freshly-loaded project rather than using the
+            // snapshot captured when the modal opened. Actions that persist
+            // server-side while the modal stays open (stock footage assignment)
+            // change scene.remotion_code; without this the modal keeps editing
+            // the pre-action descriptor and its Save writes the change back out.
+            scene={project.scenes.find((s) => s.id === sceneEditModal.id) || sceneEditModal}
+            project={project}
+            imageItems={sceneImageAssetsMap[project.scenes.findIndex((s) => s.id === sceneEditModal.id)] || []}
+            availableImageItems={[...activeImageAssets, ...activeVideoAssets].map((asset) => ({
+              asset,
+              url: resolveAssetUrl(asset, project.id),
+            }))}
+            onSaved={loadProject}
+            // Delegate AI image generation to ProjectView so a single generation flow
+            // owns the loader/preview and survives this modal being closed mid-generation.
+            imageGenerating={generatingImageSceneId === sceneEditModal.id}
+            onRequestGenerateImage={() => setImageGenModalSceneId(sceneEditModal.id)}
+            clipAssigning={stockFootageBusySceneId === sceneEditModal.id}
+            onAssignStockClip={(clip, audio) =>
+              handleAssignStockFootageToScene(sceneEditModal.id, clip, audio)
+            }
+            registerStageImage={(fn) => { stageEditModalImageRef.current = fn; }}
+          />
+        )}
+
+        {/* AI image generation modal — top-level so it opens from any tab and from the
+            Scene Edit modal. On generate start it closes and hands off to the row
+            spinner; the result surfaces in the preview below. */}
+        {project && imageGenModalSceneId !== null && (() => {
+          const imageGenScene = project.scenes?.find((s) => s.id === imageGenModalSceneId);
+          if (!imageGenScene) return null;
+          return (
+            <GenerateSceneImageModal
+              open
+              scene={imageGenScene}
+              project={project}
+              canGenerate={canUseAiImage}
+              creditCost={AI_IMAGE_CREDIT_COST}
+              isCollaborator={useOwnerScopedAssets}
+              creditsRemaining={aiImageCreditRemaining}
+              ownerBlocked={ownerBlocksProFeature}
+              onOwnerBlocked={() => notifyOwnerBlocked()}
+              onClose={() => setImageGenModalSceneId(null)}
+              onUpgrade={() => setShowAiImageUpgradeModal(true)}
+              onUpgradeNow={() => navigate("/subscription")}
+              onGenerateStart={() => {
+                setGeneratingImageSceneId(imageGenModalSceneId);
+                setImageGenModalSceneId(null);
+              }}
+              onGenerateError={(message) => {
+                setGeneratingImageSceneId(null);
+                setGenerateImageError(message);
+                setGenerateErrorSceneId(imageGenModalSceneId);
+              }}
+              onImageReady={(imageBase64, refinedPrompt) => {
+                setGeneratingImageSceneId(null);
+                handleSceneImageReady(imageGenModalSceneId, imageBase64, refinedPrompt);
+                setImageGenModalSceneId(null);
+                // Server charged AI_IMAGE_CREDIT_COST — refresh so the balance isn't stale.
+                void refreshUser();
+              }}
+            />
+          );
+        })()}
+
+        {/* AI generated image preview modal — keep/discard. When the Scene Edit modal
+            for this scene is still open, Keep stages into its form; otherwise it saves
+            to the scene directly. */}
+        {generatedImageSceneId !== null && generatedImageBase64 && ReactDOM.createPortal(
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+            {/* Backdrop is non-dismissing: keep the preview open on outside clicks so
+                the user must explicitly keep or discard (no accidental loss). */}
+            <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+            <div
+              className="relative bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="p-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
+                <h3 className="text-lg font-semibold text-gray-900">AI generated image</h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => generatedImageSceneId !== null && handleKeepGeneratedSceneImage(generatedImageSceneId)}
+                    className="w-7 h-7 flex items-center justify-center rounded-full border border-purple-500/80 text-purple-600 hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+                    title="Use this image"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDiscardGeneratedSceneImage}
+                    className="w-7 h-7 flex items-center justify-center rounded-full border border-purple-500/80 text-purple-600 hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+                    title="Discard"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div className="flex-1 overflow-auto p-4 flex flex-col items-center bg-gray-50 min-h-0 relative">
+                <img
+                  src={`data:image/png;base64,${generatedImageBase64}`}
+                  alt="AI generated"
+                  className="max-w-full max-h-[70vh] w-auto h-auto object-contain rounded-lg shadow-inner"
+                />
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
+        {/* Avatar edit modal — dedicated to avatar editing only, opened from the
+            pencil icon on the scene list's avatar row (kept separate from the
+            much larger Scene Edit modal). */}
+        {avatarEditScene && (
+          <AvatarEditModal
+            open={!!avatarEditScene}
+            onClose={() => setAvatarEditScene(null)}
+            scene={avatarEditScene}
+            project={project}
+            onSaved={loadProject}
+            ownerScopedProjectId={useOwnerScopedAssets ? projectId : undefined}
+            precompiledCraftedDetail={ownerScopedCraftedDetail}
+            precompiledTemplateData={currentCustomTemplateCode}
+          />
+        )}
+
+        {recordModalScene && (
+          <RecordVoiceoverModal
+            open={!!recordModalScene}
+            onClose={() => setRecordModalScene(null)}
+            scene={recordModalScene}
+            onApply={handleApplyRecording}
+            project={project ?? undefined}
+            layoutPropSchema={layoutPropSchema !== null ? layoutPropSchema : undefined}
+            ownerScopedProjectId={useOwnerScopedAssets ? projectId : undefined}
+            precompiledCraftedDetail={ownerScopedCraftedDetail}
+            precompiledTemplateData={currentCustomTemplateCode}
+          />
+        )}
+
+        <AddSceneModal
+          open={addSceneOpen}
+          onClose={() => { setAddSceneOpen(false); setAddSceneAnchor(null); }}
+          project={project}
+          isCollaborator={useOwnerScopedAssets}
+          anchorScene={addSceneAnchor}
+          creditsRemaining={aiImageCreditRemaining}
+          canAfford={aiImageCreditRemaining >= ADD_SCENE_CREDIT_COST}
+          onAdded={(position) => {
+            // Job enqueued — show the placeholder at the target slot and start polling.
+            setAddScenePosition(position ?? project.scenes.length + 1);
+            setAddSceneJob({ id: 0, status: "queued", current_step: "queued" });
+            startAddScenePolling();
+          }}
+          onError={(err) => showError(getErrorMessage(err, "Failed to add scene."))}
+          onUpgradeNow={() => navigate("/subscription")}
+        />
+
+       {activeTab === "avatar" && (
+        // Full width, unlike the two-column Settings grid: this tab holds a single
+        // card whose controls (preview row, sliders, swatches) all read better with
+        // room, and there is no second card to sit beside it.
+        <div className="overflow-visible">
+          <ProjectAvatarSettingsCard
+            projectId={project.id}
+            hasAnyAvatar={(project.scenes ?? []).some((s) => !!s.avatar_video_path)}
+            avatarShape={project.avatar_shape}
+            avatarSize={project.avatar_size}
+            avatarPosition={project.avatar_position}
+            avatarBg={project.avatar_bg}
+            avatarOpacity={project.avatar_opacity}
+            avatarShadow={project.avatar_shadow}
+            avatarCustomImageUrl={project.avatar_custom_image_url}
+            aspectRatio={project.aspect_ratio}
+            // A custom background only renders on scenes whose clip has been cut
+            // out, so the card can offer to do the ones still missing it.
+            scenesNeedingMatte={(project.scenes ?? [])
+              .filter((s) => !!s.avatar_video_path && !s.has_matte)
+              .map((s) => ({ id: s.id, order: s.order }))}
+            // Refunded scenes are dropped OUTRIGHT rather than passed with
+            // hasVoiceover:false. That flag renders a scene as "skipped (no
+            // narration yet)", which is both wrong and misleading here — the
+            // narration is fine; the scene is closed because its render failed
+            // for good and the credits were returned.
+            batchScenes={(project.scenes ?? [])
+              .filter((s) => !s.avatar_credits_refunded)
+              .map((s) => ({
+                id: s.id,
+                order: s.order,
+                hasVoiceover: !!s.voiceover_path,
+              }))}
+            // Scenes a pencil-icon click can land here for (no clip yet, but
+            // at least one sibling scene already has one) — lets the card
+            // offer to generate just these rather than stranding the user.
+            // Refunded scenes are EXCLUDED: they failed for good, the credits
+            // went back, and the server refuses to generate them again. Listing
+            // them here made the banner advertise scenes that could not be
+            // rendered — the batch was then either silently short-changed or
+            // rejected for falling under the minimum.
+            scenesMissingAvatar={(project.scenes ?? [])
+              .filter(
+                (s) =>
+                  !!s.voiceover_path &&
+                  !s.avatar_video_path &&
+                  !s.avatar_credits_refunded,
+              )
+              .map((s) => ({ id: s.id, order: s.order, hasVoiceover: true }))}
+            // Refunded scenes are excluded from the generatable list above (the
+            // backend closes them permanently), which left them unaccounted for
+            // in the UI — they simply vanished from the banner with no reason
+            // given. Passed separately so they can be NAMED without being
+            // offered for generation.
+            scenesRefunded={(project.scenes ?? [])
+              .filter((s) => !s.avatar_video_path && !!s.avatar_credits_refunded)
+              .map((s) => ({ id: s.id, order: s.order }))}
+            avatarBatchUnlocked={!!project.avatar_batch_unlocked}
+            disabled={anyJobRunning}
+            pipelineRunning={pipelineRunning}
+            onError={(msg) => showError(msg)}
+            onSaved={async () => { await loadProject(); }}
+            project={project}
+            ownerScopedProjectId={useOwnerScopedAssets ? projectId : undefined}
+            precompiledCraftedDetail={ownerScopedCraftedDetail}
+            precompiledTemplateData={currentCustomTemplateCode}
+          />
+        </div>
+      )}
+
+       {activeTab === "settings" && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 overflow-visible">
+          {/* 4. Colors & Font */}
+          <div>
+            <h2 className="text-base font-medium text-gray-900 mb-1">Colors &amp; Font</h2>
+            <p className="text-xs text-gray-400 mb-5">Theme colors and font applied across all scenes.</p>
+            <div className="glass-card p-6 flex flex-col gap-5 overflow-visible relative z-30">
+              {/* Row 1: Colors + Save colors */}
+              <div className="flex items-end justify-between gap-4">
+                <div className="flex flex-col gap-2 min-w-0">
+                  <p className="text-xs font-semibold text-gray-900">Colors</p>
+                  <div className="flex items-center gap-5 flex-wrap">
+                    {(
+                      [
+                        { label: "Accent", hint: "Buttons & highlights", value: settingsAccentColor, setter: setSettingsAccentColor },
+                        { label: "Text", hint: "On-screen text", value: settingsTextColor, setter: setSettingsTextColor },
+                        { label: "Background", hint: "Scene background", value: settingsBgColor, setter: setSettingsBgColor },
+                      ] as const
+                    ).map(({ label, hint, value, setter }) => (
+                      <div key={label} className="flex items-center gap-2">
+                        <div
+                          className="w-9 h-9 rounded-lg border border-gray-200 shadow-sm cursor-pointer overflow-hidden flex-shrink-0"
+                          style={{ backgroundColor: value }}
+                          onClick={() => (document.getElementById(`color-input-${label}`) as HTMLInputElement)?.click()}
+                        >
+                          <input
+                            id={`color-input-${label}`}
+                            type="color"
+                            value={value}
+                            onChange={(e) => setter(e.target.value)}
+                            className="opacity-0 w-full h-full cursor-pointer"
+                          />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[11px] font-medium text-gray-700 leading-tight">{label}</p>
+                          <p className="text-[10px] text-gray-400 leading-tight mt-0.5">{hint}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={savingColors || anyJobRunning}
+                  onClick={async () => {
+                    setSavingColors(true);
+                    try {
+                      await updateProject(project.id, {
+                        accent_color: settingsAccentColor,
+                        bg_color: settingsBgColor,
+                        text_color: settingsTextColor,
+                      });
+                      await loadProject();
+                    } catch (err) {
+                      showError(getErrorMessage(err, "Failed to save colors."));
+                    } finally {
+                      setSavingColors(false);
+                    }
+                  }}
+                  className="flex-shrink-0 ml-auto px-4 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-200 disabled:text-gray-400 text-white text-xs font-semibold rounded-xl transition-colors flex items-center gap-2"
+                >
+                  {savingColors ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      Saving…
+                    </>
+                  ) : (
+                    "Save colors"
+                  )}
+                </button>
+              </div>
+
+              {/* Row 2: Font family + Save font */}
+              <div className="border-t border-gray-100 pt-5">
+                <div className="flex flex-col gap-2 min-w-0">
+                  <p className="text-xs font-semibold text-gray-900">Font family</p>
+                  {/* Controls line: dropdown (+ inline preview at sm) + Save font */}
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div ref={fontDropdownRef} className="relative w-40 flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setShowFontDropdown((v) => !v)}
+                        className="w-full px-3 py-2 text-xs border border-gray-200 rounded-lg bg-white hover:border-purple-300 focus:outline-none focus:ring-1 focus:ring-purple-300 flex items-center justify-between gap-1"
+                        data-action="font-selector"
+                      >
+                        <span className="truncate">
+                          {settingsFontId
+                            ? FONT_REGISTRY[settingsFontId as keyof typeof FONT_REGISTRY]?.label || settingsFontId
+                            : "Default (template)"}
+                        </span>
+                        <svg className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                      {showFontDropdown && (
+                        <div className="absolute z-40 mt-2 w-full bg-white border border-gray-200 rounded-xl shadow-lg p-2 max-h-72 overflow-y-auto">
+                          <div className="grid grid-cols-1 gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSettingsFontId(null);
+                                setShowFontDropdown(false);
+                              }}
+                              className={`text-left px-2.5 py-2 text-xs rounded-lg transition-colors ${
+                                !settingsFontId ? "bg-purple-50 text-purple-700" : "hover:bg-gray-50 text-gray-700"
+                              }`}
+                            >
+                              Default
+                            </button>
+                            {Object.values(FONT_REGISTRY)
+                              .filter((opt) => opt.id !== "fira_code")
+                              .map((opt) => (
+                                <button
+                                  key={opt.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setSettingsFontId(opt.id);
+                                    setShowFontDropdown(false);
+                                  }}
+                                  className={`text-left px-2.5 py-2 text-xs rounded-lg transition-colors ${
+                                    settingsFontId === opt.id
+                                      ? "bg-purple-50 text-purple-700"
+                                      : "hover:bg-gray-50 text-gray-700"
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
+                              ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    {/* Preview sits inline from sm up; on mobile it moves to its own full-width row below. */}
+                    {settingsFontId && (
+                      <div
+                        className="hidden sm:block flex-1 min-w-0 truncate px-3 py-2 rounded-lg border border-dashed border-gray-200 bg-gray-50 text-xs text-gray-800"
+                        title="The quick brown fox jumps over the lazy dog."
+                        style={{ fontFamily: settingsFontPreviewFamily }}
+                      >
+                        The quick brown fox jumps over the lazy dog.
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      disabled={savingFontFamily || anyJobRunning}
+                      onClick={async () => {
+                        setSavingFontFamily(true);
+                        try {
+                          await updateProject(project.id, {
+                            font_family: settingsFontId || null,
+                          });
+                          await loadProject();
+                        } catch (err) {
+                          showError(getErrorMessage(err, "Failed to save font family."));
+                        } finally {
+                          setSavingFontFamily(false);
+                        }
+                      }}
+                      className="flex-shrink-0 ml-auto px-4 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-200 disabled:text-gray-400 text-white text-xs font-semibold rounded-xl transition-colors flex items-center gap-2"
+                    >
+                      {savingFontFamily ? (
+                        <>
+                          <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          Saving…
+                        </>
+                      ) : (
+                        "Save font"
+                      )}
+                    </button>
+                  </div>
+                  {settingsFontId && (
+                    <div
+                      className="sm:hidden w-full px-3 py-2 rounded-lg border border-dashed border-gray-200 bg-gray-50 text-xs text-gray-800"
+                      style={{ fontFamily: settingsFontPreviewFamily }}
+                    >
+                      The quick brown fox jumps over the lazy dog.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 5. Global Text Sizes */}
+          <div>
+            <h2 className="text-base font-medium text-gray-900 mb-1">Global Text Sizes</h2>
+            <p className="text-xs text-gray-400 mb-3">Applied to all scenes at once.</p>
+            <div className="glass-card p-6 flex flex-col gap-5">
+              {/* Same ranges and labels as the per-scene sliders. These used a
+                  fixed 20-200 / 12-80 regardless of template, so on a custom
+                  template the global control could offer a size the per-scene
+                  one could not, and wrote it to every scene — the backend now
+                  clamps it, which would silently disagree with what was
+                  dragged. */}
+              <div>
+                <label className="text-xs text-gray-500 mb-1.5 flex items-center justify-between">
+                  <span>{globalIsTwoTierType ? "Title" : "Title font size"}</span>
+                  <span className="text-purple-600 font-semibold tabular-nums">{globalTitleSize}</span>
+                </label>
+                <input
+                  type="range"
+                  min={globalTitleBand[0]}
+                  max={globalTitleBand[1]}
+                  step={1}
+                  value={globalTitleSize}
+                  onChange={(e) => setGlobalTitleSize(Number(e.target.value))}
+                  className="w-full h-1 rounded-full appearance-none bg-gray-200 accent-purple-600"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1.5 flex items-center justify-between">
+                  <span>{globalIsTwoTierType ? "Display text & content" : "Display text size"}</span>
+                  <span className="text-purple-600 font-semibold tabular-nums">{globalDescSize}</span>
+                </label>
+                <input
+                  type="range"
+                  min={globalDescBand[0]}
+                  max={globalDescBand[1]}
+                  step={1}
+                  value={globalDescSize}
+                  onChange={(e) => setGlobalDescSize(Number(e.target.value))}
+                  className="w-full h-1 rounded-full appearance-none bg-gray-200 accent-purple-600"
+                />
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  disabled={savingGlobalTypography || anyJobRunning}
+                  onClick={async () => {
+                    setSavingGlobalTypography(true);
+                    try {
+                      await bulkUpdateSceneTypography(project.id, {
+                        title_font_size: globalTitleSize,
+                        description_font_size: globalDescSize,
+                      });
+                      await loadProject();
+                    } catch (err) {
+                      showError(getErrorMessage(err, "Failed to update typography."));
+                    } finally {
+                      setSavingGlobalTypography(false);
+                    }
+                  }}
+                  className="px-4 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-200 disabled:text-gray-400 text-white text-xs font-semibold rounded-xl transition-colors flex items-center gap-2"
+                >
+                  {savingGlobalTypography ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      Applying…
+                    </>
+                  ) : (
+                    "Apply to all Scenes"
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* 1. Template */}
+          <div data-tour="template-picker">
+          <ProjectTemplateSettingsCard
+            templateId={assignedTemplateId}
+            customTemplates={customTemplatesList}
+            craftedTemplates={readyCraftedForPicker}
+            projectCustomTheme={project?.custom_theme ?? null}
+            projectName={project?.name}
+            templateMetas={templateMetas}
+            previewCompileScope={user?.id != null ? String(user.id) : undefined}
+            disabled={submittingTemplateRelayout || anyJobRunning || missingCustomTemplate}
+            onChangeTemplate={() => {
+              setTemplateChangeDraft(assignedTemplateId);
+              setTemplateChangePickerTab(
+                assignedTemplateId.startsWith("custom_")
+                  ? "custom"
+                  : assignedTemplateId.startsWith("crafted_")
+                    ? "crafted"
+                    : "builtin"
+              );
+              setShowTemplateChangeModal(true);
+            }}
+          />
+          </div>
+
+          {/* 2. Voice & Language — one card, voice on the left, language on the right */}
+          {(
+            <>
+              <ProjectVoiceLanguageSettingsCard
+                voice={{
+                  projectId: project.id,
+                  voiceGender: project.voice_gender,
+                  voiceAccent: project.voice_accent,
+                  customVoiceId: project.custom_voice_id,
+                  voiceEmotion: project.voice_emotion ?? null,
+                  isPro: effectiveIsPro,
+                  onError: (msg, options) => showError(msg, options),
+                  onUpgrade: () => setShowUpgrade(true),
+                  onOperationStarted: (op) => { setVoiceOpKickstart(op); void refreshUser(); },
+                  disabled: anyJobRunning,
+                  ownerAssetLabel,
+                }}
+                language={{
+                  projectId: project.id,
+                  contentLanguage: project.content_language,
+                  // Only the owner's own quota is knowable client-side. For a
+                  // collaborator the backend's 403 names whose limit was hit.
+                  canCreateVideo: useOwnerScopedAssets
+                    ? true
+                    : (user?.can_create_video ?? true),
+                  isCollaborator: useOwnerScopedAssets,
+                  onError: (msg, options) => showError(msg, options),
+                  onOperationStarted: (op) => { setLanguageOpKickstart(op); void refreshUser(); },
+                  disabled: anyJobRunning,
+                }}
+              />
+
+              {/* Avatar overlay settings now live in their own Avatar tab. */}
+
+              {/* 4. Playback Speed */}
+              <div>
+                <h2 className="text-base font-medium text-gray-900 mb-1">Playback Speed</h2>
+                <p className="text-xs text-gray-400 mb-5">
+                  Applies to preview and final rendered video (including voiceover).
+                </p>
+                <div className="glass-card p-6 flex flex-col gap-4">
+                  <div className="flex flex-wrap gap-2">
+                    {PLAYBACK_SPEED_OPTIONS.map((speed) => {
+                      const active = playbackSpeedDraft === speed;
+                      return (
+                        <button
+                          key={speed}
+                          type="button"
+                          onClick={() => setPlaybackSpeedDraft(speed)}
+                          className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                            active
+                              ? "bg-purple-50 text-purple-700 border-purple-300"
+                              : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
+                          }`}
+                        >
+                          {speed}x
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500 mb-2 flex items-center justify-between">
+                      <span>Custom speed</span>
+                      <span className="text-purple-600 font-semibold tabular-nums">
+                        {playbackSpeedDraft.toFixed(1)}x
+                      </span>
+                    </label>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={2.5}
+                      step={0.1}
+                      value={playbackSpeedDraft}
+                      onChange={(e) => setPlaybackSpeedDraft(Number(e.target.value))}
+                      className="w-full h-1 rounded-full appearance-none bg-gray-200 accent-purple-600"
+                    />
+                  </div>
+                  <div className="flex justify-end mt-auto">
+                    <button
+                      type="button"
+                      disabled={savingPlaybackSpeed || anyJobRunning}
+                      onClick={async () => {
+                        setSavingPlaybackSpeed(true);
+                        try {
+                          const normalized = Math.min(2.5, Math.max(0.5, Math.round(playbackSpeedDraft * 10) / 10));
+                          await updateProject(project.id, { playback_speed: normalized });
+                          await loadProject();
+                        } catch (err) {
+                          showError(getErrorMessage(err, "Failed to save playback speed."));
+                        } finally {
+                          setSavingPlaybackSpeed(false);
+                        }
+                      }}
+                      className="px-4 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-200 disabled:text-gray-400 text-white text-xs font-semibold rounded-xl transition-colors flex items-center gap-2"
+                    >
+                      {savingPlaybackSpeed ? (
+                        <>
+                          <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          Saving…
+                        </>
+                      ) : (
+                        "Save speed"
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* 3b. Captions */}
+              {(() => {
+              const hasVoiceover = (project.scenes || []).some((s) => !!s.voiceover_path);
+              const captionControlsDisabled = !captionsEnabledDraft || !hasVoiceover;
+              return (
+              <div>
+                <h2 className="text-base font-medium text-gray-900 mb-1">Captions</h2>
+                <p className="text-xs text-gray-400 mb-5">
+                  Enable the cc, It applies to preview and the final rendered video.
+                </p>
+                <div className="glass-card p-6 flex flex-col gap-4">
+                  <label className={`flex items-center gap-3 select-none ${hasVoiceover ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}>
+                    <input
+                      type="checkbox"
+                      checked={captionsEnabledDraft && hasVoiceover}
+                      disabled={!hasVoiceover}
+                      onChange={(e) => setCaptionsEnabledDraft(e.target.checked)}
+                      className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500/30 accent-purple-600 cursor-pointer disabled:cursor-not-allowed"
+                    />
+                    <span className="text-sm font-medium text-gray-700">Enable captions</span>
+                  </label>
+
+                  {!hasVoiceover && (
+                    <p className="text-[11px] text-gray-400">
+                      Captions need a voiceover to sync to. Add a voice to this video to enable captions.
+                    </p>
+                  )}
+
+                  <div className={`flex flex-col gap-2 ${captionControlsDisabled ? "opacity-60" : ""}`}>
+                    {/* Row 1: Offset (2-col) + Size slider */}
+                    <div className="grid grid-cols-2 gap-2 items-start">
+
+                      {/* Offset — always bottom; slider nudges up/down */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="block text-[10px] font-medium text-gray-400 uppercase tracking-wide">Offset</label>
+                          <button
+                            type="button"
+                            disabled={captionControlsDisabled}
+                            onClick={() => setCaptionOffsetDraft(0)}
+                            className={`text-[10px] font-semibold disabled:cursor-not-allowed ${captionOffsetDraft === 0 ? "text-gray-400" : "text-purple-600 hover:text-purple-700 disabled:text-gray-400 disabled:hover:text-gray-400"}`}
+                          >
+                            {captionOffsetDraft === 0 ? "Default" : "Reset"}
+                          </button>
+                        </div>
+                        <div className="flex flex-col justify-center pt-1">
+                          <input
+                            type="range"
+                            min={-100}
+                            max={100}
+                            step={1}
+                            disabled={captionControlsDisabled}
+                            value={captionOffsetDraft}
+                            onChange={(e) => setCaptionOffsetDraft(Number(e.target.value))}
+                            className="w-full h-1 rounded-full appearance-none bg-gray-200 accent-purple-600 cursor-pointer disabled:cursor-not-allowed disabled:accent-gray-400"
+                          />
+                          <div className="flex justify-between mt-1">
+                            <span className="text-[9px] text-gray-400">Down</span>
+                            <span className="text-[9px] text-gray-400">Up</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Font Size — free slider 12–64px */}
+                      <div>
+                        <label className="block text-[10px] font-medium text-gray-400 uppercase tracking-wide mb-1">Size</label>
+                        <div className="flex flex-col justify-center pt-1">
+                          <input
+                            type="range"
+                            min={12}
+                            max={64}
+                            step={1}
+                            disabled={captionControlsDisabled}
+                            value={captionFontSizeDraft}
+                            onChange={(e) => setCaptionFontSizeDraft(Number(e.target.value))}
+                            className="w-full h-1 rounded-full appearance-none bg-gray-200 accent-purple-600 cursor-pointer disabled:cursor-not-allowed disabled:accent-gray-400"
+                          />
+                          <div className="flex justify-between mt-1">
+                            <span className="text-[9px] text-gray-400">12</span>
+                            <span className={`text-[9px] font-semibold ${captionControlsDisabled ? "text-gray-400" : "text-purple-600"}`}>{captionFontSizeDraft}px</span>
+                          </div>
+                        </div>
+                      </div>
+
+                    </div>
+                  </div>
+
+                  <div className="flex items-end justify-between mt-auto gap-3">
+                    {/* Font Family — always shown; disabled when captions are off */}
+                    <div className={`relative flex-1 max-w-[180px] ${captionControlsDisabled ? "opacity-60" : ""}`}>
+                      <label className="block text-[10px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">Font</label>
+                      <div className="relative">
+                        <select
+                          value={captionFontFamilyDraft}
+                          disabled={captionControlsDisabled}
+                          onChange={(e) => setCaptionFontFamilyDraft(e.target.value)}
+                          style={{ fontFamily: FONT_REGISTRY[captionFontFamilyDraft as keyof typeof FONT_REGISTRY]?.cssFamily }}
+                          className="w-full text-[11px] font-medium text-gray-700 bg-white border border-gray-200 rounded-md pl-2 pr-6 py-1.5 focus:outline-none focus:ring-2 focus:ring-purple-400/40 focus:border-purple-300 cursor-pointer appearance-none disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-400"
+                        >
+                          {(["inter","poppins","montserrat","roboto_slab","oswald","lora","patrick_hand","arimo","archivo_black","merriweather","playfair_display","fira_code"] as const).map((fontId) => (
+                            <option key={fontId} value={fontId} style={{ fontFamily: FONT_REGISTRY[fontId]?.cssFamily }}>
+                              {FONT_REGISTRY[fontId]?.label ?? fontId}
+                            </option>
+                          ))}
+                        </select>
+                        <div className="pointer-events-none absolute inset-y-0 right-1.5 flex items-center">
+                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" className="text-gray-400">
+                            <path d="M2 3.5l3 3 3-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+                          </svg>
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={savingCaptions || !hasVoiceover || anyJobRunning}
+                      onClick={async () => {
+                        setSavingCaptions(true);
+                        try {
+                          await updateProject(project.id, {
+                            captions_enabled: captionsEnabledDraft && hasVoiceover,
+                            caption_font_family: captionFontFamilyDraft,
+                            caption_font_size: captionFontSizeDraft,
+                            caption_offset: captionOffsetDraft,
+                          });
+                          setCaptionSettingsKey((k) => k + 1);
+                          await loadProject();
+                        } catch (err) {
+                          showError(getErrorMessage(err, "Failed to save captions."));
+                        } finally {
+                          setSavingCaptions(false);
+                        }
+                      }}
+                      className="px-4 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-200 disabled:text-gray-400 text-white text-xs font-semibold rounded-xl transition-colors flex items-center gap-2"
+                    >
+                      {savingCaptions ? (
+                        <>
+                          <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          Saving…
+                        </>
+                      ) : (
+                        "Save caption settings"
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              );
+              })()}
+
+            </>
+          )}
+
+        </div>
+      )}
+
+        {activeTab === "images" && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            {/* Blog Images section */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-baseline gap-4">
+                  <h2 className="text-base font-medium text-gray-900">
+                    Blog Images and Stock Footages
+                  </h2>
+                  <span className="text-xs text-gray-400">
+                    {imageAssets.length} image{imageAssets.length !== 1 ? "s" : ""}
+                    {videoAssets.length > 0 &&
+                      ` · ${videoAssets.length} stock footage${videoAssets.length !== 1 ? "s" : ""}`}
+                  </span>
+                </div>
+              </div>
+              {mediaAssets.length === 0 ? (
+                <p className="text-sm text-gray-400 py-8">
+                  Images will appear here once scraped.
+                </p>
+              ) : (
+                (() => {
+                  return (
+                    <>
+                      <SceneGroupAccordion
+                        items={project.scenes}
+                        getOrder={(scene) => scene.order}
+                        expandedGroupIndex={expandedImagesGroupIndex}
+                        onToggleGroup={(groupIdx) =>
+                          setExpandedImagesGroupIndex(expandedImagesGroupIndex === groupIdx ? null : groupIdx)
+                        }
+                        renderGroupBody={(groupScenes) => (
+                          <>
+                            {groupScenes.map((scene) => {
+                              const idx = project.scenes.findIndex((s) => s.id === scene.id);
+                              const sceneClip = sceneClipAssetMap[idx];
+                              const sceneAssets = sceneClip
+                                ? [{ asset: sceneClip }]
+                                : sceneImageAssetsMap[idx] || [];
+                              return (
+                                <div key={scene.id} className="glass-card p-3">
+                                  <div className="flex items-center gap-2.5 mb-2">
+                                    {/* Scene number */}
+                                    <div className="w-7 h-7 rounded-lg bg-purple-50 flex items-center justify-center flex-shrink-0">
+                                      <span className="text-xs font-semibold text-purple-600">
+                                        {scene.order}
+                                      </span>
+                                    </div>
+                                    <span className="text-xs font-medium text-gray-900 truncate">
+                                      {scene.title}
+                                    </span>
+                                  </div>
+                                  {sceneAssets.length === 0 ? (
+                                    <p className="text-xs text-gray-400 italic py-2">No visual assigned</p>
+                                  ) : (
+                                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5">
+                                      {sceneAssets.map(({ asset }) => renderMediaCard(asset))}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </>
+                        )}
+                      />
+
+                    </>
+                  );
+                })()
+              )}
+            </div>
+
+            {/* Logo section */}
+            <div className="space-y-4">
+              <h2 className="text-base font-medium text-gray-900">Logo</h2>
+              <input
+                type="file"
+                ref={logoFileInputRef}
+                accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                className="hidden"
+                onChange={handleUploadLogo}
+              />
+              {displayLogoUrl ? (
+                <div className="glass-card p-6 space-y-6">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex items-center gap-2">
+                      <img
+                        src={displayLogoUrl}
+                        alt="Current logo"
+                        className="h-14 w-14 object-contain rounded border border-gray-200"
+                      />
+                     
+                    </div>
+                    <button
+                      type="button"
+                      data-action="upload-logo"
+                      onClick={() => logoFileInputRef.current?.click()}
+                      disabled={logoUploading || logoRemoving}
+                      className="px-3 py-2 rounded-lg text-xs font-medium bg-gray-50 text-gray-500 hover:bg-gray-100 border border-gray-200/60 transition-all disabled:opacity-60 disabled:pointer-events-none"
+                    >
+                      {logoUploading ? "Uploading…" : "Replace logo"}
+                    </button>
+                    {project?.logo_r2_url && (
+                      <button
+                        type="button"
+                        data-action="remove-logo"
+                        onClick={handleRemoveLogo}
+                        disabled={logoUploading || logoRemoving}
+                        className="px-3 py-2 rounded-lg text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 border border-red-200/60 transition-all disabled:opacity-60 disabled:pointer-events-none"
+                      >
+                        {logoRemoving ? "Removing…" : "Remove logo"}
+                      </button>
+                    )}
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 mb-1 block">Position</label>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        { value: "top_left", label: "Top left" },
+                        { value: "top_right", label: "Top right" },
+                        { value: "bottom_left", label: "Bottom left" },
+                        { value: "bottom_right", label: "Bottom right" },
+                      ].map((opt) => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setLogoPosition(opt.value)}
+                          className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                            logoPosition === opt.value
+                              ? "bg-purple-600 text-white"
+                              : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 mb-1 block">Opacity</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={Math.round(logoOpacity * 100)}
+                        onChange={(e) => setLogoOpacity(parseInt(e.target.value, 10) / 100)}
+                        className="w-64 h-1 rounded-full appearance-none bg-gray-200 accent-purple-600"
+                      />
+                      <span className="text-xs font-medium text-purple-600 tabular-nums w-10 text-right">{Math.round(logoOpacity * 100)}%</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 mb-1 block">Size</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min={50}
+                        max={200}
+                        step={1}
+                        value={logoSize}
+                        onChange={(e) => setLogoSize(parseFloat(e.target.value))}
+                        className="w-64 h-1 rounded-full appearance-none bg-gray-200 accent-purple-600"
+                      />
+                      <span className="text-xs font-medium text-purple-600 tabular-nums w-10 text-right">{Math.round(logoSize)}</span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSaveLogo}
+                    disabled={logoSaving}
+                    className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-300 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    {logoSaving ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-[11px] font-medium text-gray-400 mb-2 uppercase tracking-wider">
+                    Logo <span className="text-gray-300 font-normal">(optional · max 2 MB)</span>
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => logoFileInputRef.current?.click()}
+                      disabled={logoUploading}
+                      className="px-3 py-2 rounded-lg text-xs font-medium bg-gray-50 text-gray-500 hover:bg-gray-100 border border-gray-200/60 transition-all disabled:opacity-60 disabled:pointer-events-none"
+                    >
+                      {logoUploading ? "Uploading…" : "Choose file"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {unassignedAssets.length > 0 && (
+                <div className="mt-4">
+                  <p className="text-xs font-medium text-gray-600 mb-2">
+                    Unassigned <span className="text-gray-400 font-normal">— not used in any scene</span>
+                  </p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                    {unassignedAssets.map((asset) => renderMediaCard(asset))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "audio" && (
+          <div>
+            {project.scenes.length === 0 ? (
+              <p className="text-center py-16 text-xs text-gray-400">
+                Audio will appear here once generated.
+              </p>
+            ) : (
+              <div className="space-y-4">
+                {/* Project-level background music (track + default volume). Per-scene overrides live on each row below. */}
+                {bgmTracks.length > 0 && (
+                  <div className="glass-card p-5 relative">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-base font-medium text-gray-900">Music</h2>
+                      </div>
+                      <span className="text-[11px] text-gray-400">Project default — fine-tune per scene below</span>
+                    </div>
+                    <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+                      <div className="flex-1">
+                        <label className="text-[11px] text-gray-500 mb-1 block">Track</label>
+                        <BgmTrackDropdown
+                          tracks={bgmTracks}
+                          value={bgmTrackDraft}
+                          onChange={setBgmTrackDraft}
+                          triggerSize="md"
+                          disabled={anyJobRunning}
+                        />
+                      </div>
+                      {bgmTrackDraft && (
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[11px] font-medium text-gray-600">Volume</span>
+                            <span className="text-[11px] text-gray-400 tabular-nums">{Math.round(bgmVolumeDraft * 100)}%</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const track = bgmTracks.find((t) => t.track_id === bgmTrackDraft);
+                                if (!track) return;
+                                if (bgmPlayingId === track.track_id) {
+                                  bgmAudioRef.current?.pause();
+                                  setBgmPlayingId(null);
+                                  activeBgmPreviewStop = null;
+                                } else {
+                                  activeBgmPreviewStop?.(); // stop any other preview (scene rows)
+                                  bgmAudioRef.current?.pause();
+                                  const audio = new Audio(track.r2_url);
+                                  audio.loop = true;
+                                  audio.volume = Math.max(0, Math.min(1, bgmVolumeDraft));
+                                  audio.onended = () => setBgmPlayingId(null);
+                                  audio.play().catch(() => {});
+                                  bgmAudioRef.current = audio;
+                                  setBgmPlayingId(track.track_id);
+                                  activeBgmPreviewStop = () => { audio.pause(); setBgmPlayingId(null); };
+                                }
+                              }}
+                              className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 bg-purple-50 text-purple-600 hover:bg-purple-100"
+                              title="Preview track"
+                            >
+                              {bgmPlayingId === bgmTrackDraft ? (
+                                <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+                              ) : (
+                                <svg className="w-3 h-3 ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={anyJobRunning}
+                              onClick={() => {
+                                const v = bgmVolumeDraft === 0 ? (lastNonZeroProjectBgm || 0.10) : 0;
+                                if (bgmVolumeDraft > 0) setLastNonZeroProjectBgm(bgmVolumeDraft);
+                                setBgmVolumeDraft(v);
+                                if (bgmAudioRef.current) bgmAudioRef.current.volume = Math.max(0, Math.min(1, v));
+                              }}
+                              className={`flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-medium flex-shrink-0 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${bgmVolumeDraft === 0 ? "bg-red-50 text-red-600 hover:bg-red-100" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
+                              title={bgmVolumeDraft === 0 ? "Unmute music for all scenes" : "Mute music for all scenes"}
+                            >
+                              {bgmVolumeDraft === 0 ? (
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /><path strokeLinecap="round" strokeLinejoin="round" d="M17 9l4 4m0-4l-4 4" /></svg>
+                              ) : (
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
+                              )}
+                              {bgmVolumeDraft === 0 ? "Unmute" : "Mute"}
+                            </button>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              step={1}
+                              disabled={anyJobRunning}
+                              value={Math.round(bgmVolumeDraft * 100)}
+                              onChange={(e) => {
+                                const v = Number(e.target.value) / 100;
+                                setBgmVolumeDraft(v);
+                                if (bgmAudioRef.current) bgmAudioRef.current.volume = Math.max(0, Math.min(1, v));
+                              }}
+                              className="flex-1 accent-purple-600 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                            />
+                          </div>
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        disabled={savingBgm || anyJobRunning}
+                        onClick={async () => {
+                          setSavingBgm(true);
+                          try {
+                            await updateProject(project.id, {
+                              bgm_track_id: bgmTrackDraft,
+                              bgm_volume: Math.round(bgmVolumeDraft * 100) / 100,
+                            });
+                            await loadProject();
+                          } catch (err) {
+                            showError(getErrorMessage(err, "Failed to save background music."));
+                          } finally {
+                            setSavingBgm(false);
+                          }
+                        }}
+                        className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 text-white text-xs font-semibold rounded-xl transition-colors flex-shrink-0"
+                      >
+                        {savingBgm ? "Saving…" : "Save music"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-baseline gap-4">
+                    <h2 className="text-base font-medium text-gray-900">
+                      {hasVoiceoverContent ? "Voiceovers" : "Scenes"}
+                    </h2>
+                    <span className="text-xs text-gray-400">
+                      {hasVoiceoverContent
+                        ? `${audioScenes.length} / ${project.scenes.length} scenes${totalAudioDuration > 0 ? ` -- ${Math.round(totalAudioDuration)}s total` : ""}`
+                        : "No voiceover"}
+                    </span>
+                  </div>
+                  <div className={`flex items-center gap-2 text-[11px] text-gray-400 ${!hasVoiceoverContent ? "hidden" : ""}`}>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-green-400" />
+                      Ready
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-gray-200" />
+                      Pending
+                    </span>
+                  </div>
+                </div>
+
+                <SceneGroupAccordion
+                  items={project.scenes}
+                  getOrder={(scene) => scene.order}
+                  expandedGroupIndex={expandedAudioGroupIndex}
+                  onToggleGroup={(groupIdx) =>
+                    setExpandedAudioGroupIndex(expandedAudioGroupIndex === groupIdx ? null : groupIdx)
+                  }
+                  renderGroupBody={(groupScenes) => (
+                    <>
+                      {groupScenes.map((scene) => (
+                        <AudioRow
+                          key={scene.id}
+                          scene={scene}
+                          projectId={projectId}
+                          audioAssets={audioAssets}
+                          hasBgm={!!project.bgm_track_id}
+                          bgmTrackUrl={project.bgm_track_url ?? null}
+                          projectBgmVolume={project.bgm_volume ?? 0.10}
+                          onBgmSaved={loadProject}
+                          pendingUrl={pendingRecordings.get(scene.id)?.url ?? null}
+                          onRecord={() => setRecordModalScene(scene)}
+                          onDiscard={() => handleDiscardRecording(scene.id)}
+                          onSaveRecording={() => handleSaveRecording(scene.id)}
+                          savingRecording={savingRecordingSceneId === scene.id}
+                        />
+                      ))}
+                    </>
+                  )}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+      </div>
+    </div>
+
+    {/* Image generation toast — top-right, no backdrop, always visible */}
+
+    {generatingImageSceneId !== null && ReactDOM.createPortal(
+      <div className="fixed top-5 right-5 z-[99999] flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl bg-white text-gray-900 min-w-[260px] border border-purple-100 ring-1 ring-purple-200">
+        <div className="w-5 h-5 rounded-full border-2 border-purple-200 border-t-purple-600 animate-spin flex-shrink-0" />
+        <div>
+          <p className="text-sm font-semibold text-purple-700 leading-tight">Generating image…</p>
+          <p className="text-xs text-gray-400 mt-0.5">This may take a moment</p>
+        </div>
+      </div>,
+      document.body,
+    )}
+
+    {/* Stock-footage assignment toast — mirrors the image-generation toast. */}
+    {stockFootageBusySceneId !== null && ReactDOM.createPortal(
+      <div className="fixed top-5 right-5 z-[99999] flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl bg-white text-gray-900 min-w-[260px] border border-purple-100 ring-1 ring-purple-200">
+        <div className="w-5 h-5 rounded-full border-2 border-purple-200 border-t-purple-600 animate-spin flex-shrink-0" />
+        <div>
+          <p className="text-sm font-semibold text-purple-700 leading-tight">Adding stock footage…</p>
+          <p className="text-xs text-gray-400 mt-0.5">Converting the clip to 30&nbsp;fps</p>
+        </div>
+      </div>,
+      document.body,
+    )}
+
+    {generateImageError && generateErrorSceneId !== null && ReactDOM.createPortal(
+      <div className="fixed inset-0 z-[99999] flex items-center justify-center p-4">
+        <div
+          className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+          onClick={() => { setGenerateImageError(null); setGenerateErrorSceneId(null); }}
+          aria-hidden
+        />
+        <div
+          className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 text-center"
+          role="alertdialog"
+          aria-labelledby="image-gen-error-title"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="mx-auto mb-4 w-14 h-14 rounded-full bg-red-50 flex items-center justify-center">
+            <span className="text-3xl" aria-hidden>😕</span>
+          </div>
+          <h3 id="image-gen-error-title" className="text-lg font-semibold text-gray-900">
+            Oops — we couldn't generate your image
+          </h3>
+          <p className="text-sm text-gray-600 mt-2 leading-relaxed">
+            {generateImageError}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              const sceneId = generateErrorSceneId;
+              setGenerateImageError(null);
+              setGenerateErrorSceneId(null);
+              if (sceneId !== null) setImageGenModalSceneId(sceneId);
+            }}
+            className="mt-5 w-full px-4 py-2 text-sm font-medium text-white bg-purple-600 rounded-lg hover:bg-purple-700"
+          >
+            Try again with a better description
+          </button>
+          <button
+            type="button"
+            onClick={() => { setGenerateImageError(null); setGenerateErrorSceneId(null); }}
+            className="mt-2 w-full px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>,
+      document.body,
+    )}
+    </>
+
+);
+}

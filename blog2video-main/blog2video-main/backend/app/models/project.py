@@ -1,0 +1,247 @@
+﻿import enum
+from datetime import datetime
+from sqlalchemy import String, Text, Enum, DateTime, ForeignKey, Integer, Boolean, Float
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.database import Base
+
+
+class ProjectStatus(str, enum.Enum):
+    CREATED = "created"
+    SCRAPED = "scraped"
+    SCRIPTED = "scripted"
+    # Initial generation has produced editable Scene rows, but the user opted to
+    # review them before any voiceover or final scene descriptors are created.
+    AWAITING_SCRIPT_REVIEW = "awaiting_script_review"
+    GENERATED = "generated"
+    RENDERING = "rendering"
+    DONE = "done"
+    ERROR = "error"
+    GENERATING = "regenerating"
+    # Dedicated state for the "regenerate script" job (keep narration/voiceover, refresh
+    # titles/layouts). Distinct from SCRIPTED so a reload mid-job doesn't auto-start the
+    # full generation pipeline.
+    SCRIPT_REGENERATING = "script_regenerating"
+    # Dedicated state for the voice change job. Distinct from GENERATING so the
+    # voice-change-status endpoint doesn't need to guess whether GENERATING belongs
+    # to a voice change or a template relayout.
+    VOICE_REGENERATING = "voice_regenerating"
+    # Dedicated state for the language change job (translate all copy, then regenerate
+    # every voiceover). Distinct from VOICE_REGENERATING so the status endpoints and
+    # the stall reapers can tell the two jobs apart.
+    LANGUAGE_REGENERATING = "language_regenerating"
+    # DEPRECATED: no longer entered by new pipeline runs — the review gate
+    # moved to AFTER scene generation (see AWAITING_STOCK_FOOTAGE_REVIEW).
+    # Kept only so a project already parked here at deploy time (or a still
+    # open browser tab pointing at it) keeps working via the legacy branches
+    # in the /stock-footage endpoints below.
+    # TODO(cleanup): remove once no rows remain at this status.
+    AWAITING_FOOTAGE = "awaiting_footage"
+    # Generation ran all the way through (scenes + auto-picked clips exist),
+    # but for non-bulk stock-footage projects we land here instead of
+    # GENERATED so the user can confirm/change/reject the auto-picked clips.
+    # Reappears on every reload for as long as the DB says this status — no
+    # client-side state drives it, purely the project's DB status.
+    AWAITING_STOCK_FOOTAGE_REVIEW = "awaiting_stock_footage_review"
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    blog_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    blog_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[ProjectStatus] = mapped_column(
+        Enum(ProjectStatus), default=ProjectStatus.CREATED
+    )
+    voice_gender: Mapped[str] = mapped_column(String(10), default="female")
+    voice_accent: Mapped[str] = mapped_column(String(10), default="american")
+    accent_color: Mapped[str] = mapped_column(String(20), default="#7C3AED")
+    bg_color: Mapped[str] = mapped_column(String(20), default="#FFFFFF")
+    text_color: Mapped[str] = mapped_column(String(20), default="#000000")
+    # Optional project-level font family override (font ID, e.g. 'roboto_slab').
+    # When null, templates use their own defaults.
+    font_family: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    animation_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    studio_unlocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    studio_port: Mapped[int | None] = mapped_column(nullable=True)
+    player_port: Mapped[int | None] = mapped_column(nullable=True)
+    r2_video_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    r2_video_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    embed_token: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
+
+    # Logo overlay
+    logo_r2_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    logo_r2_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    logo_position: Mapped[str] = mapped_column(String(20), default="bottom_right")
+    logo_opacity: Mapped[float] = mapped_column(default=0.9)
+    logo_size: Mapped[float] = mapped_column(Float, default=70.0)  # percentage, e.g. 70 = 70%, REAL for smooth slider
+
+    # Captions (subtitles) — text is the scene's narration_text. Always bottom-anchored;
+    # caption_offset shifts it vertically within the bottom region (-100..+100, 0 = default,
+    # positive = up, negative = down).
+    # Opt-in at creation (paid + Newscast only): after the script stage the
+    # pipeline auto-picks a stock clip per image-capable scene and pauses at
+    # AWAITING_FOOTAGE until the user approves them.
+    stock_footage_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+    script_review_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+    script_review_approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    # When the user resolved the stock-footage review (approve, change-confirm,
+    # or reject). Set once by the corresponding endpoint; also stamped for
+    # bulk/unsupported-template projects at the point they'd otherwise have
+    # entered AWAITING_STOCK_FOOTAGE_REVIEW, so a re-entrant scene generation
+    # (e.g. via a later edit job) doesn't re-fetch clips that were already
+    # resolved.
+    stock_footage_approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    # Created through the bulk flow. Bulk projects skip the interactive footage
+    # review — clips are auto-picked and auto-approved so they run unattended.
+    is_bulk: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+
+    captions_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    caption_position: Mapped[str] = mapped_column(String(20), default="bottom_center")
+    caption_font_family: Mapped[str] = mapped_column(String(50), default="inter")
+    caption_font_size: Mapped[str] = mapped_column(String(10), default="36")
+    caption_offset: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Voiceover
+    custom_voice_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Optional user voice tuning, stored as a JSON string array ["<stability>","<speed>","<emotion>"]
+    # feeding the v3 voice_settings + emotion tag. Null = per-video-style defaults. See
+    # _parse_voice_tuning in services/voiceover.py. (Column name kept as voice_emotion for migration
+    # continuity.)
+    voice_emotion: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+
+    # Template (determines layout system + DSPy prompt)
+    template: Mapped[str] = mapped_column(String(50), default="default")
+    crafted_template_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("crafted_templates.id"), nullable=True, index=True)
+
+    # Video style: a built-in preset, custom style, or "your_style". The
+    # effective guidance is snapshotted so later user edits never alter this project.
+    video_style: Mapped[str] = mapped_column(String(30), default="explainer")
+    script_style_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    script_preferences_version_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Video length selection controls how many scenes are generated.
+    # Values: auto, short (4-5), medium (12-15), detailed (23-30), mdetailed (35-40)
+    video_length: Mapped[str] = mapped_column(String(20), default="auto")
+    playback_speed: Mapped[float] = mapped_column(Float, default=1.0)
+
+    # Background music
+    bgm_track_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    bgm_volume: Mapped[float] = mapped_column(Float, default=0.10)
+
+    # Content language: ISO 639-1 code (e.g. 'en', 'es'). Defaults to scraped content language.
+    # All generated content (script, display text, voiceover) is produced in this language.
+    # Null = auto-detect from blog_content when needed. Changed post-hoc by the
+    # change-language job, which translates every scene's copy and re-runs TTS.
+    content_language: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
+    # Aspect ratio
+    aspect_ratio: Mapped[str] = mapped_column(String(20), default="landscape")
+
+    # Talking-head avatar overlay. Which scenes HAVE an avatar is per-scene and
+    # on-demand (see Scene.avatar_video_path / Scene.avatar_preset); the fields
+    # below describe only how any such overlay is PRESENTED, project-wide.
+    #
+    # Presentation of that overlay, editable post-creation from the Settings tab
+    # and consumed by both AvatarOverlay twins (preview player + render tree).
+    #   avatar_shape     circle | rounded | square
+    #   avatar_size      box width as a fraction of composition width (0.10-0.42)
+    #   avatar_position  same vocabulary as logo_position (top/bottom _ left/right)
+    avatar_shape: Mapped[str] = mapped_column(String(16), default="circle")
+    avatar_size: Mapped[float] = mapped_column(Float, default=0.16)
+    avatar_position: Mapped[str] = mapped_column(String(20), default="bottom_left")
+    # How the presenter's OWN background is treated. The roster portraits are
+    # ordinary photographs with real rooms baked in, so anything other than
+    # "keep it" requires cutting the presenter out first (services/avatar_matte.py).
+    #   NULL           keep the portrait's photographic background (default)
+    #   "transparent"  matted, no fill — presenter sits directly on the scene
+    #   "#RRGGBB"      matted, composited over this solid colour
+    avatar_bg: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Overlay opacity, 0.2-1.0 (mirrors logo_opacity). 1.0 = fully opaque.
+    avatar_opacity: Mapped[float] = mapped_column(Float, default=1.0)
+    # Drop-shadow intensity behind the overlay box, 0.0 (none) - 1.0 (strongest).
+    # Suppressed automatically when avatar_bg is "transparent" (no box edge to
+    # cast one) regardless of this value — see AvatarOverlay's isCutout
+    # handling in both render trees.
+    avatar_shadow: Mapped[float] = mapped_column(Float, default=0.4)
+    # How much the rendered presenter moves: subtle | natural | expressive — see
+    # services/avatar_motion_styles.py. Project-wide ONLY, unlike avatar_shape/
+    # _size/_position/_opacity above: there is deliberately no per-scene
+    # override, so this has no Scene-model counterpart and is read straight off
+    # this column when a batch/scene render job is created.
+    avatar_motion_style: Mapped[str] = mapped_column(String(16), default="natural")
+    # A presenter portrait the user uploaded instead of picking from the roster.
+    # Local MEDIA_DIR path; the R2 copy lives on an AssetType.AVATAR asset row.
+    # When set, a scene whose avatar_preset == CUSTOM_PRESET_ID renders from this
+    # photo — the backend uploads the bytes to the Space rather than sending a
+    # preset id (see services/avatar.py).
+    avatar_custom_image_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    avatar_custom_image_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Cleared the whole-video "generate an avatar for every scene" paywall from the
+    # Avatar tab's batch wizard. Persisted (rather than component state) so a
+    # mid-batch reload doesn't re-show the paywall while scene jobs are still
+    # running. Mirrors Project.studio_unlocked.
+    avatar_batch_unlocked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # AI-assisted editing usage tracking
+    ai_assisted_editing_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Soft-delete flag — False means the project has been deactivated (files purged)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    # Relationships
+    user = relationship("User", back_populates="projects")
+    members = relationship("ProjectMember", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    crafted_template = relationship("CraftedTemplate", back_populates="projects")
+    # Only active (non-soft-deleted) scenes are exposed here, so deleted scenes vanish
+    # from every project-serializing endpoint and from renders using project.scenes.
+    # Internal paths that must see deleted scenes (revert/un-delete) query Scene directly.
+    # NOTE: because this relationship is filtered, ORM delete-orphan would NOT cascade to
+    # soft-deleted rows on project delete — the scenes.project_id FK carries an explicit
+    # ondelete="CASCADE" (see scene.py) so the DB cleans up ALL scene rows regardless.
+    scenes = relationship(
+        "Scene",
+        back_populates="project",
+        primaryjoin="and_(Scene.project_id==Project.id, Scene.is_active==True)",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="Scene.order",
+    )
+    assets = relationship("Asset", back_populates="project", cascade="all, delete-orphan")
+    chat_messages = relationship("ChatMessage", back_populates="project", cascade="all, delete-orphan", order_by="ChatMessage.created_at")
+    project_edit_history = relationship("ProjectEditHistory", back_populates="project", cascade="all, delete-orphan", passive_deletes=True,)
+    scene_edit_history = relationship("SceneEditHistory", back_populates="project", cascade="all, delete-orphan", passive_deletes=True,)
+    scene_comments = relationship("SceneComment", back_populates="project", cascade="all, delete-orphan", passive_deletes=True,)
+    reviews = relationship("Review", back_populates="project", cascade="all, delete-orphan")
+    avatar_reviews = relationship("AvatarReview", back_populates="project", cascade="all, delete-orphan")
+    template_change_jobs = relationship("ProjectTemplateChangeJob", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    regenerate_script_jobs = relationship("ProjectRegenerateScriptJob", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    voice_change_jobs = relationship("ProjectVoiceChangeJob", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    scene_avatar_jobs = relationship("SceneAvatarJob", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    language_change_jobs = relationship("ProjectLanguageChangeJob", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    script_preference_learning_jobs = relationship(
+        "ScriptPreferenceLearningJob",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    social_publish_jobs = relationship("SocialPublishJob", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)

@@ -1,0 +1,843 @@
+{
+  "id": "spotlight",
+  "name": "Spotlight",
+  "new_template": false,
+  "popular_template": false,
+  "description": "Bold kinetic typography on a dark stage. Words fill the frame, slam in, and cascade. Glass panels for data moments. High contrast, fast-paced, social-first. Spring-slam animations with accent red highlights. All layouts support optional images alongside content.",
+  "genres": [
+    "Business",
+    "Technology"
+  ],
+  "preview_colors": {
+    "accent": "#EF4444",
+    "bg": "#000000",
+    "text": "#FFFFFF"
+  },
+  "composition_id": "SpotlightVideo",
+  "hero_layout": "impact_title",
+  "fallback_layout": "statement",
+  "valid_layouts": [
+    "impact_title",
+    "statement",
+    "word_punch",
+    "cascade_list",
+    "stat_stage",
+    "versus",
+    "spotlight_image",
+    "rapid_points",
+    "spotlight_data",
+    "spotlight_table",
+    "closer",
+    "ending_socials"
+  ],
+  "layout_prop_schema": {
+    "impact_title": {
+      "label": "Impact Title",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 87,
+          "landscape": 100
+        },
+        "descriptionFontSize": {
+          "portrait": 35,
+          "landscape": 33
+        }
+      },
+      "fields": [
+        {
+          "key": "highlightWord",
+          "label": "Accent word",
+          "type": "string",
+          "placeholder": "One word from the title (accent color)"
+        },
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 240,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subtitle Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 160,
+          "step": 1
+        }
+      ]
+    },
+    "statement": {
+      "label": "Statement",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 42,
+          "landscape": 56
+        },
+        "descriptionFontSize": {
+          "portrait": 18,
+          "landscape": 24
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Headline Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 240,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 160,
+          "step": 1
+        }
+      ]
+    },
+    "word_punch": {
+      "label": "Word Punch",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 96,
+          "landscape": 140
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Word Size",
+          "type": "number",
+          "responsive": true,
+          "min": 24,
+          "max": 280,
+          "step": 1
+        }
+      ]
+    },
+    "cascade_list": {
+      "label": "Cascade List",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 62,
+          "landscape": 53
+        },
+        "descriptionFontSize": {
+          "portrait": 48,
+          "landscape": 43
+        },
+        "items": [
+          "First point",
+          "Second point",
+          "Third point"
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Item Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "items",
+          "label": "Items",
+          "type": "string_array",
+          "maxItems": 10
+        }
+      ]
+    },
+    "stat_stage": {
+      "label": "Stat Stage",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 131,
+          "landscape": 120
+        },
+        "descriptionFontSize": {
+          "portrait": 31,
+          "landscape": 29
+        },
+        "metrics": [
+          {
+            "value": "93",
+            "label": "Retention",
+            "suffix": "%"
+          },
+          {
+            "value": "4.1",
+            "label": "NPS",
+            "suffix": "x"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Headline Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 260,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Label Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "metrics",
+          "label": "Metrics",
+          "type": "object_array",
+          "maxItems": 5,
+          "subFields": [
+            {
+              "key": "value",
+              "label": "Value"
+            },
+            {
+              "key": "label",
+              "label": "Label"
+            },
+            {
+              "key": "suffix",
+              "label": "Suffix"
+            }
+          ]
+        }
+      ]
+    },
+    "versus": {
+      "label": "Versus",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 64,
+          "landscape": 57
+        },
+        "descriptionFontSize": {
+          "portrait": 36,
+          "landscape": 42
+        },
+        "leftLabel": "Option A",
+        "rightLabel": "Option B",
+        "leftDescription": "Argument for A",
+        "rightDescription": "Argument for B"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "leftLabel",
+          "label": "Left Label",
+          "type": "string"
+        },
+        {
+          "key": "rightLabel",
+          "label": "Right Label",
+          "type": "string"
+        },
+        {
+          "key": "leftDescription",
+          "label": "Left Description",
+          "type": "text"
+        },
+        {
+          "key": "rightDescription",
+          "label": "Right Description",
+          "type": "text"
+        }
+      ]
+    },
+    "spotlight_image": {
+      "label": "Spotlight Image",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 91,
+          "landscape": 72
+        },
+        "descriptionFontSize": {
+          "portrait": 39,
+          "landscape": 37
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 240,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Caption Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 160,
+          "step": 1
+        }
+      ]
+    },
+    "rapid_points": {
+      "label": "Rapid Points",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 96,
+          "landscape": 90
+        },
+        "phrases": [
+          "Fast",
+          "Focused",
+          "Fearless"
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Phrase Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 240,
+          "step": 1
+        },
+        {
+          "key": "phrases",
+          "label": "Phrases",
+          "type": "string_array",
+          "maxItems": 12
+        }
+      ]
+    },
+    "spotlight_data": {
+      "label": "Data Chart",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 64,
+          "landscape": 58
+        },
+        "descriptionFontSize": {
+          "portrait": 30,
+          "landscape": 28
+        },
+        "chartType": "line",
+        "chartSummary": "The trend climbs steadily across the window before easing off the high.",
+        "chartTable": {
+          "headers": [
+            "Quarter",
+            "Revenue",
+            "Margin"
+          ],
+          "rows": [
+            [
+              "Q1",
+              "298",
+              "72"
+            ],
+            [
+              "Q2",
+              "308",
+              "68"
+            ],
+            [
+              "Q3",
+              "315",
+              "61"
+            ],
+            [
+              "Q4",
+              "324",
+              "55"
+            ],
+            [
+              "Q5",
+              "318",
+              "59"
+            ]
+          ]
+        },
+        "chartYAxisTicks": [],
+        "subtitle": "Quarter",
+        "yAxisLabel": "Value",
+        "barPrimaryColor": "#EF4444",
+        "barSecondaryColor": "#F87171"
+      },
+      "scene_defaults": {
+        "title": "By the numbers",
+        "narration": "The data tells the story at a glance.",
+        "durationSeconds": 6
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 200,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "chartType",
+          "label": "Chart Type",
+          "type": "select",
+          "options": [
+            {
+              "label": "Auto (infer from data)",
+              "value": "auto"
+            },
+            {
+              "label": "Line",
+              "value": "line"
+            },
+            {
+              "label": "Bar",
+              "value": "bar"
+            },
+            {
+              "label": "Histogram",
+              "value": "histogram"
+            }
+          ]
+        },
+        {
+          "key": "chartTable",
+          "label": "Chart data — col 1: X labels; cols 2–4: up to 3 numeric series (max 20 data rows). Use bar for named categories; histogram for bins/ranges (0–10, <5, 50+).",
+          "type": "chart_table"
+        },
+        {
+          "key": "yAxisLabel",
+          "label": "Y-axis label (overrides chart header)",
+          "type": "string"
+        },
+        {
+          "key": "subtitle",
+          "label": "X-axis / category caption (overrides first column header)",
+          "type": "string"
+        },
+        {
+          "key": "chartYAxisTicks",
+          "label": "Y-axis tick labels (top → bottom; 2–4 values)",
+          "type": "string_array"
+        },
+        {
+          "key": "chartSummary",
+          "label": "Chart summary (short read beside the graphic)",
+          "type": "string"
+        },
+        {
+          "key": "barPrimaryColor",
+          "label": "Series color 1",
+          "type": "color"
+        },
+        {
+          "key": "barSecondaryColor",
+          "label": "Series color 2",
+          "type": "color"
+        }
+      ]
+    },
+    "spotlight_table": {
+      "label": "Data Table",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 60,
+          "landscape": 50
+        },
+        "descriptionFontSize": {
+          "portrait": 22,
+          "landscape": 18
+        },
+        "tickerTitle": "The breakdown",
+        "tickerFootnote": "Source: article data · as reported",
+        "tickerHighlightCol": 5,
+        "tickerTable": {
+          "headers": [
+            "Name",
+            "Shares",
+            "Price",
+            "Cost",
+            "Value",
+            "% Chg"
+          ],
+          "rows": [
+            [
+              "Item A",
+              "25",
+              "$20",
+              "$500",
+              "$600",
+              "+20%"
+            ],
+            [
+              "Item B",
+              "20",
+              "$30",
+              "$600",
+              "$500",
+              "-16.7%"
+            ],
+            [
+              "Item C",
+              "30",
+              "$90",
+              "$2,700",
+              "$3,000",
+              "+11.1%"
+            ],
+            [
+              "Item D",
+              "50",
+              "$100",
+              "$5,000",
+              "$10,000",
+              "+100%"
+            ],
+            [
+              "Item E",
+              "100",
+              "$20",
+              "$2,000",
+              "$1,000",
+              "-50%"
+            ]
+          ]
+        }
+      },
+      "scene_defaults": {
+        "title": "The breakdown",
+        "narration": "A clear table of the numbers that matter.",
+        "durationSeconds": 6
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 200,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Cell Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "tickerTitle",
+          "label": "Table sub-headline",
+          "type": "string"
+        },
+        {
+          "key": "tickerTable",
+          "label": "Table data — col 1: row labels; cols 2–6: numeric or text values. Max 20 rows, max 6 columns.",
+          "type": "ticker_table"
+        },
+        {
+          "key": "tickerHighlightCol",
+          "label": "Highlight column index (0-based) for green/red coloring, e.g. 5 for the 6th column. Set to -1 to disable.",
+          "type": "number"
+        },
+        {
+          "key": "tickerFootnote",
+          "label": "Footnote / source attribution",
+          "type": "string"
+        }
+      ]
+    },
+    "closer": {
+      "label": "Closer",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 55,
+          "landscape": 42
+        },
+        "descriptionFontSize": {
+          "portrait": 55,
+          "landscape": 44
+        },
+        "highlightPhrase": "Your move.",
+        "cta": "Start now"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Headline Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "CTA Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "highlightPhrase",
+          "label": "Highlight Phrase",
+          "type": "string"
+        },
+        {
+          "key": "cta",
+          "label": "Call To Action",
+          "type": "string"
+        }
+      ]
+    },
+    "ending_socials": {
+      "label": "Ending / Follow along",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 74,
+          "landscape": 64
+        },
+        "descriptionFontSize": {
+          "portrait": 44,
+          "landscape": 29
+        },
+        "hideImage": true,
+        "socials": [
+          {
+            "platform": "facebook",
+            "enabled": "true",
+            "label": "Facebook"
+          },
+          {
+            "platform": "instagram",
+            "enabled": "true",
+            "label": "Instagram"
+          },
+          {
+            "platform": "youtube",
+            "enabled": "true",
+            "label": "YouTube"
+          },
+          {
+            "platform": "medium",
+            "enabled": "false",
+            "label": "Medium"
+          },
+          {
+            "platform": "substack",
+            "enabled": "false",
+            "label": "Substack"
+          },
+          {
+            "platform": "linkedin",
+            "enabled": "false",
+            "label": "LinkedIn"
+          },
+          {
+            "platform": "tiktok",
+            "enabled": "false",
+            "label": "TikTok"
+          }
+        ],
+        "showWebsiteButton": true,
+        "websiteLink": "https://yourwebsite.com"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subtext Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "socials",
+          "label": "Social Platforms",
+          "type": "object_array",
+          "maxItems": 7,
+          "subFields": [
+            {
+              "key": "platform",
+              "label": "Platform (facebook, instagram, youtube, medium, substack, linkedin, tiktok)"
+            },
+            {
+              "key": "enabled",
+              "label": "Enabled (true/false)"
+            },
+            {
+              "key": "label",
+              "label": "Label / handle / URL text"
+            }
+          ]
+        },
+        {
+          "key": "showWebsiteButton",
+          "label": "Show Website CTA Button",
+          "type": "select",
+          "options": [
+            {
+              "label": "Enabled",
+              "value": "true"
+            },
+            {
+              "label": "Disabled",
+              "value": "false"
+            }
+          ]
+        },
+        {
+          "key": "websiteLink",
+          "label": "Website Link",
+          "type": "string",
+          "placeholder": "https://yourwebsite.com"
+        }
+      ]
+    },
+    "impact_title__v2": {
+      "label": "Impact Title — Marquee",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 97,
+          "landscape": 100
+        },
+        "descriptionFontSize": {
+          "portrait": 29,
+          "landscape": 33
+        }
+      }
+    },
+    "statement__v2": {
+      "label": "Statement — Pull Quote",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 66,
+          "landscape": 72
+        },
+        "descriptionFontSize": {
+          "portrait": 24,
+          "landscape": 20
+        }
+      }
+    },
+    "ending_socials__v2": {
+      "label": "Ending / Follow along — Curtain",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 81,
+          "landscape": 64
+        },
+        "descriptionFontSize": {
+          "portrait": 33,
+          "landscape": 29
+        }
+      }
+    }
+  },
+  "layouts_without_image": [
+    "ending_socials",
+    "spotlight_data",
+    "spotlight_table"
+  ],
+  "features": [
+    "Oversized kinetic typography with spring-slam animations",
+    "Pure black stage with surgical accent color usage",
+    "Counter roll-up animations for statistics",
+    "Contrast split with color-inverted halves",
+    "Spotlight vignette image reveal from darkness",
+    "Fast-cut rapid phrase sequencing",
+    "Blur-to-sharp text reveal for closers",
+    "Optional image support in all layouts",
+    "Responsive layouts (portrait/landscape)"
+  ],
+  "layout_variants": {
+    "impact_title": [
+      "impact_title",
+      "impact_title__v2"
+    ],
+    "statement": [
+      "statement",
+      "statement__v2"
+    ],
+    "ending_socials": [
+      "ending_socials",
+      "ending_socials__v2"
+    ]
+  },
+  "layout_variant_labels": {
+    "impact_title": "Classic",
+    "impact_title__v2": "Marquee",
+    "statement": "Classic",
+    "statement__v2": "Pull Quote",
+    "ending_socials": "Classic",
+    "ending_socials__v2": "Curtain"
+  }
+}

@@ -1,0 +1,794 @@
+{
+  "id": "matrix",
+  "name": "Matrix",
+  "new_template": false,
+  "description": "Digital rain on a black void. Green monospace text decodes from random characters, numbers count up through cipher noise, and data streams in like intercepted transmissions. Terminal aesthetic with glitch effects. Fast, cryptic, cyberpunk.",
+  "genres": [
+    "Technology"
+  ],
+  "preview_colors": {
+    "accent": "#00FF41",
+    "bg": "#000000",
+    "text": "#00FF41"
+  },
+  "composition_id": "MatrixVideo",
+  "hero_layout": "matrix_title",
+  "fallback_layout": "terminal_text",
+  "valid_layouts": [
+    "matrix_title",
+    "terminal_text",
+    "glitch_punch",
+    "data_stream",
+    "cipher_metric",
+    "fork_choice",
+    "matrix_image",
+    "transmission",
+    "awakening",
+    "matrix_data",
+    "matrix_ticker",
+    "ending_socials"
+  ],
+  "layout_variants": {},
+  "layout_variant_labels": {},
+  "layout_prop_schema": {
+    "matrix_title": {
+      "label": "Matrix Title",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 128,
+          "landscape": 110
+        },
+        "descriptionFontSize": {
+          "portrait": 52,
+          "landscape": 53
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 280,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subtitle Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 180,
+          "step": 1
+        }
+      ]
+    },
+    "terminal_text": {
+      "label": "Terminal Text",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 53,
+          "landscape": 48
+        },
+        "descriptionFontSize": {
+          "portrait": 57,
+          "landscape": 22
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Header Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 240,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 160,
+          "step": 1
+        }
+      ]
+    },
+    "glitch_punch": {
+      "label": "Glitch Punch",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 100,
+          "landscape": 150
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Glitch Word Size",
+          "type": "number",
+          "responsive": true,
+          "min": 24,
+          "max": 320,
+          "step": 1
+        }
+      ]
+    },
+    "data_stream": {
+      "label": "Data Stream",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 42,
+          "landscape": 86
+        },
+        "descriptionFontSize": {
+          "portrait": 77,
+          "landscape": 73
+        },
+        "items": [
+          "Signal received",
+          "Decrypting packet",
+          "Transmission complete"
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Primary Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 260,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Secondary Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "items",
+          "label": "Items",
+          "type": "string_array",
+          "maxItems": 8
+        }
+      ]
+    },
+    "cipher_metric": {
+      "label": "Cipher Metric",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 182,
+          "landscape": 175
+        },
+        "descriptionFontSize": {
+          "portrait": 48,
+          "landscape": 39
+        },
+        "metrics": [
+          {
+            "value": "99.2",
+            "label": "Integrity",
+            "suffix": "%"
+          },
+          {
+            "value": "12",
+            "label": "Nodes",
+            "suffix": "k"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Metric Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 300,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Label Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 160,
+          "step": 1
+        },
+        {
+          "key": "metrics",
+          "label": "Metrics",
+          "type": "object_array",
+          "maxItems": 5,
+          "subFields": [
+            {
+              "key": "value",
+              "label": "Value"
+            },
+            {
+              "key": "label",
+              "label": "Label"
+            },
+            {
+              "key": "suffix",
+              "label": "Suffix"
+            }
+          ]
+        }
+      ]
+    },
+    "fork_choice": {
+      "label": "Fork Choice",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 76,
+          "landscape": 58
+        },
+        "descriptionFontSize": {
+          "portrait": 48,
+          "landscape": 32
+        },
+        "leftLabel": "Red Pill",
+        "rightLabel": "Blue Pill",
+        "leftDescription": "Face reality and transform",
+        "rightDescription": "Stay comfortable and unchanged"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Label Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 240,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 160,
+          "step": 1
+        },
+        {
+          "key": "leftLabel",
+          "label": "Left Label",
+          "type": "string"
+        },
+        {
+          "key": "rightLabel",
+          "label": "Right Label",
+          "type": "string"
+        },
+        {
+          "key": "leftDescription",
+          "label": "Left Description",
+          "type": "text"
+        },
+        {
+          "key": "rightDescription",
+          "label": "Right Description",
+          "type": "text"
+        }
+      ]
+    },
+    "matrix_image": {
+      "label": "Matrix Image",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 66,
+          "landscape": 80
+        },
+        "descriptionFontSize": {
+          "portrait": 45,
+          "landscape": 37
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 280,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Caption Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 180,
+          "step": 1
+        }
+      ]
+    },
+    "transmission": {
+      "label": "Transmission",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 75,
+          "landscape": 68
+        },
+        "descriptionFontSize": {
+          "portrait": 41,
+          "landscape": 36
+        },
+        "phrases": [
+          "Incoming signal",
+          "Packet received",
+          "Decrypt complete"
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Header Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 260,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "phrases",
+          "label": "Phrases",
+          "type": "string_array",
+          "maxItems": 12
+        }
+      ]
+    },
+    "awakening": {
+      "label": "Awakening",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 67,
+          "landscape": 59
+        },
+        "descriptionFontSize": {
+          "portrait": 37,
+          "landscape": 38
+        },
+        "highlightPhrase": "Wake up.",
+        "cta": "Follow the signal"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Headline Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 240,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "CTA Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "highlightPhrase",
+          "label": "Highlight Phrase",
+          "type": "string"
+        },
+        {
+          "key": "cta",
+          "label": "Call To Action",
+          "type": "string"
+        }
+      ]
+    },
+    "matrix_data": {
+      "label": "Data Chart",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 46,
+          "landscape": 40
+        },
+        "descriptionFontSize": {
+          "portrait": 28,
+          "landscape": 28
+        },
+        "chartType": "line",
+        "chartSummary": "Signal climbs steadily through the window before easing off the high.",
+        "chartTable": {
+          "headers": [
+            "Cycle",
+            "Signal",
+            "Noise"
+          ],
+          "rows": [
+            [
+              "T-04",
+              "298",
+              "72"
+            ],
+            [
+              "T-03",
+              "308",
+              "68"
+            ],
+            [
+              "T-02",
+              "315",
+              "61"
+            ],
+            [
+              "T-01",
+              "324",
+              "55"
+            ],
+            [
+              "T-00",
+              "318",
+              "59"
+            ]
+          ]
+        },
+        "chartYAxisTicks": [],
+        "subtitle": "Cycle",
+        "yAxisLabel": "Magnitude"
+      },
+      "scene_defaults": {
+        "title": "Signal analysis",
+        "narration": "Decoded dataset from intercepted transmission.",
+        "durationSeconds": 6
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 160,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "chartType",
+          "label": "Chart Type",
+          "type": "select",
+          "options": [
+            {
+              "label": "Auto (infer from data)",
+              "value": "auto"
+            },
+            {
+              "label": "Line",
+              "value": "line"
+            },
+            {
+              "label": "Bar",
+              "value": "bar"
+            },
+            {
+              "label": "Histogram",
+              "value": "histogram"
+            }
+          ]
+        },
+        {
+          "key": "chartTable",
+          "label": "Chart data — col 1: X labels; cols 2–4: up to 3 numeric series (max 20 data rows). Use bar for named categories; histogram for bins/ranges (0–10, <5, 50+).",
+          "type": "chart_table"
+        },
+        {
+          "key": "yAxisLabel",
+          "label": "Y-axis label (overrides chart header)",
+          "type": "string"
+        },
+        {
+          "key": "subtitle",
+          "label": "X-axis / category caption (overrides first column header)",
+          "type": "string"
+        },
+        {
+          "key": "chartYAxisTicks",
+          "label": "Y-axis tick labels (top → bottom; 2–4 values)",
+          "type": "string_array"
+        },
+        {
+          "key": "chartSummary",
+          "label": "Chart summary (short read beside the graphic)",
+          "type": "string"
+        },
+        {
+          "key": "barPrimaryColor",
+          "label": "Series color 1 (defaults to accent)",
+          "type": "color",
+          "accentShade": 0
+        },
+        {
+          "key": "barSecondaryColor",
+          "label": "Series color 2 (defaults to accent shade)",
+          "type": "color",
+          "accentShade": -0.28
+        },
+        {
+          "key": "barTertiaryColor",
+          "label": "Series color 3",
+          "type": "color",
+          "accentShade": 0.42
+        }
+      ]
+    },
+    "matrix_ticker": {
+      "label": "Data Table",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 44,
+          "landscape": 36
+        },
+        "descriptionFontSize": {
+          "portrait": 22,
+          "landscape": 18
+        },
+        "tickerTitle": "Market feed · live",
+        "tickerFootnote": "Source: intercepted stream · as of close",
+        "tickerHighlightCol": 5,
+        "tickerTable": {
+          "headers": [
+            "Name",
+            "Shares",
+            "Price",
+            "Cost",
+            "Value",
+            "% Chg"
+          ],
+          "rows": [
+            [
+              "Node A",
+              "25",
+              "$20",
+              "$500",
+              "$600",
+              "+20%"
+            ],
+            [
+              "Node B",
+              "20",
+              "$30",
+              "$600",
+              "$500",
+              "-16.7%"
+            ],
+            [
+              "Node C",
+              "30",
+              "$90",
+              "$2,700",
+              "$3,000",
+              "+11.1%"
+            ],
+            [
+              "Node D",
+              "50",
+              "$100",
+              "$5,000",
+              "$10,000",
+              "+100%"
+            ],
+            [
+              "Node E",
+              "100",
+              "$20",
+              "$2,000",
+              "$1,000",
+              "-50%"
+            ]
+          ]
+        }
+      },
+      "scene_defaults": {
+        "title": "Intercepted feed",
+        "narration": "Live data table decoded from the stream.",
+        "durationSeconds": 6
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 160,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Cell Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "tickerTitle",
+          "label": "Table sub-headline",
+          "type": "string"
+        },
+        {
+          "key": "tickerTable",
+          "label": "Table data — col 1: row labels; cols 2–6: numeric or text values. Max 20 rows, max 6 columns.",
+          "type": "ticker_table"
+        },
+        {
+          "key": "tickerHighlightCol",
+          "label": "Highlight column index (0-based) for green/red coloring, e.g. 5 for the 6th column. Set to -1 to disable.",
+          "type": "number"
+        },
+        {
+          "key": "tickerFootnote",
+          "label": "Footnote / source attribution",
+          "type": "string"
+        }
+      ]
+    },
+    "ending_socials": {
+      "label": "Ending / Follow along",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 76,
+          "landscape": 57
+        },
+        "descriptionFontSize": {
+          "portrait": 38,
+          "landscape": 30
+        },
+        "hideImage": true,
+        "socials": [
+          {
+            "platform": "facebook",
+            "enabled": "true",
+            "label": "Facebook"
+          },
+          {
+            "platform": "instagram",
+            "enabled": "true",
+            "label": "Instagram"
+          },
+          {
+            "platform": "youtube",
+            "enabled": "true",
+            "label": "YouTube"
+          },
+          {
+            "platform": "medium",
+            "enabled": "false",
+            "label": "Medium"
+          },
+          {
+            "platform": "substack",
+            "enabled": "false",
+            "label": "Substack"
+          },
+          {
+            "platform": "linkedin",
+            "enabled": "false",
+            "label": "LinkedIn"
+          },
+          {
+            "platform": "tiktok",
+            "enabled": "false",
+            "label": "TikTok"
+          }
+        ],
+        "showWebsiteButton": true,
+        "websiteLink": "https://yourwebsite.com"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subtext Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "socials",
+          "label": "Social Platforms",
+          "type": "object_array",
+          "maxItems": 7,
+          "subFields": [
+            {
+              "key": "platform",
+              "label": "Platform (facebook, instagram, youtube, medium, substack, linkedin, tiktok)"
+            },
+            {
+              "key": "enabled",
+              "label": "Enabled (true/false)"
+            },
+            {
+              "key": "label",
+              "label": "Label / handle / URL text"
+            }
+          ]
+        },
+        {
+          "key": "showWebsiteButton",
+          "label": "Show Website CTA Button",
+          "type": "select",
+          "options": [
+            {
+              "label": "Enabled",
+              "value": "true"
+            },
+            {
+              "label": "Disabled",
+              "value": "false"
+            }
+          ]
+        },
+        {
+          "key": "websiteLink",
+          "label": "Website Link",
+          "type": "string",
+          "placeholder": "https://yourwebsite.com"
+        }
+      ]
+    }
+  },
+  "layouts_without_image": [
+    "ending_socials",
+    "matrix_data",
+    "matrix_ticker"
+  ],
+  "features": [
+    "Digital rain background animation on every scene",
+    "Character decode/scramble text reveal animations",
+    "Terminal-style monospace typography throughout",
+    "Red pill vs blue pill comparison layout",
+    "Cipher counter roll-up for statistics",
+    "Intercepted transmission rapid-fire phrases",
+    "Optional image support in all layouts",
+    "Responsive layouts (portrait/landscape)"
+  ]
+}

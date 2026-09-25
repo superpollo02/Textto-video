@@ -1,0 +1,784 @@
+import { useEffect, useMemo, useState, useRef } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useAuth } from "../hooks/useAuth";
+import { useScrollReveal } from "../hooks/useScrollReveal";
+import { getBrand, markPdfOrigin, setSessionBrand } from "../brand/brand";
+import Seo from "../components/seo/Seo";
+import { homepageSchema } from "../seo/schema";
+import PublicFooter from "../components/public/PublicFooter";
+import ContactModal from "../components/ContactModal";
+import UserReviewsSection from "../components/UserReviewsSection";
+import PlatformShowcaseSection from "../components/PlatformShowcaseSection";
+import VoiceShowcaseSection from "../components/VoiceShowcaseSection";
+import CoverflowCarousel, {
+  type CoverflowOrientation,
+  type CoverflowTemplate,
+} from "../components/CoverflowCarousel";
+import OrientationToggle from "../components/OrientationToggle";
+import {
+  TEMPLATE_PREVIEWS,
+  TEMPLATE_PREVIEWS_PORTRAIT,
+  TEMPLATE_DESCRIPTIONS,
+  SHOWCASE_TEMPLATE_IDS,
+} from "../components/templatePreviewRegistry";
+import YourOwnBrandPreview from "../components/templatePreviews/YourOwnBrandPreview";
+import YourOwnBrandPreviewPortrait from "../components/templatePreviews/portrait/YourOwnBrandPreviewPortrait";
+import {
+  LITE_MONTHLY_PRICE,
+  STANDARD_MONTHLY_PRICE,
+  PRO_MONTHLY_PRICE,
+} from "../content/pricingContent";
+
+/**
+ * This page is always pdf2video, even when served from blog2video.app via the
+ * /pdf2video preview route. Shared sections get this explicitly rather than
+ * reading the ambient host-resolved brand.
+ */
+const PDF_BRAND = getBrand("pdf2video");
+
+/** Centred on load, with the "Your Own Brand" CTA card inserted just after it. */
+const CAROUSEL_ANCHOR_ID = "newspaper";
+
+const CAROUSEL_TEMPLATES: CoverflowTemplate[] = SHOWCASE_TEMPLATE_IDS.map((id) => ({
+  id,
+  Preview: TEMPLATE_PREVIEWS[id],
+  PreviewPortrait: TEMPLATE_PREVIEWS_PORTRAIT[id],
+  name: TEMPLATE_DESCRIPTIONS[id]?.title ?? id,
+  subtitle: TEMPLATE_DESCRIPTIONS[id]?.subtitle ?? "",
+}));
+
+/** Cycled in the hero CTA — document names across multiple formats. */
+const HERO_PLACEHOLDERS = [
+  "Drop your annual-report.pdf",
+  "Drop your financial-metrics.xlsx",
+  "Drop your investor-deck.pptx",
+  "Drop your product-strategy.docx",
+  "Drop your quarterly-growth.csv",
+  "Drop your technical-spec.md",
+];
+
+const NAV_LINKS = [
+  { href: "#how", label: "How it works" },
+  { href: "#features", label: "Features" },
+  { href: "#templates", label: "Templates" },
+  { href: "/pricing", label: "Pricing" },
+  { href: "/blogs", label: "Blogs" },
+];
+
+/** Copy doc §3 */
+const STEPS = [
+  {
+    n: "01",
+    title: "Upload any document",
+    body: "Drop in a PDF, Word doc, PowerPoint presentation, Excel sheet, CSV, or Markdown. We extract the structure, key numbers, tables, and narrative.",
+  },
+  {
+    n: "02",
+    title: "Pick your mode, look and voice",
+    body: "Choose your video mode (Executive Summary, Explainer, Presentation, DataViz), a template, and an AI narrator with custom brand colors.",
+  },
+  {
+    n: "03",
+    title: "Download and publish",
+    body: "Get an MP4 ready for LinkedIn, YouTube, Reels, or client delivery. Review and customize the script anytime before rendering.",
+  },
+];
+
+/** Copy doc §4 */
+const FEATURES = [
+  {
+    title: "Real text, not AI mush",
+    body: "Your charts, numbers, and quotes appear as actual rendered text on screen. Legible. Correct. Not hallucinated into a blurry approximation of a graph.",
+  },
+  {
+    title: "Studio voiceover",
+    body: "Natural narration that reads your document out loud without sounding like a train station announcement. Multiple voices and accents.",
+  },
+  {
+    title: "Your brand, every time",
+    body: "Logo, colours, fonts, and an intro card. Set it once. Every video after that comes out on brand without you thinking about it.",
+  },
+  {
+    title: "Script you control",
+    body: "The generated script is fully editable. Cut a paragraph, sharpen a line, re-render. You are the editor, not the audience.",
+  },
+  {
+    title: "Built for long documents",
+    body: "A 60-page annual report and a 2-page memo need different treatment. Pick the length you want and we compress to fit.",
+  },
+  {
+    title: "Formats that fit where you post",
+    body: "Widescreen for YouTube and email, square and vertical for social. Same document, three cuts.",
+  },
+];
+
+/** Copy doc §6 */
+const USE_CASES = [
+  {
+    title: "Research and finance publishers",
+    body: "Weekly notes, market commentary, and sector deep dives. Publish the video the same morning the note goes out and stop competing for reading time you were never going to win.",
+  },
+  {
+    title: "Consultants and agencies",
+    body: "Whitepapers and client reports become deliverables people actually consume. Attach the video to the PDF and watch which one gets forwarded.",
+  },
+  {
+    title: "Marketing teams",
+    body: "Ebooks, case studies, and gated content get a top of funnel version that works on LinkedIn without a production budget.",
+  },
+  {
+    title: "Educators and course creators",
+    body: "Lecture notes and reading packs become watchable modules. Update the doc, re-render the video.",
+  },
+  {
+    title: "Internal comms and HR",
+    body: "Policy updates, onboarding packs, and training material that people finish instead of skim.",
+  },
+  {
+    title: "Nonprofits and public sector",
+    body: "Annual reports and impact studies that reach past the twelve people who open the appendix.",
+  },
+];
+
+/** Copy doc §10 */
+const FAQS = [
+  {
+    q: "What file types can I upload?",
+    a: "PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), CSV, Markdown (.md), plain text (.txt), and subtitles (.vtt). If your document is a scan, we extract the text using OCR.",
+  },
+  {
+    q: "How does Document-to-Video work?",
+    a: "Our AI analyzes the structure of your document, extracts the core arguments, tables, and metrics, generates a polished narrative script, and composes an animated video complete with voiceover and motion design.",
+  },
+  {
+    q: "How long does a video take?",
+    a: "Most finish in under five minutes. Long multi-chapter documents or large slide decks take slightly more.",
+  },
+  {
+    q: "Can I change the script?",
+    a: "Yes. The script is fully editable before you render, and you can re-render as many times as your plan allows.",
+  },
+  {
+    q: "Will it get my numbers and charts right?",
+    a: "Figures, tables, and quotes are pulled directly from your document rather than made up, ensuring accurate data representation on screen.",
+  },
+  {
+    q: "Can I use my own brand?",
+    a: "Yes. Logo, colours, fonts, and intro card. Set once, applied to everything after.",
+  },
+  {
+    q: "Do I need to be on camera?",
+    a: "No. There is no camera, no microphone, and no recording needed.",
+  },
+  {
+    q: "Who owns the videos?",
+    a: "You do. Use them commercially anywhere — YouTube, LinkedIn, client decks, or internal training.",
+  },
+  {
+    q: "Can I do this at volume?",
+    a: "Yes. There is an API and an MCP server if you want to render documents from your own pipeline.",
+  },
+  {
+    q: "How is this different from Blog2Video?",
+    a: "Same engine, different input. Blog2Video takes a URL. Document2Video takes any file or multi-file upload. One account covers both.",
+  },
+];
+
+export default function PdfLanding() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  const [navOpen, setNavOpen] = useState(false);
+  const [accountDeletedOpen, setAccountDeletedOpen] = useState(false);
+  const [pendingCredential, setPendingCredential] = useState<string | null>(null);
+  const [reactivating, setReactivating] = useState(false);
+  const [contactOpen, setContactOpen] = useState(false);
+  const [openFaq, setOpenFaq] = useState<number | null>(0);
+  const [templatesOrientation, setTemplatesOrientation] =
+    useState<CoverflowOrientation>("landscape");
+  const [typedPlaceholder, setTypedPlaceholder] = useState("");
+
+  // Required, not decorative: shared sections (e.g. VoiceShowcaseSection) mark
+  // content with `.reveal`, which is opacity:0 until this observer adds
+  // `.visible`. Without the hook those sections render as blank space.
+  const scrollRef = useScrollReveal();
+
+  // Remember the pdf2video entry point so the dashboard's create-project form
+  // opens on the Upload tab. Set on mount, not at login, so it survives a
+  // visitor who browses first and signs in later.
+  useEffect(() => {
+    markPdfOrigin();
+    // Pin the brand for this tab so the shared header/footer stay pdf2video when
+    // the visitor clicks through to Blogs, Pricing, or any other public page.
+    setSessionBrand("pdf2video");
+  }, []);
+
+  // Typewriter placeholder in the hero CTA, mirroring the blog2video hero's
+  // cycling URL examples — document names here instead of blog links.
+  useEffect(() => {
+    let cancelled = false;
+    let idx = 0;
+
+    const run = async () => {
+      while (!cancelled) {
+        const word = HERO_PLACEHOLDERS[idx % HERO_PLACEHOLDERS.length];
+        for (let i = 0; i <= word.length; i++) {
+          if (cancelled) return;
+          setTypedPlaceholder(word.slice(0, i));
+          await new Promise((r) => setTimeout(r, 38));
+        }
+        await new Promise((r) => setTimeout(r, 1400));
+        for (let i = word.length; i >= 0; i--) {
+          if (cancelled) return;
+          setTypedPlaceholder(word.slice(0, i));
+          await new Promise((r) => setTimeout(r, 18));
+        }
+        await new Promise((r) => setTimeout(r, 300));
+        idx++;
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Persist referral code from URL so it survives the Google OAuth redirect.
+  useEffect(() => {
+    const ref = searchParams.get("ref");
+    if (ref) localStorage.setItem("b2v_ref_code", ref);
+  }, [searchParams]);
+
+  const carouselTemplates = useMemo<CoverflowTemplate[]>(() => {
+    const list = [...CAROUSEL_TEMPLATES];
+    const anchorIdx = list.findIndex((t) => t.id === CAROUSEL_ANCHOR_ID);
+    const insertAt = anchorIdx >= 0 ? anchorIdx + 1 : 1;
+    list.splice(insertAt, 0, {
+      id: "your-own-brand",
+      name: "Your Own Brand",
+      subtitle: "Get a custom template tailored to your brand",
+      Preview: YourOwnBrandPreview,
+      PreviewPortrait: YourOwnBrandPreviewPortrait,
+      onSelect: () => setContactOpen(true),
+    });
+    return list;
+  }, []);
+
+  // Centre a document-flavoured template rather than the whiteboard default.
+  const carouselInitialIndex = Math.max(
+    0,
+    carouselTemplates.findIndex((t) => t.id === CAROUSEL_ANCHOR_ID)
+  );
+
+  // The shared login modal owns provider choice and the in-app-browser escape.
+  const handleGenerateClick = () => navigate("/signin");
+
+  /** Hero CTA: signed-in users go straight to the upload form, others sign in first. */
+  const handleHeroStart = () => {
+    if (user) {
+      navigate("/dashboard?mode=upload");
+      return;
+    }
+    handleGenerateClick();
+  };
+
+  const authButton = (width = "300") => (
+    <button
+      type="button"
+      onClick={() => navigate("/signin")}
+      style={{ width: `${width}px`, maxWidth: "100%" }}
+      className="inline-flex h-11 items-center justify-center rounded-full bg-purple-600 px-6 text-sm font-medium text-white transition hover:bg-purple-700"
+    >
+      Get started free
+    </button>
+  );
+
+  return (
+    <div ref={scrollRef} className="min-h-screen bg-white">
+      <Seo
+        title="Document to Video: Turn Any Document Into a Narrated AI Video"
+        description="Upload a PDF, Word doc, PowerPoint deck, Excel spreadsheet, CSV, or Markdown. Get a branded, narrated video in minutes. No editors, no cameras. Free to try."
+        path="/"
+        schema={homepageSchema()}
+      />
+
+      {/* ─── Nav ─── */}
+      <nav
+        className="sticky top-0 z-50 border-b border-white/50 backdrop-blur-2xl"
+        style={{
+          background: "rgba(255,255,255,0.60)",
+          boxShadow: "0 1px 0 rgba(0,0,0,0.05), 0 4px 16px rgba(0,0,0,0.03)",
+        }}
+      >
+        <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 bg-purple-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">
+              {PDF_BRAND.logoText}
+            </div>
+            <span className="text-xl font-semibold text-gray-900">{PDF_BRAND.siteName}</span>
+          </div>
+
+          <div className="hidden md:flex items-center gap-6">
+            {NAV_LINKS.map(({ href, label }) =>
+              href.startsWith("#") ? (
+                <a
+                  key={href}
+                  href={href}
+                  className="text-sm text-gray-600 hover:text-purple-600 transition-colors"
+                >
+                  {label}
+                </a>
+              ) : (
+                <Link
+                  key={href}
+                  to={href}
+                  className="text-sm text-gray-600 hover:text-purple-600 transition-colors"
+                >
+                  {label}
+                </Link>
+              )
+            )}
+            {user ? (
+              <Link
+                to="/dashboard"
+                className="rounded-full bg-purple-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-purple-700"
+              >
+                Dashboard
+              </Link>
+            ) : (
+              <button
+                onClick={handleGenerateClick}
+                className="rounded-full bg-purple-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-purple-700"
+              >
+                Sign in
+              </button>
+            )}
+          </div>
+
+          <button
+            className="md:hidden p-2 text-gray-600"
+            onClick={() => setNavOpen((o) => !o)}
+            aria-label="Toggle menu"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d={navOpen ? "M6 18L18 6M6 6l12 12" : "M4 6h16M4 12h16M4 18h16"}
+              />
+            </svg>
+          </button>
+        </div>
+
+        {navOpen && (
+          <div className="md:hidden border-t border-gray-100 bg-white/95 px-6 py-4 flex flex-col gap-3">
+            {NAV_LINKS.map(({ href, label }) =>
+              href.startsWith("#") ? (
+                <a
+                  key={href}
+                  href={href}
+                  onClick={() => setNavOpen(false)}
+                  className="text-sm text-gray-600"
+                >
+                  {label}
+                </a>
+              ) : (
+                <Link
+                  key={href}
+                  to={href}
+                  onClick={() => setNavOpen(false)}
+                  className="text-sm text-gray-600"
+                >
+                  {label}
+                </Link>
+              )
+            )}
+          </div>
+        )}
+      </nav>
+
+      {/* ─── 1. Hero ─── */}
+      <section className="relative overflow-hidden">
+        <div
+          className="pointer-events-none absolute inset-0 -z-10"
+          style={{
+            background:
+              "radial-gradient(60% 50% at 50% 0%, rgba(147,51,234,0.10) 0%, rgba(255,255,255,0) 70%)",
+          }}
+        />
+        <div className="max-w-4xl mx-auto px-6 pt-20 pb-16 text-center">
+          <div className="inline-flex items-center rounded-full border border-purple-200 bg-purple-50 px-3 py-1 mb-6">
+            <span className="text-xs font-medium text-purple-700">
+              For analysts, researchers &amp; lean teams
+            </span>
+          </div>
+
+          {/* leading, not padding: the gradient span is inline, so vertical
+              padding on it does not open up the gaps between the three rows. */}
+          <h1 className="text-5xl/[1.2] sm:text-6xl/[1.2] lg:text-6xl/[1.2] font-bold text-gray-900 tracking-tight mb-6">
+            Nobody reads the document
+            <br />
+            <span className="bg-gradient-to-r from-purple-600 to-violet-500 bg-clip-text text-transparent">
+              everybody watches the
+              <br />
+              video
+            </span>
+          </h1>
+
+          <p className="text-lg text-gray-500 max-w-2xl mx-auto mb-8 leading-relaxed">
+            Turn PDFs, Word docs, PowerPoint decks, spreadsheets, and Markdown notes into narrated, animated videos in minutes.
+          </p>
+
+          {/* Supported format pills */}
+          <div className="flex flex-wrap gap-1.5 justify-center mb-8">
+            {[
+              { label: "PDF", color: "bg-red-50 text-red-600 border-red-200" },
+              { label: "Word", color: "bg-blue-50 text-blue-600 border-blue-200" },
+              { label: "PowerPoint", color: "bg-orange-50 text-orange-600 border-orange-200" },
+              { label: "Excel", color: "bg-emerald-50 text-emerald-600 border-emerald-200" },
+              { label: "CSV", color: "bg-teal-50 text-teal-600 border-teal-200" },
+              { label: "Markdown", color: "bg-purple-50 text-purple-600 border-purple-200" },
+              { label: "TXT", color: "bg-gray-100 text-gray-600 border-gray-200" },
+            ].map(({ label, color }) => (
+              <span
+                key={label}
+                className={`inline-flex items-center px-2.5 py-0.5 rounded-lg border text-[11px] font-medium ${color}`}
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+
+          {/* Mirrors the blog2video hero's input + button, but this brand takes a
+              file rather than a URL, so the field is a dropzone-styled affordance
+              that opens the same sign-in flow. */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleHeroStart();
+            }}
+            className="w-full max-w-xl mx-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
+          >
+            <button
+              type="button"
+              onClick={handleHeroStart}
+              className="flex-1 flex items-center gap-2 px-4 py-3 text-sm text-gray-400 rounded-xl border border-gray-200 bg-white hover:border-purple-400 transition-all text-left"
+              style={{ boxShadow: "0 1px 4px rgba(0,0,0,0.06)" }}
+            >
+              <svg
+                className="h-4 w-4 flex-shrink-0 text-gray-400"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.8}
+                viewBox="0 0 24 24"
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 16.5V4m0 0L7.5 8.5M12 4l4.5 4.5M4 17v1.5A2.5 2.5 0 006.5 21h11a2.5 2.5 0 002.5-2.5V17"
+                />
+              </svg>
+              <span className="truncate">{typedPlaceholder}|</span>
+            </button>
+            <button
+              type="submit"
+              className="px-5 py-3 bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold rounded-xl transition-colors whitespace-nowrap"
+              style={{ boxShadow: "0 2px 8px rgba(124,58,237,0.25)" }}
+            >
+              Get Started →
+            </button>
+          </form>
+          <p className="text-xs text-gray-400 mt-3">
+            1 video free — no credit card required
+          </p>
+        </div>
+      </section>
+
+      {/* ─── 2. Problem ─── */}
+      <section className="py-20 border-t border-gray-100">
+        <div className="max-w-3xl mx-auto px-6">
+          <h2 className="text-2xl sm:text-3xl font-semibold text-gray-900 mb-8 text-center">
+            The document graveyard
+          </h2>
+          <div className="space-y-5 text-[15px] leading-relaxed text-gray-600">
+            <p>
+              You spent three weeks on that report, presentation, or analysis. It has original research in it. Real
+              numbers. Key takeaways that matter.
+            </p>
+            <p className="text-gray-900 font-medium">
+              It got downloaded 400 times and read maybe 40.
+            </p>
+            <p>
+              Documents are the hardest format for audiences to consume. They ask for a quiet room
+              and twenty uninterrupted minutes, and nobody has either. Meanwhile the same
+              argument, narrated over clean visuals, gets watched to the end on a phone in
+              a lift.
+            </p>
+            <p>The problem was never the thinking. It was the container.</p>
+          </div>
+          <p className="mt-8 text-center text-sm font-medium text-purple-600">
+            Document2Video changes the container. The thinking stays yours.
+          </p>
+        </div>
+      </section>
+
+      {/* ─── 3. How it works ─── */}
+      <section id="how" className="py-20 border-t border-gray-100" style={{ background: "rgba(246,247,249,0.70)" }}>
+        <div className="max-w-5xl mx-auto px-6">
+          <h2 className="text-2xl sm:text-3xl font-semibold text-gray-900 text-center mb-3">
+            Three steps. Four minutes.
+          </h2>
+          <p className="text-sm text-gray-500 text-center max-w-lg mx-auto mb-12">
+            You review the script before anything renders. Nothing gets published without
+            you seeing it first.
+          </p>
+          <div className="grid gap-6 md:grid-cols-3">
+            {STEPS.map((s) => (
+              <div key={s.n} className="rounded-2xl border border-gray-100 bg-white p-6">
+                <span className="text-xs font-semibold tracking-widest text-purple-600">
+                  {s.n}
+                </span>
+                <h3 className="mt-3 text-base font-semibold text-gray-900">{s.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-gray-500">{s.body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ─── 4. Feature grid ─── */}
+      <section id="features" className="py-20 border-t border-gray-100">
+        <div className="max-w-5xl mx-auto px-6">
+          <h2 className="text-2xl sm:text-3xl font-semibold text-gray-900 text-center mb-12">
+            Everything the document already said, in a format people finish
+          </h2>
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {FEATURES.map((f) => (
+              <div
+                key={f.title}
+                className="rounded-2xl border border-gray-100 p-6 transition hover:border-purple-200"
+              >
+                <h3 className="text-base font-semibold text-gray-900">{f.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-gray-500">{f.body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ─── 5. Templates ─── */}
+      <section id="templates" className="py-20 border-t border-gray-100 overflow-x-clip">
+        <div className="max-w-6xl mx-auto px-6">
+          <p className="text-xs font-medium text-purple-600 text-center mb-4 tracking-widest uppercase">
+            Templates
+          </p>
+          <h2 className="text-2xl sm:text-3xl font-semibold text-gray-900 text-center mb-4">
+            Pick one and forget about it
+          </h2>
+          <p className="text-sm text-gray-500 text-center max-w-lg mx-auto mb-12 leading-relaxed">
+            From broadcast newscasts to restrained editorial layouts, every template comes
+            fully animated with its own motion and colour theme.
+          </p>
+          <OrientationToggle
+            orientation={templatesOrientation}
+            onChange={setTemplatesOrientation}
+            className="mb-8"
+          />
+          {/* key forces a clean remount on orientation change — resets every
+              preview at once instead of swapping in place (which flickered). */}
+          <CoverflowCarousel
+            key={templatesOrientation}
+            templates={carouselTemplates}
+            initialIndex={carouselInitialIndex}
+            orientation={templatesOrientation}
+          />
+        </div>
+      </section>
+
+      {/* ─── Voice showcase ─── */}
+      <section className="py-20 border-t border-gray-100" style={{ background: "rgba(246,247,249,0.70)" }}>
+        <div className="max-w-5xl mx-auto px-6">
+          <VoiceShowcaseSection />
+        </div>
+      </section>
+
+      {/* ─── 6. Use cases ─── */}
+      <section className="py-20 border-t border-gray-100">
+        <div className="max-w-5xl mx-auto px-6">
+          <h2 className="text-2xl sm:text-3xl font-semibold text-gray-900 text-center mb-12">
+            Who is turning documents into video
+          </h2>
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {USE_CASES.map((u) => (
+              <div key={u.title} className="rounded-2xl bg-gray-50/70 p-6">
+                <h3 className="text-base font-semibold text-gray-900">{u.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-gray-500">{u.body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ─── 7. Differentiation ─── */}
+      <section className="py-20 border-t border-gray-100" style={{ background: "rgba(246,247,249,0.70)" }}>
+        <div className="max-w-3xl mx-auto px-6 text-center">
+          <h2 className="text-2xl sm:text-3xl font-semibold text-gray-900 mb-6">
+            Why this is not another AI video generator
+          </h2>
+          <p className="text-[15px] leading-relaxed text-gray-600">
+            Most AI video tools generate footage. Wobbly hands, invented text, a stock
+            office that does not exist. Fine for a mood board. Useless for a document with
+            numbers in it.
+          </p>
+          <p className="mt-4 text-[15px] leading-relaxed text-gray-600">
+            PDF2Video <span className="font-medium text-gray-900">renders</span>. Every
+            frame is drawn from a real design system, which means your figures are your
+            figures, your quotes are word for word, and your logo is the right shade of
+            your logo. The video is a faithful rendering of your document, not a dream
+            about it.
+          </p>
+          <div className="mt-10 grid gap-3 sm:grid-cols-3">
+            {["Your charts stay accurate", "Your text stays legible", "Your brand stays yours"].map(
+              (line) => (
+                <div
+                  key={line}
+                  className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-900"
+                >
+                  {line}
+                </div>
+              )
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* ─── 8. Social proof ───
+          Same Platform + Reviews grey band as the blog2video landing, sharing
+          one background so Reviews flows out of Platform. */}
+      <div style={{ background: "rgba(246,247,249,0.70)" }}>
+        <PlatformShowcaseSection wordmark={PDF_BRAND.wordmark} />
+        <UserReviewsSection />
+      </div>
+
+      {/* ─── 9. Pricing ─── */}
+      <section className="py-20 border-t border-gray-100">
+        <div className="max-w-5xl mx-auto px-6">
+          <h2 className="text-2xl sm:text-3xl font-semibold text-gray-900 text-center mb-3">
+            Start free. Upgrade when it is working.
+          </h2>
+          <p className="text-sm text-gray-500 text-center mb-12">
+            Videos are counted per render, not per minute. A 90 second clip and a 12 minute
+            explainer cost the same.
+          </p>
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              {
+                name: "Free",
+                price: "$0",
+                body: "1 free video . No watermark. Every template. Enough to test whether your audience prefers watching to reading.",
+              },
+              {
+                name: "Lite",
+                price: `$${LITE_MONTHLY_PRICE}`,
+                body: "For a solo publisher getting started with a regular video cadence.",
+              },
+              {
+                name: "Standard",
+                price: `$${STANDARD_MONTHLY_PRICE}`,
+                body: "Any length. Full brand kit. For one publisher or one team shipping weekly.",
+              },
+              {
+                name: "Pro",
+                price: `$${PRO_MONTHLY_PRICE}`,
+                body: "Any length. Priority rendering. For teams publishing daily or agencies running video for clients.",
+              },
+            ].map((tier) => (
+              <div key={tier.name} className="rounded-2xl border border-gray-100 p-6">
+                <h3 className="text-sm font-semibold text-gray-900">{tier.name}</h3>
+                <p className="mt-2 text-2xl font-semibold text-gray-900">
+                  {tier.price}
+                  {tier.name !== "Free" && (
+                    <span className="text-sm font-normal text-gray-400">/mo</span>
+                  )}
+                </p>
+                <p className="mt-3 text-sm leading-relaxed text-gray-500">{tier.body}</p>
+              </div>
+            ))}
+          </div>
+          <div className="mt-8 text-center">
+            <Link
+              to="/pricing"
+              className="text-sm font-medium text-purple-600 hover:text-purple-700"
+            >
+              See full pricing →
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      {/* ─── 10. FAQ ─── */}
+      <section className="py-20 border-t border-gray-100" style={{ background: "rgba(246,247,249,0.70)" }}>
+        <div className="max-w-3xl mx-auto px-6">
+          <h2 className="text-2xl sm:text-3xl font-semibold text-gray-900 text-center mb-12">
+            Questions
+          </h2>
+          <div className="divide-y divide-gray-200 rounded-2xl border border-gray-200 bg-white">
+            {FAQS.map((f, i) => (
+              <div key={f.q}>
+                <button
+                  type="button"
+                  onClick={() => setOpenFaq(openFaq === i ? null : i)}
+                  className="flex w-full items-center justify-between gap-4 px-6 py-4 text-left"
+                  aria-expanded={openFaq === i}
+                >
+                  <span className="text-sm font-medium text-gray-900">{f.q}</span>
+                  <span className="text-gray-400 shrink-0">{openFaq === i ? "−" : "+"}</span>
+                </button>
+                {openFaq === i && (
+                  <p className="px-6 pb-5 -mt-1 text-sm leading-relaxed text-gray-500">{f.a}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ─── 11. Final CTA ─── */}
+      <section className="py-24 border-t border-gray-100">
+        <div className="max-w-2xl mx-auto px-6 text-center">
+          <h2 className="text-2xl sm:text-3xl font-semibold text-gray-900">
+            Your next report deserves a bigger audience than your last one
+          </h2>
+          <p className="mt-4 text-[15px] leading-relaxed text-gray-500">
+            Upload a document and see what it looks like as a video. Takes about four
+            minutes and costs nothing.
+          </p>
+          <div className="mt-8 flex flex-col items-center gap-3">
+            {user ? (
+              <Link
+                to="/dashboard?mode=upload"
+                className="rounded-full bg-purple-600 px-7 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-purple-700"
+              >
+                Upload a document
+              </Link>
+            ) : (
+              authButton()
+            )}
+            <p className="text-xs text-gray-400">
+              Free plan, no watermark, no card required.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <PublicFooter brandId={PDF_BRAND.id} />
+
+      <ContactModal open={contactOpen} onClose={() => setContactOpen(false)} />
+
+    </div>
+  );
+}

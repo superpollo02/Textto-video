@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.env
+*.db
+.claude/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Media files
+backend/media/
+backend/tmp/
+emotion_test_clips/
+
+# HF Spaces avatar eval — superseded by Modal serverless GPU migration
+hf-space/
+
+# Remotion output
+remotion-video/out/
+# remotion-video/public/data.json is tracked for default preview
+remotion-video/src/components/generated/
+# Local crafted bundles (generated for R2 upload only)
+crafted-templates/
+
+# Font binaries — large files, never commit
+remotion-video/public/templates
+frontend/public/templates
+
+# LaDuc template folders (generated/local only)
+frontend/src/components/remotion/laduc/
+backend/templates/laduc/
+remotion-video/src/components/laduc/
+remotion-video/src/templates/laduc/
+
+frontend/src/components/remotion/fj_research/
+backend/templates/fj_research/
+remotion-video/src/components/fj_research/
+remotion-video/src/templates/fj_research/
+
+frontend/src/components/remotion/fj_market_brief/
+backend/templates/fj_market_brief/
+remotion-video/src/components/fj_market_brief/
+remotion-video/src/templates/fj_market_brief/
+
+frontend/src/components/remotion/wealth_your_way/
+backend/templates/wealth_your_way/
+remotion-video/src/components/wealth_your_way/
+remotion-video/src/templates/wealth_your_way/
+# Build cache
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+/.cursor/
+*.swp
+*.swo
+
+# Local only
+CLAUDE.md
+.claude/
+docs/
+music/
+
+# Support bot generated artifacts (rebuilt in CI)
+backend/app/support/code_map.json
+
+# OS
+.DS_Store
+Thumbs.db
+backend/.env
+frontend/.env
+
+
+# Test virtualenv (Tier A QA suite)
+backend/.venv-test/
+
+# Local docs
+docs/
+
+# Avatar service — benchmark/test outputs & scratch (NOT the bundled avatar_presets/,
+# which add_local_dir ships into the Modal image and the app depends on)
+modal-service/omniavatar/outputs/
+modal-service/omniavatar/*.mp4
+modal-service/omniavatar/run_benchmark.sh
+# One-off rendered example clips from project 1094 — build output of a scratch
+# task, not an input to anything (see backend/scratch_assign_avatars.py).
+avatar_scene_examples/
+avatar_video_examples/
+
+# Scratch bulk-UPDATE variants of the default-voice migration scripts (faster
+# reruns of replace_saved_voice_defaults.py / fix_new_voice_preview_urls.py /
+# shorten_new_voice_descriptions.py) — one-off, not meant to be committed.
+backend/scripts/replace_saved_voice_defaults_fast.py
+backend/scripts/replace_saved_voice_defaults_bulk.py
+backend/scripts/fix_new_voice_preview_urls_bulk.py
+backend/scripts/shorten_new_voice_descriptions_bulk.py

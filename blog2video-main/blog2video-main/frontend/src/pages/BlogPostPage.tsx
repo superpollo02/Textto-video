@@ -1,0 +1,435 @@
+import { lazy, Suspense } from "react";
+import { Link, useParams } from "react-router-dom";
+import DirectoryLinks from "../components/public/DirectoryLinks";
+import PublicFooter from "../components/public/PublicFooter";
+import PublicHeader from "../components/public/PublicHeader";
+import Seo from "../components/seo/Seo";
+
+const BlogDemoPlayer = lazy(() => import("../help/BlogDemoPlayer"));
+import {
+  getBlogPost,
+  getRelatedBlogPosts,
+  getStructuredInternalLinks,
+  siteUrl,
+} from "../content/siteContent";
+import { getLinkedSections } from "../content/inlineLinks";
+import { getClusterNav } from "../content/topicClusters";
+import NotFoundPage from "./NotFoundPage";
+import { blogPostSchema } from "../seo/schema";
+
+const stickmanFilmEmbeds: Record<string, { id: string; title: string }> = {
+  "the-grind-stickman-animation": { id: "AKvw7WqFBe0", title: "The Grind — stickman animation" },
+  "reservoir-dogs-stickman-parody": { id: "reE8yqX8BC4", title: "Reservoir Dogs diner scene — stickman parody" },
+  "pandoras-box-stickman-animation": { id: "cxkFELt_GXc", title: "Pandora's Box — stickman animation" },
+  "drive-title-sequence-stickman": { id: "TidvCAtoZc8", title: "Drive title sequence — stickman animation" },
+  "icarus-stickman-animation": { id: "iX4zc7FZXPs", title: "Icarus — stickman animation" },
+  "neo-stops-ai-slop-stickman": { id: "LXankpnp6tA", title: "Neo vs. AI Slop — stickman animation" },
+  "sisyphus-stickman-animation": { id: "2oE_HOnhYHQ", title: "The Myth of Sisyphus — stickman animation" },
+  "salaryman-stickman-animation": { id: "aYXg353gVBg", title: "Salaryman — stickman animation" },
+  "one-shot-stickman-animation": { id: "sgH_ag5ME60", title: "One Shot — stickman animation" },
+  "camping-night-stickman-animation": { id: "Ky9iXuJyKXY", title: "Camping Night — stickman animation" },
+  "star-wars-stickman-parody": { id: "aA-TAqMQpBI", title: "Luke vs. the Slop — Star Wars stickman parody" },
+  "2008-financial-crisis-stickman-explainer": { id: "Air9XLQAcjU", title: "The 2008 Financial Crisis, explained with stick figures" },
+  "narcissus-stickman-animation": { id: "ojTSYzQ_fQM", title: "Narcissus — stickman animation" },
+  "sword-in-the-stone-stickman-animation": { id: "S8XidEUuBDI", title: "The Sword in the Stone — stickman animation" },
+  "ship-of-theseus-stickman-animation": { id: "T56x6j3zzXk", title: "The Ship of Theseus — stickman animation" },
+  "pulp-fiction-stickman-parody": { id: "ENaHA99Qwc4", title: "Pulp Fiction 'The Case' — stickman parody" },
+  "neo-first-dodge-stickman": { id: "lvS4OKa2dZk", title: "Neo — The First Dodge — stickman animation" },
+  "the-overlook-stickman-animation": { id: "4934h1lT0Hg", title: "The Overlook — stickman animation" },
+  "stickman-v3-journey-so-far": { id: "PK4mzwhbcro", title: "The Journey So Far — Stickman v3" },
+  "stickman-v4-jetpack-update": { id: "Wzg_0VBCgDI", title: "What's New — Stickman v4 (The Jetpack Update)" },
+};
+
+export default function BlogPostPage() {
+  const { slug } = useParams<{ slug: string }>();
+  const post = slug ? getBlogPost(slug) : undefined;
+
+  if (!post) return <NotFoundPage />;
+
+  const relatedLinks = getStructuredInternalLinks(post.relatedPaths);
+  const morePosts = getRelatedBlogPosts(post, 4);
+  const linkedSections = getLinkedSections(post);
+  const clusterNav = getClusterNav(post);
+
+  return (
+    <div className="min-h-screen bg-white text-gray-900">
+      <Seo
+        title={post.title}
+        description={post.description}
+        path={`/blogs/${post.slug}`}
+        image={post.heroImage ? `${siteUrl}${post.heroImage}` : undefined}
+        schema={blogPostSchema(post)}
+      />
+      <PublicHeader />
+
+      <main className="mx-auto max-w-6xl px-6 py-16">
+        <div className="grid gap-12 lg:grid-cols-[1.3fr_0.8fr]">
+          <article>
+            <div className="mb-8 overflow-hidden rounded-3xl border border-gray-100 bg-gray-50 shadow-sm">
+              <img
+                src={post.heroImage || "/og-image-v2.png"}
+                alt={post.heroImageAlt || post.title}
+                className="h-auto w-full object-cover"
+                loading="eager"
+              />
+            </div>
+            {post.slug === "four-new-tricks" && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/n4zJLb1GeDw"
+                  title="Blog2Video just learned 4 new tricks: editable custom templates, auto font size, new scenes and Avatars"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "blog2video-september-2026-update" && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/VbiQfZIm-QI"
+                  title="Blog2Video September 2026 update — the Documentary template, Auto-Adjust, Avatars, and custom templates"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "blog2video-august-2026-update" && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/AwNq1KJikJU"
+                  title="Blog2Video latest updates August 2026"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "whats-new-in-blog2video-six-features" && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/i6Mo4gMDxBQ"
+                  title="What's New in Blog2Video — six features"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "blog-to-video-before-after" && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/v7sB9igdMS0"
+                  title="Blog to Video Before After"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "video-seo-ranking-traffic-blog2video" && (
+              <div style={{ margin: "32px auto", borderRadius: 12, overflow: "hidden", aspectRatio: "9/16", maxWidth: 360 }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/6gcYiZ-lxZk"
+                  title="Your blog is ranking but you're leaving half the traffic on the table"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {(post.slug === "custom-video-template-from-your-website" ||
+              post.slug === "translate-blog-to-video-50-languages" ||
+              post.slug === "why-custom-video-templates-matter-for-content-teams") && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/Zw_g6eEHUc0"
+                  title="Blog2Video custom templates"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "why-finance-newsletters-are-switching-to-blog2video" && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/eZyIAAilKVk"
+                  title="Why Finance Newsletters Are Switching to Blog2Video"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "persephone-stick-figure-animation" && (
+              <div style={{ margin: "32px auto", borderRadius: 12, overflow: "hidden", aspectRatio: "9/16", maxWidth: 360 }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/EIKgILWSRFc"
+                  title="The Abduction of Persephone — stick figure animation"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "trojan-horse-stickman-animation" && (
+              <div style={{ margin: "32px auto", borderRadius: 12, overflow: "hidden", aspectRatio: "9/16", maxWidth: 360 }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/cUOBMu5tPhw"
+                  title="The Trojan Horse — stick figure animation"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {stickmanFilmEmbeds[post.slug] && (
+              <div style={{ margin: "32px auto", borderRadius: 12, overflow: "hidden", aspectRatio: "9/16", maxWidth: 360 }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src={`https://www.youtube.com/embed/${stickmanFilmEmbeds[post.slug].id}`}
+                  title={stickmanFilmEmbeds[post.slug].title}
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "blog2video-vs-veed" && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/xZo4HbKuXe0"
+                  title="Blog2Video vs VEED"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "blog2video-vs-heygen" && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/fF1fyKbLyi4"
+                  title="Blog2Video vs HeyGen"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "blog2video-vs-seedance" && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/cufz2ZyWnAc"
+                  title="Blog2Video vs Seedance"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            {post.slug === "blog2video-ultimate-competitor-comparison-2026" && (
+              <div style={{ margin: "32px 0", borderRadius: 12, overflow: "hidden", aspectRatio: "16/9" }}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src="https://www.youtube.com/embed/FhSFv6aTnzw"
+                  title="Blog2Video vs Every Competitor: The Ultimate Comparison Guide (2026)"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            <p className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-purple-600">
+              {post.heroEyebrow}
+            </p>
+            <h1 className="text-4xl font-bold tracking-tight text-gray-900">
+              {post.heroTitle}
+            </h1>
+            <p className="mt-4 text-lg leading-relaxed text-gray-500">
+              {post.heroDescription}
+            </p>
+
+            <div className="mt-6 flex flex-wrap gap-3 text-sm text-gray-500">
+              <span>{post.category}</span>
+              <span>{post.publishedAt}</span>
+              <span>{post.readTime}</span>
+            </div>
+
+            <div className="mt-10 space-y-10">
+              {post.sections.map((section, sectionIndex) => (
+                <section key={section.heading}>
+                  <h2 className="text-2xl font-semibold text-gray-900">{section.heading}</h2>
+                  <div className="mt-4 space-y-4 text-base leading-relaxed text-gray-600">
+                    {linkedSections[sectionIndex].paragraphs.map((segments, paragraphIndex) => (
+                      <p key={section.paragraphs[paragraphIndex]}>
+                        {segments.map((segment, segmentIndex) =>
+                          segment.href ? (
+                            <Link
+                              key={segmentIndex}
+                              to={segment.href}
+                              className="font-medium text-purple-700 underline decoration-purple-300 underline-offset-2 hover:decoration-purple-600"
+                            >
+                              {segment.text}
+                            </Link>
+                          ) : (
+                            <span key={segmentIndex}>{segment.text}</span>
+                          )
+                        )}
+                      </p>
+                    ))}
+                  </div>
+                  {section.bullets?.length ? (
+                    <ul className="mt-4 space-y-2 text-sm text-gray-600">
+                      {section.bullets.map((bullet) => (
+                        <li key={bullet} className="flex gap-2">
+                          <span className="mt-1 h-2 w-2 rounded-full bg-purple-500" />
+                          <span>{bullet}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {section.component && (
+                    <Suspense fallback={<div className="min-h-48 rounded-xl bg-gray-100 animate-pulse" />}>
+                      <BlogDemoPlayer sceneKey={section.component} />
+                    </Suspense>
+                  )}
+                  {section.ctaPath && (
+                    <Link
+                      to={section.ctaPath}
+                      className="mt-6 inline-flex items-center gap-2 rounded-full bg-purple-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-purple-700"
+                    >
+                      {section.ctaLabel || "Try Blog2Video free"}
+                      <span aria-hidden="true">→</span>
+                    </Link>
+                  )}
+                </section>
+              ))}
+            </div>
+
+            {clusterNav && (
+              <nav
+                aria-label={`More in ${clusterNav.name}`}
+                className="mt-14 rounded-2xl border border-purple-100 bg-purple-50/50 p-6"
+              >
+                <p className="mb-4 text-xs font-semibold uppercase tracking-[0.2em] text-purple-600">
+                  More in {clusterNav.name}
+                </p>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Link to={`/blogs/${clusterNav.previous.slug}`} className="block rounded-xl bg-white p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-400">← Previous</p>
+                    <p className="mt-1 text-sm font-semibold text-gray-900">{clusterNav.previous.title}</p>
+                  </Link>
+                  <Link to={`/blogs/${clusterNav.next.slug}`} className="block rounded-xl bg-white p-4 md:text-right">
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-400">Next →</p>
+                    <p className="mt-1 text-sm font-semibold text-gray-900">{clusterNav.next.title}</p>
+                  </Link>
+                </div>
+                <Link
+                  to={clusterNav.hubPath}
+                  className="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-purple-700 hover:text-purple-900"
+                >
+                  {clusterNav.hubLabel}
+                  <span aria-hidden="true">→</span>
+                </Link>
+              </nav>
+            )}
+
+            <section className="mt-14 rounded-2xl border border-gray-200 bg-gray-50/70 p-6">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-purple-600">
+                Distribution Plan
+              </p>
+              <div className="space-y-4">
+                {post.distributionPlan.map((asset) => (
+                  <div key={`${asset.channel}-${asset.title}`} className="rounded-xl bg-white p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-400">
+                      {asset.channel}
+                    </p>
+                    <p className="mt-1 text-sm font-semibold text-gray-900">{asset.title}</p>
+                    <p className="mt-1 text-sm text-gray-600">{asset.angle}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="mt-14">
+              <h2 className="text-2xl font-semibold text-gray-900">FAQs</h2>
+              <div className="mt-6 grid gap-4 md:grid-cols-2">
+                {post.faq.map((entry) => (
+                  <div key={entry.question} className="rounded-2xl border border-gray-200 bg-white p-6">
+                    <h3 className="text-base font-semibold text-gray-900">{entry.question}</h3>
+                    <p className="mt-3 text-sm leading-relaxed text-gray-600">{entry.answer}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </article>
+
+          <aside className="space-y-6">
+            <div className="rounded-2xl border border-gray-200 bg-white p-6">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-purple-600">
+                Related Pages
+              </p>
+              <div className="space-y-4">
+                {relatedLinks.map((link) => (
+                  <Link key={link.path} to={link.path} className="block">
+                    <p className="text-sm font-semibold text-gray-900">{link.label}</p>
+                    <p className="text-sm leading-relaxed text-gray-500">{link.description}</p>
+                  </Link>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-gray-200 bg-white p-6">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-purple-600">
+                Related Articles
+              </p>
+              <div className="space-y-4">
+                {morePosts.map((entry) => (
+                  <Link key={entry.slug} to={`/blogs/${entry.slug}`} className="block">
+                    <p className="text-sm font-semibold text-gray-900">{entry.title}</p>
+                    <p className="text-sm leading-relaxed text-gray-500">{entry.description}</p>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        <DirectoryLinks />
+      </main>
+
+      <PublicFooter />
+    </div>
+  );
+}

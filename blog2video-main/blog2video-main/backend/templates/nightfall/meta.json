@@ -1,0 +1,879 @@
+{
+  "id": "nightfall",
+  "name": "Nightfall",
+  "new_template": false,
+  "new_scenes": true,
+  "popular_template": true,
+  "description": "Dark cinematic glass — frosted panels over gradient mesh, neon-glow data visualizations, animated charts, and dramatic kinetic title reveals. Premium tech keynote feel with full support for data/stats blogs. All layouts support images alongside content.",
+  "genres": [
+    "Technology",
+    "Business"
+  ],
+  "preview_colors": {
+    "accent": "#818CF8",
+    "bg": "#0A0A1A",
+    "text": "#E2E8F0"
+  },
+  "composition_id": "NightfallVideo",
+  "hero_layout": "cinematic_title",
+  "fallback_layout": "glass_narrative",
+  "valid_layouts": [
+    "cinematic_title",
+    "glass_narrative",
+    "glow_metric",
+    "glass_code",
+    "kinetic_insight",
+    "glass_stack",
+    "split_glass",
+    "chapter_break",
+    "glass_image",
+    "nightfall_data_visualization",
+    "nightfall_ticker",
+    "ending_socials"
+  ],
+  "layout_prop_schema": {
+    "cinematic_title": {
+      "label": "Cinematic Title",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 113,
+          "landscape": 140
+        },
+        "descriptionFontSize": {
+          "portrait": 43,
+          "landscape": 36
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subtitle Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 140,
+          "step": 1
+        }
+      ]
+    },
+    "cinematic_title__v2": {
+      "label": "Cinematic Title — Signal Lock",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 113,
+          "landscape": 140
+        },
+        "descriptionFontSize": {
+          "portrait": 43,
+          "landscape": 36
+        }
+      }
+    },
+    "glass_narrative": {
+      "label": "Glass Narrative",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 76,
+          "landscape": 63
+        },
+        "descriptionFontSize": {
+          "portrait": 43,
+          "landscape": 36
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 140,
+          "step": 1
+        }
+      ]
+    },
+    "glass_narrative__v2": {
+      "label": "Glass Narrative — Data Readout",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 76,
+          "landscape": 93
+        },
+        "descriptionFontSize": {
+          "portrait": 40,
+          "landscape": 45
+        }
+      }
+    },
+    "glow_metric": {
+      "label": "Glow Metric",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 86,
+          "landscape": 50
+        },
+        "descriptionFontSize": {
+          "portrait": 42,
+          "landscape": 30
+        },
+        "metrics": [
+          {
+            "value": "97",
+            "label": "Accuracy",
+            "suffix": "%"
+          },
+          {
+            "value": "3.2",
+            "label": "Lift",
+            "suffix": "x"
+          },
+          {
+            "value": "5.2",
+            "label": "Strength",
+            "suffix": "x"
+          },
+          {
+            "value": "7.2",
+            "label": "Power",
+            "suffix": "x"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "metrics",
+          "label": "Metrics",
+          "type": "object_array",
+          "maxItems": 4,
+          "subFields": [
+            {
+              "key": "value",
+              "label": "Value"
+            },
+            {
+              "key": "label",
+              "label": "Label"
+            },
+            {
+              "key": "suffix",
+              "label": "Suffix"
+            }
+          ]
+        }
+      ]
+    },
+    "glass_code": {
+      "label": "Glass Code",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 51,
+          "landscape": 55
+        },
+        "descriptionFontSize": {
+          "portrait": 51,
+          "landscape": 40
+        },
+        "codeLanguage": "typescript",
+        "codeLines": [
+          "const result = await fetchData();",
+          "console.log(result);"
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Header Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 160,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Code Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 100,
+          "step": 1
+        },
+        {
+          "key": "codeLanguage",
+          "label": "Language",
+          "type": "string"
+        },
+        {
+          "key": "codeLines",
+          "label": "Code Lines",
+          "type": "string_array",
+          "maxItems": 20
+        }
+      ]
+    },
+    "kinetic_insight": {
+      "label": "Kinetic Insight",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 169,
+          "landscape": 112
+        },
+        "descriptionFontSize": {
+          "portrait": 83,
+          "landscape": 91
+        },
+        "quote": "Complexity is the enemy of execution.",
+        "highlightWord": "execution"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Quote Mark Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 260,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Quote Text Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "quote",
+          "label": "Quote",
+          "type": "text"
+        },
+        {
+          "key": "highlightWord",
+          "label": "Highlight Word",
+          "type": "string"
+        }
+      ]
+    },
+    "glass_stack": {
+      "label": "Glass Stack",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 81,
+          "landscape": 71
+        },
+        "descriptionFontSize": {
+          "portrait": 44,
+          "landscape": 40
+        },
+        "items": [
+          "Item one",
+          "Item two",
+          "Item three"
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Item Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "items",
+          "label": "Items",
+          "type": "string_array",
+          "maxItems": 8
+        }
+      ]
+    },
+    "split_glass": {
+      "label": "Split Glass",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 65,
+          "landscape": 61
+        },
+        "descriptionFontSize": {
+          "portrait": 35,
+          "landscape": 28
+        },
+        "leftLabel": "Left",
+        "rightLabel": "Right",
+        "leftDescription": "Left-hand context",
+        "rightDescription": "Right-hand context"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Label Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "leftLabel",
+          "label": "Left Label",
+          "type": "string"
+        },
+        {
+          "key": "rightLabel",
+          "label": "Right Label",
+          "type": "string"
+        },
+        {
+          "key": "leftDescription",
+          "label": "Left Description",
+          "type": "text"
+        },
+        {
+          "key": "rightDescription",
+          "label": "Right Description",
+          "type": "text"
+        }
+      ]
+    },
+    "chapter_break": {
+      "label": "Chapter Break",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 55,
+          "landscape": 55
+        },
+        "descriptionFontSize": {
+          "portrait": 40,
+          "landscape": 40
+        },
+        "subtitle": "A new section begins",
+        "chapterNumber": "02"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subtitle Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "subtitle",
+          "label": "Subtitle",
+          "type": "string"
+        },
+        {
+          "key": "chapterNumber",
+          "label": "Chapter Number",
+          "type": "string"
+        }
+      ]
+    },
+    "glass_image": {
+      "label": "Glass Image",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 78,
+          "landscape": 64
+        },
+        "descriptionFontSize": {
+          "portrait": 42,
+          "landscape": 35
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Caption Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 140,
+          "step": 1
+        }
+      ]
+    },
+    "nightfall_data_visualization": {
+      "label": "Data Visualisation",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 64,
+          "landscape": 58
+        },
+        "descriptionFontSize": {
+          "portrait": 32,
+          "landscape": 28
+        },
+        "chartType": "line",
+        "chartSummary": "The signal emerges clearly from the noise.",
+        "chartTable": {
+          "headers": [
+            "Week",
+            "Requests",
+            "Errors"
+          ],
+          "rows": [
+            [
+              "W-04",
+              "298",
+              "12"
+            ],
+            [
+              "W-03",
+              "308",
+              "9"
+            ],
+            [
+              "W-02",
+              "315",
+              "7"
+            ],
+            [
+              "W-01",
+              "324",
+              "5"
+            ],
+            [
+              "W-00",
+              "318",
+              "6"
+            ]
+          ]
+        },
+        "chartYAxisTicks": [],
+        "subtitle": "Week",
+        "yAxisLabel": "Recorded value",
+        "barPrimaryColor": "#00E5FF",
+        "barSecondaryColor": "#7B2FBE"
+      },
+      "scene_defaults": {
+        "title": "The data behind the story",
+        "narration": "The numbers reveal what the narrative hints at.",
+        "durationSeconds": 7
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 160,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "chartType",
+          "label": "Chart Type",
+          "type": "select",
+          "options": [
+            {
+              "label": "Auto (infer from data)",
+              "value": "auto"
+            },
+            {
+              "label": "Line",
+              "value": "line"
+            },
+            {
+              "label": "Bar",
+              "value": "bar"
+            },
+            {
+              "label": "Histogram",
+              "value": "histogram"
+            }
+          ]
+        },
+        {
+          "key": "chartTable",
+          "label": "Chart data — col 1: X labels; cols 2–4: up to 3 numeric series (max 20 data rows). Use bar for named categories; histogram for bins/ranges.",
+          "type": "chart_table"
+        },
+        {
+          "key": "yAxisLabel",
+          "label": "Y-axis label (overrides chart header)",
+          "type": "string"
+        },
+        {
+          "key": "subtitle",
+          "label": "X-axis / category caption (overrides first column header)",
+          "type": "string"
+        },
+        {
+          "key": "chartYAxisTicks",
+          "label": "Y-axis tick labels (top → bottom; 2–4 values)",
+          "type": "string_array"
+        },
+        {
+          "key": "chartSummary",
+          "label": "Chart summary (short read beside the graphic)",
+          "type": "string"
+        },
+        {
+          "key": "barPrimaryColor",
+          "label": "Series color 1",
+          "type": "color"
+        },
+        {
+          "key": "barSecondaryColor",
+          "label": "Series color 2",
+          "type": "color"
+        }
+      ]
+    },
+    "nightfall_ticker": {
+      "label": "Data Table",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 58,
+          "landscape": 50
+        },
+        "descriptionFontSize": {
+          "portrait": 26,
+          "landscape": 22
+        },
+        "tickerTitle": "A record of the signals",
+        "tickerFootnote": "Source: system telemetry",
+        "tickerHighlightCol": 5,
+        "tickerTable": {
+          "headers": [
+            "Node",
+            "Requests",
+            "Errors",
+            "P50",
+            "P99",
+            "% Err"
+          ],
+          "rows": [
+            [
+              "Alpha",
+              "12,400",
+              "24",
+              "18ms",
+              "120ms",
+              "+0.2%"
+            ],
+            [
+              "Bravo",
+              "84,200",
+              "112",
+              "22ms",
+              "180ms",
+              "-0.1%"
+            ],
+            [
+              "Charlie",
+              "31,000",
+              "8",
+              "4ms",
+              "40ms",
+              "+0.0%"
+            ],
+            [
+              "Delta",
+              "9,800",
+              "56",
+              "45ms",
+              "320ms",
+              "+0.6%"
+            ],
+            [
+              "Echo",
+              "44,100",
+              "18",
+              "12ms",
+              "95ms",
+              "-0.04%"
+            ]
+          ]
+        }
+      },
+      "scene_defaults": {
+        "title": "The data in view",
+        "narration": "Each row a signal — each column a dimension of truth.",
+        "durationSeconds": 7
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 160,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Cell Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "tickerTitle",
+          "label": "Table sub-headline",
+          "type": "string"
+        },
+        {
+          "key": "tickerTable",
+          "label": "Table data — col 1: row labels; cols 2–6: numeric or text values. Max 20 rows, max 6 columns.",
+          "type": "ticker_table"
+        },
+        {
+          "key": "tickerHighlightCol",
+          "label": "Highlight column index (0-based) for gain/loss coloring, e.g. 5 for the 6th column. Set to -1 to disable.",
+          "type": "number"
+        },
+        {
+          "key": "tickerFootnote",
+          "label": "Footnote / source attribution",
+          "type": "string"
+        }
+      ]
+    },
+    "ending_socials": {
+      "label": "Ending / Follow along",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 88,
+          "landscape": 72
+        },
+        "descriptionFontSize": {
+          "portrait": 36,
+          "landscape": 36
+        },
+        "hideImage": true,
+        "socials": [
+          {
+            "platform": "facebook",
+            "enabled": "true",
+            "label": "Facebook"
+          },
+          {
+            "platform": "instagram",
+            "enabled": "true",
+            "label": "Instagram"
+          },
+          {
+            "platform": "youtube",
+            "enabled": "true",
+            "label": "YouTube"
+          },
+          {
+            "platform": "medium",
+            "enabled": "false",
+            "label": "Medium"
+          },
+          {
+            "platform": "substack",
+            "enabled": "false",
+            "label": "Substack"
+          },
+          {
+            "platform": "linkedin",
+            "enabled": "false",
+            "label": "LinkedIn"
+          },
+          {
+            "platform": "tiktok",
+            "enabled": "false",
+            "label": "TikTok"
+          }
+        ],
+        "showWebsiteButton": true,
+        "websiteLink": "https://yourwebsite.com",
+        "ctaButtonText": "Get started"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subtext Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "socials",
+          "label": "Social Platforms",
+          "type": "object_array",
+          "maxItems": 7,
+          "subFields": [
+            {
+              "key": "platform",
+              "label": "Platform (facebook, instagram, youtube, medium, substack, linkedin, tiktok)"
+            },
+            {
+              "key": "enabled",
+              "label": "Enabled (true/false)"
+            },
+            {
+              "key": "label",
+              "label": "Label / handle / URL text"
+            }
+          ]
+        },
+        {
+          "key": "showWebsiteButton",
+          "label": "Show Website CTA Button",
+          "type": "select",
+          "options": [
+            {
+              "label": "Enabled",
+              "value": "true"
+            },
+            {
+              "label": "Disabled",
+              "value": "false"
+            }
+          ]
+        },
+        {
+          "key": "websiteLink",
+          "label": "Website Link",
+          "type": "string",
+          "placeholder": "https://yourwebsite.com"
+        },
+        {
+          "key": "ctaButtonText",
+          "label": "CTA Button Text",
+          "type": "string",
+          "placeholder": "Get started"
+        }
+      ]
+    }
+  },
+  "layout_variants": {
+    "cinematic_title": [
+      "cinematic_title",
+      "cinematic_title__v2"
+    ],
+    "glass_narrative": [
+      "glass_narrative",
+      "glass_narrative__v2"
+    ]
+  },
+  "layout_variant_labels": {
+    "cinematic_title": "Classic",
+    "cinematic_title__v2": "Signal Lock",
+    "glass_narrative": "Classic",
+    "glass_narrative__v2": "Data Readout"
+  },
+  "layouts_without_image": [
+    "split_glass",
+    "glass_code",
+    "kinetic_insight",
+    "chapter_break",
+    "nightfall_data_visualization",
+    "nightfall_ticker",
+    "ending_socials"
+  ],
+  "features": [
+    "Image support in all layouts",
+    "Neon-glow data visualisation with line, bar, and histogram charts",
+    "Data table layout for stats-heavy content",
+    "Neon glow effects on charts and metrics",
+    "Responsive layouts (portrait/landscape)"
+  ]
+}

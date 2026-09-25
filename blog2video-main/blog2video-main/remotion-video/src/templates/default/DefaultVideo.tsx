@@ -1,0 +1,368 @@
+import { useEffect, useState } from "react";
+import { AvatarOverlay } from "../../components/AvatarOverlay";
+import {
+  AbsoluteFill,
+  Audio,
+  Sequence,
+  staticFile,
+  CalculateMetadataFunction,
+  continueRender,
+  delayRender,
+} from "remotion";
+import { LAYOUT_REGISTRY, LayoutType, SceneLayoutProps } from "./layouts";
+import { resolveFontFamily } from "../../fonts/registry";
+import { TransitionWipe } from "../../components/Transitions";
+import { LogoOverlay } from "../../components/LogoOverlay";
+import { BackgroundMusic } from "../../components/BackgroundMusic";
+import { CaptionTrack } from "../../components/CaptionTrack";
+import { getPlaybackSpeed, getSceneDurationFrames } from "../playbackSpeed";
+
+// ─── Types ───────────────────────────────────────────────────
+
+interface SceneData {
+  id: number;
+  order: number;
+  title: string;
+  narration: string;
+  /** Spoken narration text — used for captions (may differ from on-screen `narration`/displayText). */
+  narrationText?: string;
+  layout: LayoutType;
+  layoutProps: Record<string, any>;
+  durationSeconds: number;
+  /** Spoken-audio length in seconds (scene duration minus trailing pad) — for caption timing. */
+  speechDurationSeconds?: number;
+  voiceoverFile: string | null;
+  avatarVideoFile?: string | null;
+  /** Per-scene avatar presentation, already resolved by the backend
+   *  (scene override ?? project ?? default). See services/remotion.py. */
+  avatarShape?: "circle" | "rounded" | "square";
+  avatarSize?: number;
+  avatarPosition?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
+  avatarBg?: string | null;
+  avatarOpacity?: number;
+  avatarShadow?: number;
+  avatarFocusX?: number;
+  avatarFocusY?: number;
+  avatarZoom?: number;
+  images: string[];
+  /** Stock-footage filename in public/. Mutually exclusive with `images`. */
+  video?: string;
+  videoMuted?: boolean;
+  videoVolume?: number;
+  /** Normalised clip length; converted to frames for <Loop>. */
+  videoDurationSeconds?: number;
+  /** Start offset into the clip, in seconds (the adjust-modal trim). */
+  videoStartSeconds?: number;
+}
+
+interface VideoData {
+  projectName: string;
+  heroImage?: string | null;
+  accentColor: string;
+  bgColor: string;
+  textColor: string;
+  logo?: string | null;
+  logoPosition?: string;
+  logoOpacity?: number;
+  logoSize?: number | string;
+  aspectRatio?: string;
+  playbackSpeed?: number;
+  fontFamily?: string | null;
+  bgmFile?: string | null;
+  bgmVolume?: number;
+  captionsEnabled?: boolean;
+  captionPosition?: string;
+  captionFontFamily?: string;
+  captionFontSize?: string;
+  captionOffset?: number;
+  /** Avatar overlay presentation (see components/AvatarOverlay.tsx). */
+  avatarShape?: "circle" | "rounded" | "square";
+  avatarSize?: number;
+  avatarPosition?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
+  avatarBg?: string | null;
+  avatarOpacity?: number;
+  avatarShadow?: number;
+  avatarFocusX?: number;
+  avatarFocusY?: number;
+  avatarZoom?: number;
+  scenes: SceneData[];
+}
+
+interface VideoProps extends Record<string, unknown> {
+  dataUrl: string;
+}
+
+// ─── Calculate actual duration from data.json ────────────────
+
+export const calculateDefaultMetadata: CalculateMetadataFunction<VideoProps> =
+  async ({ props }) => {
+    const FPS = 30;
+    try {
+      const url = staticFile(props.dataUrl.replace(/^\//, ""));
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+      const data: VideoData = await res.json();
+      const playbackSpeed = getPlaybackSpeed(data.playbackSpeed);
+
+      const sceneFrames = data.scenes.map((s) =>
+        getSceneDurationFrames(s.durationSeconds, FPS, playbackSpeed)
+      );
+      const totalFrames = sceneFrames.reduce((a, b) => a + b, 0);
+
+      const isPortrait = data.aspectRatio === "portrait";
+
+      return {
+        durationInFrames: Math.max(totalFrames, FPS * 5),
+        fps: FPS,
+        width: isPortrait ? 1080 : 1920,
+        height: isPortrait ? 1920 : 1080,
+      };
+    } catch (e) {
+      console.warn("calculateDefaultMetadata fallback:", e);
+      return {
+        durationInFrames: FPS * 300,
+        fps: FPS,
+        width: 1920,
+        height: 1080,
+      };
+    }
+  };
+
+// ─── Main composition ────────────────────────────────────────
+
+// ─── Font URLs ────────────────────────────────────────────────
+const FONT_URLS = [
+  "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap",
+  "https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&display=swap",
+];
+
+export const DefaultVideo: React.FC<VideoProps> = ({ dataUrl }) => {
+  const [data, setData] = useState<VideoData | null>(null);
+
+  // ─── Load fonts before rendering any frames ─────────────────
+  const [fontHandle] = useState(() =>
+    delayRender("Loading fonts", { timeoutInMilliseconds: 15_000 })
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const links: HTMLLinkElement[] = [];
+
+    const loadFonts = async () => {
+      // 1. Inject <link> tags and wait for each stylesheet to actually load
+      const linkPromises = FONT_URLS.map(
+        (url) =>
+          new Promise<void>((resolve) => {
+            const link = document.createElement("link");
+            link.rel = "stylesheet";
+            link.href = url;
+            link.onload = () => resolve();
+            link.onerror = () => resolve(); // Don't block render if CDN fails
+            document.head.appendChild(link);
+            links.push(link);
+          })
+      );
+      await Promise.all(linkPromises);
+
+      // 2. CSS is now parsed — explicitly request each font variant so the
+      //    browser actually downloads the woff2 files
+      const fontFaces = [
+        "400 16px Inter",
+        "500 16px Inter",
+        "600 16px Inter",
+        "700 16px Inter",
+        "800 16px Inter",
+        "400 16px 'Fira Code'",
+        "500 16px 'Fira Code'",
+      ];
+      try {
+        await Promise.all(fontFaces.map((f) => document.fonts.load(f)));
+        await document.fonts.ready;
+      } catch {
+        // Proceed even if fonts fail
+      }
+
+      // 3. Extra safety margin for layout reflow
+      await new Promise((r) => setTimeout(r, 300));
+
+      if (!cancelled) {
+        continueRender(fontHandle);
+      }
+    };
+
+    loadFonts();
+    return () => {
+      cancelled = true;
+    };
+  }, [fontHandle]);
+
+  useEffect(() => {
+    fetch(staticFile(dataUrl.replace(/^\//, "")))
+      .then((res) => res.json())
+      .then(setData)
+      .catch(() => {
+        setData({
+          projectName: "Blog2Video Preview",
+          accentColor: "#7C3AED",
+          bgColor: "#FFFFFF",
+          textColor: "#000000",
+          scenes: [
+            {
+              id: 1,
+              order: 1,
+              title: "Welcome",
+              narration: "This is a preview of your Blog2Video project.",
+              layout: "text_narration",
+              layoutProps: {},
+              durationSeconds: 5,
+              voiceoverFile: null,
+              avatarVideoFile: null,
+              images: [],
+            },
+          ],
+        });
+      });
+  }, [dataUrl]);
+
+  if (!data) {
+    return (
+      <AbsoluteFill
+        style={{
+          backgroundColor: "#FFFFFF",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <p style={{ color: "#000000", fontSize: 36 }}>Loading...</p>
+      </AbsoluteFill>
+    );
+  }
+
+  const FPS = 30;
+  const playbackSpeed = getPlaybackSpeed(data.playbackSpeed);
+  let currentFrame = 0;
+  const resolvedFontFamily = resolveFontFamily(data.fontFamily ?? null);
+
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundColor: data.bgColor || "#FFFFFF",
+        fontFamily: resolvedFontFamily || undefined,
+      }}
+    >
+      {data.scenes.map((scene, index) => {
+        const durationFrames = getSceneDurationFrames(
+          scene.durationSeconds,
+          FPS,
+          playbackSpeed,
+        );
+        const startFrame = currentFrame;
+        currentFrame += durationFrames;
+
+        const transitionFrom = Math.max(0, durationFrames - 30);
+        const transitionDuration = Math.min(30, durationFrames);
+
+        // Pick layout component from registry
+        const LayoutComponent =
+          LAYOUT_REGISTRY[scene.layout] || LAYOUT_REGISTRY.text_narration;
+
+        // Resolve image URL via staticFile
+        const imageUrl =
+          scene.images.length > 0 ? staticFile(scene.images[0]) : undefined;
+        const videoUrl = scene.video ? staticFile(scene.video) : undefined;
+
+        const rawLayoutProps = scene.layoutProps;
+        const imageFocusX = Number((rawLayoutProps as Record<string, unknown>)?.imageFocusX ?? 50);
+        const imageFocusY = Number((rawLayoutProps as Record<string, unknown>)?.imageFocusY ?? 50);
+        const imageZoom = Math.max(0.1, Number((rawLayoutProps as Record<string, unknown>)?.imageZoom ?? 1));
+        const imageObjectPosition = `${Math.max(0, Math.min(100, imageFocusX))}% ${Math.max(0, Math.min(100, imageFocusY))}%`;
+
+        // Build props for the layout component
+        // IMPORTANT: Ensure computed imageUrl wins over any stale scene.layoutProps.imageUrl
+        const layoutProps: SceneLayoutProps = {
+          ...(rawLayoutProps as Record<string, unknown>),
+          title: scene.title,
+          narration: scene.narration,
+          accentColor: data.accentColor || "#7C3AED",
+          bgColor: data.bgColor || "#FFFFFF",
+          textColor: data.textColor || "#000000",
+          aspectRatio: data.aspectRatio || "landscape",
+          imageUrl,
+          imageObjectPosition,
+  imageZoom,
+          videoUrl,
+          videoMuted: scene.videoMuted ?? true,
+          videoVolume: scene.videoVolume ?? 0.35,
+          videoDurationInFrames: scene.videoDurationSeconds
+            ? Math.max(1, Math.round(scene.videoDurationSeconds * FPS))
+            : undefined,
+          videoStartInFrames: scene.videoStartSeconds
+            ? Math.max(0, Math.round(scene.videoStartSeconds * FPS))
+            : undefined,
+          fontFamily: resolvedFontFamily || undefined,
+          sceneIndex: index,
+        };
+
+        return (
+          <Sequence
+            key={scene.id}
+            from={startFrame}
+            durationInFrames={durationFrames}
+            name={scene.title}
+          >
+            <LayoutComponent {...layoutProps} />
+
+            {/* Voiceover audio */}
+            {scene.voiceoverFile && (
+              <Audio src={staticFile(scene.voiceoverFile)} playbackRate={playbackSpeed} />
+            )}
+            {scene.avatarVideoFile && (
+              <AvatarOverlay src={staticFile(scene.avatarVideoFile)} aspectRatio={data.aspectRatio} shape={scene.avatarShape ?? data.avatarShape} size={scene.avatarSize ?? data.avatarSize} position={scene.avatarPosition ?? data.avatarPosition} bg={scene.avatarBg ?? data.avatarBg} opacity={scene.avatarOpacity ?? data.avatarOpacity} shadow={scene.avatarShadow ?? data.avatarShadow} focusX={scene.avatarFocusX} focusY={scene.avatarFocusY} zoom={scene.avatarZoom} />
+            )}
+
+            {/* Captions — narration text, synced to this scene's voiceover window */}
+            {data.captionsEnabled && (scene.narrationText || scene.narration) && (
+              <CaptionTrack
+                text={scene.narrationText || scene.narration}
+                position={data.captionPosition || "bottom_center"}
+                aspectRatio={data.aspectRatio || "landscape"}
+                fontFamily={data.captionFontFamily ? (resolveFontFamily(data.captionFontFamily) || data.captionFontFamily) : (resolvedFontFamily || undefined)}
+                fontSize={data.captionFontSize ? Number(data.captionFontSize) : undefined}
+                offset={data.captionOffset ?? 0}
+                speechDurationFrames={
+                  scene.speechDurationSeconds
+                    ? getSceneDurationFrames(scene.speechDurationSeconds, FPS, playbackSpeed)
+                    : undefined
+                }
+              />
+            )}
+
+            {/* Transition overlay */}
+            {index < data.scenes.length - 1 && transitionDuration > 0 && (
+              <Sequence from={transitionFrom} durationInFrames={transitionDuration}>
+                <TransitionWipe />
+              </Sequence>
+            )}
+          </Sequence>
+        );
+      })}
+
+      {/* Logo overlay — spans entire video */}
+      {data.logo && (
+        <LogoOverlay
+          src={staticFile(data.logo)}
+          position={data.logoPosition || "bottom_right"}
+          maxOpacity={data.logoOpacity ?? 0.9}
+          size={data.logoSize || "default"}
+          aspectRatio={data.aspectRatio || "landscape"}
+        />
+      )}
+
+      {/* Background music */}
+      {data.bgmFile && (
+        <BackgroundMusic src={staticFile(data.bgmFile)} volume={data.bgmVolume ?? 0.10} scenes={data.scenes} />
+      )}
+    </AbsoluteFill>
+  );
+};

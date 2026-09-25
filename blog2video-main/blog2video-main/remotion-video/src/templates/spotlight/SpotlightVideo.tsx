@@ -1,0 +1,339 @@
+import React, { useEffect, useState } from "react";
+import { AvatarOverlay } from "../../components/AvatarOverlay";
+import {
+  AbsoluteFill,
+  Audio,
+  Sequence,
+  staticFile,
+  useVideoConfig,
+  CalculateMetadataFunction,
+} from "remotion";
+import { TransitionSeries } from "@remotion/transitions";
+import { SPOTLIGHT_LAYOUT_REGISTRY } from "./layouts";
+import { pickSpotlightTransition } from "./transitions";
+import { resolveFontFamily } from "../../fonts/registry";
+import type { SpotlightLayoutType, SpotlightLayoutProps } from "./types";
+import { LogoOverlay } from "../../components/LogoOverlay";
+import { BackgroundMusic } from "../../components/BackgroundMusic";
+import { CaptionTrack } from "../../components/CaptionTrack";
+import { getPlaybackSpeed, getSceneDurationFrames } from "../playbackSpeed";
+
+// ─── Types ───────────────────────────────────────────────────
+
+interface SceneData {
+  id: number;
+  order: number;
+  title: string;
+  narration: string;
+  /** Spoken narration text — used for captions (may differ from on-screen `narration`/displayText). */
+  narrationText?: string;
+  layout: SpotlightLayoutType;
+  layoutProps: Record<string, any>;
+  durationSeconds: number;
+  /** Spoken-audio length in seconds (scene duration minus trailing pad) — for caption timing. */
+  speechDurationSeconds?: number;
+  voiceoverFile: string | null;
+  avatarVideoFile?: string | null;
+  /** Per-scene avatar presentation, already resolved by the backend
+   *  (scene override ?? project ?? default). See services/remotion.py. */
+  avatarShape?: "circle" | "rounded" | "square";
+  avatarSize?: number;
+  avatarPosition?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
+  avatarBg?: string | null;
+  avatarOpacity?: number;
+  avatarShadow?: number;
+  avatarFocusX?: number;
+  avatarFocusY?: number;
+  avatarZoom?: number;
+  images: string[];
+  /** Stock-footage filename in public/. Mutually exclusive with `images`. */
+  video?: string;
+  videoMuted?: boolean;
+  videoVolume?: number;
+  /** Normalised clip length; converted to frames for <Loop>. */
+  videoDurationSeconds?: number;
+  /** Start offset into the clip, in seconds (the adjust-modal trim). */
+  videoStartSeconds?: number;
+}
+
+interface VideoData {
+  projectName: string;
+  heroImage?: string | null;
+  accentColor: string;
+  bgColor: string;
+  textColor: string;
+  logo?: string | null;
+  logoPosition?: string;
+  logoOpacity?: number;
+  logoSize?: number | string;
+  aspectRatio?: string;
+  playbackSpeed?: number;
+  fontFamily?: string | null;
+  bgmFile?: string | null;
+  bgmVolume?: number;
+  captionsEnabled?: boolean;
+  captionPosition?: string;
+  captionFontFamily?: string;
+  captionFontSize?: string;
+  captionOffset?: number;
+  /** Avatar overlay presentation (see components/AvatarOverlay.tsx). */
+  avatarShape?: "circle" | "rounded" | "square";
+  avatarSize?: number;
+  avatarPosition?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
+  avatarBg?: string | null;
+  avatarOpacity?: number;
+  avatarShadow?: number;
+  avatarFocusX?: number;
+  avatarFocusY?: number;
+  avatarZoom?: number;
+  scenes: SceneData[];
+}
+
+interface VideoProps extends Record<string, unknown> {
+  dataUrl: string;
+}
+
+// ─── Metadata ─────────────────────────────────────────────────
+// Transitions OVERLAP adjacent scenes (TransitionSeries consumes `frames` from
+// the boundary), so the composition is shorter than the naive sum of scene
+// durations. Subtract every transition's frame cost — keyed by index so this
+// matches pickSpotlightTransition() in the render exactly.
+
+export const calculateSpotlightMetadata: CalculateMetadataFunction<VideoProps> =
+  async ({ props }) => {
+    const FPS = 30;
+    try {
+      const url = staticFile(props.dataUrl.replace(/^\//, ""));
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+      const data: VideoData = await res.json();
+
+      const playbackSpeed = getPlaybackSpeed(data.playbackSpeed);
+      const sceneFrames = data.scenes.map((s) =>
+        getSceneDurationFrames(s.durationSeconds, FPS, playbackSpeed),
+      );
+      let totalFrames = sceneFrames.reduce((sum, f) => sum + f, 0);
+      for (let i = 0; i < data.scenes.length - 1; i++) {
+        totalFrames -= pickSpotlightTransition(
+          i,
+          data.scenes[i].layout,
+          data.scenes[i + 1].layout,
+        ).frames;
+      }
+
+      const isPortrait = data.aspectRatio === "portrait";
+
+      return {
+        durationInFrames: Math.max(totalFrames, FPS * 5),
+        fps: FPS,
+        width: isPortrait ? 1080 : 1920,
+        height: isPortrait ? 1920 : 1080,
+      };
+    } catch (e) {
+      console.warn("calculateSpotlightMetadata fallback:", e);
+      return {
+        durationInFrames: FPS * 300,
+        fps: FPS,
+        width: 1920,
+        height: 1080,
+      };
+    }
+  };
+
+// ─── Composition ───────────────────────────────────────────────
+
+export const SpotlightVideo: React.FC<VideoProps> = ({ dataUrl }) => {
+  const [data, setData] = useState<VideoData | null>(null);
+  const { width, height } = useVideoConfig();
+
+  useEffect(() => {
+    fetch(staticFile(dataUrl.replace(/^\//, "")))
+      .then((res) => res.json())
+      .then(setData)
+      .catch(() => {
+        setData({
+          projectName: "Blog2Video Preview",
+          accentColor: "#EF4444",
+          bgColor: "#000000",
+          textColor: "#FFFFFF",
+          scenes: [
+            {
+              id: 1,
+              order: 1,
+              title: "Welcome",
+              narration: "This is a preview of your Spotlight video.",
+              layout: "statement",
+              layoutProps: {},
+              durationSeconds: 5,
+              voiceoverFile: null,
+              avatarVideoFile: null,
+              images: [],
+            },
+          ],
+        });
+      });
+  }, [dataUrl]);
+
+  if (!data) {
+    return (
+      <AbsoluteFill
+        style={{
+          backgroundColor: "#000000",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <p style={{ color: "#FFFFFF", fontSize: 36 }}>Loading...</p>
+      </AbsoluteFill>
+    );
+  }
+
+  const FPS = 30;
+  const playbackSpeed = getPlaybackSpeed(data.playbackSpeed);
+  const resolvedFontFamily = resolveFontFamily(data.fontFamily ?? null);
+
+  const sceneFrames = data.scenes.map((s) =>
+    getSceneDurationFrames(s.durationSeconds, FPS, playbackSpeed),
+  );
+
+  // Scene start frames accounting for transition overlap (for audio sync).
+  const sceneStartFrames: number[] = [];
+  let runningFrame = 0;
+  data.scenes.forEach((_, i) => {
+    sceneStartFrames[i] = runningFrame;
+    runningFrame += sceneFrames[i];
+    if (i < data.scenes.length - 1) {
+      runningFrame -= pickSpotlightTransition(
+        i,
+        data.scenes[i].layout,
+        data.scenes[i + 1].layout,
+        width,
+        height,
+      ).frames;
+    }
+  });
+
+  const buildLayoutProps = (scene: SceneData): SpotlightLayoutProps => {
+    const imageUrl =
+      scene.images.length > 0 ? staticFile(scene.images[0]) : undefined;
+    const videoUrl = scene.video ? staticFile(scene.video) : undefined;
+    return {
+      ...scene.layoutProps,
+      title: scene.title,
+      narration: scene.narration,
+      accentColor: data.accentColor || "#EF4444",
+      bgColor: data.bgColor || "#000000",
+      textColor: data.textColor || "#FFFFFF",
+      aspectRatio: data.aspectRatio || "landscape",
+      imageUrl,
+      imageObjectPosition:
+        String(Math.max(0, Math.min(100, Number((scene.layoutProps as Record<string, unknown>)?.imageFocusX ?? 50)))) +
+        "% " +
+        String(Math.max(0, Math.min(100, Number((scene.layoutProps as Record<string, unknown>)?.imageFocusY ?? 50)))) +
+        "%",
+      imageZoom: Math.max(0.1, Number((scene.layoutProps as Record<string, unknown>)?.imageZoom ?? 1)),
+      videoUrl,
+      videoMuted: scene.videoMuted ?? true,
+      videoVolume: scene.videoVolume ?? 0.35,
+      videoDurationInFrames: scene.videoDurationSeconds
+        ? Math.max(1, Math.round(scene.videoDurationSeconds * FPS))
+        : undefined,
+      videoStartInFrames: scene.videoStartSeconds
+        ? Math.max(0, Math.round(scene.videoStartSeconds * FPS))
+        : undefined,
+      fontFamily: resolvedFontFamily || undefined,
+    };
+  };
+
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundColor: data.bgColor || "#000000",
+        fontFamily: resolvedFontFamily || undefined,
+      }}
+    >
+      <TransitionSeries>
+        {data.scenes.map((scene, index) => {
+          const LayoutComponent =
+            SPOTLIGHT_LAYOUT_REGISTRY[scene.layout] ||
+            SPOTLIGHT_LAYOUT_REGISTRY.statement;
+
+          const sequence = (
+            <TransitionSeries.Sequence
+              key={`seq-${scene.id}-${index}`}
+              durationInFrames={sceneFrames[index]}
+            >
+              <LayoutComponent {...buildLayoutProps(scene)} />
+            </TransitionSeries.Sequence>
+          );
+
+          if (index === data.scenes.length - 1) return sequence;
+
+          const choice = pickSpotlightTransition(
+            index,
+            scene.layout,
+            data.scenes[index + 1].layout,
+            width,
+            height,
+          );
+          return (
+            <React.Fragment key={`scene-${scene.id}-${index}`}>
+              {sequence}
+              <TransitionSeries.Transition
+                presentation={choice.presentation}
+                timing={choice.timing}
+              />
+            </React.Fragment>
+          );
+        })}
+      </TransitionSeries>
+
+      {/* Audio runs on its own overlap-adjusted timeline. */}
+      {data.scenes.map((scene, index) =>
+        scene.voiceoverFile ? (
+          <Sequence
+            key={`audio-${scene.id}-${index}`}
+            from={sceneStartFrames[index]}
+            durationInFrames={sceneFrames[index]}
+          >
+            <Audio src={staticFile(scene.voiceoverFile)} playbackRate={playbackSpeed} />
+            {scene.avatarVideoFile && (
+              <AvatarOverlay src={staticFile(scene.avatarVideoFile)} aspectRatio={data.aspectRatio || "landscape"} shape={scene.avatarShape ?? data.avatarShape} size={scene.avatarSize ?? data.avatarSize} position={scene.avatarPosition ?? data.avatarPosition} bg={scene.avatarBg ?? data.avatarBg} opacity={scene.avatarOpacity ?? data.avatarOpacity} shadow={scene.avatarShadow ?? data.avatarShadow} focusX={scene.avatarFocusX} focusY={scene.avatarFocusY} zoom={scene.avatarZoom} />
+            )}
+            {data.captionsEnabled && (scene.narrationText || scene.narration) && (
+              <CaptionTrack
+                text={scene.narrationText || scene.narration}
+                position={data.captionPosition || "bottom_center"}
+                aspectRatio={data.aspectRatio || "landscape"}
+                fontFamily={data.captionFontFamily ? (resolveFontFamily(data.captionFontFamily) || data.captionFontFamily) : (resolvedFontFamily || undefined)}
+                fontSize={data.captionFontSize ? Number(data.captionFontSize) : undefined}
+                offset={data.captionOffset ?? 0}
+                speechDurationFrames={
+                  scene.speechDurationSeconds
+                    ? getSceneDurationFrames(scene.speechDurationSeconds, FPS, playbackSpeed)
+                    : undefined
+                }
+              />
+            )}
+          </Sequence>
+        ) : null,
+      )}
+
+      {data.logo && (
+        <LogoOverlay
+          src={staticFile(data.logo)}
+          position={data.logoPosition || "bottom_right"}
+          maxOpacity={data.logoOpacity ?? 0.9}
+          size={data.logoSize || "default"}
+          aspectRatio={data.aspectRatio || "landscape"}
+        />
+      )}
+
+      {data.bgmFile && (
+        <BackgroundMusic src={staticFile(data.bgmFile)} volume={data.bgmVolume ?? 0.10} scenes={data.scenes} />
+      )}
+    </AbsoluteFill>
+  );
+};
+

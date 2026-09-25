@@ -1,0 +1,641 @@
+import enum
+from datetime import datetime, timedelta
+from sqlalchemy import String, Text, Enum, DateTime, Integer, Boolean, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship, Session
+from sqlalchemy.types import TypeDecorator
+from app.database import Base
+
+
+class PlanTier(str, enum.Enum):
+    FREE = "free"
+    LITE = "lite"
+    STANDARD = "standard"
+    PRO = "pro"
+
+
+class AuthProvider(str, enum.Enum):
+    """The single sign-in provider an account is bound to.
+
+    An account is created by exactly one provider and stays bound to it for
+    life — we deliberately do not link providers, so an email registered with
+    Google can never be signed into with a password (and vice versa). Stored as
+    a plain VARCHAR rather than a DB enum so adding a provider is a code change,
+    not a Postgres type migration.
+
+    EMAIL is our own built-in provider: no external identity provider, no
+    subject id — the credential is ``User.password_hash`` and mailbox control
+    is proven by a one-time code before the account is created at all. It is
+    therefore the one provider with no id column, and is deliberately absent
+    from ``_PROVIDER_ID_COLUMN`` in services/auth_identity.py.
+
+    Apple and Microsoft were removed in ``drop_apple_microsoft_auth``; that
+    migration refuses to run while any row still carries those values, so the
+    enum can safely omit them — a stray legacy row would now raise on load
+    (see AuthProviderType) rather than silently degrade to a string.
+    """
+
+    GOOGLE = "google"
+    EMAIL = "email"
+
+    @property
+    def label(self) -> str:
+        """Human-facing provider name, for user-visible error copy.
+
+        An explicit mapping rather than a ternary: this string is what the
+        wrong-provider error tells the user to sign in with, so a provider
+        missing from the map must fail loudly instead of silently claiming to
+        be one of the others.
+        """
+        return _PROVIDER_LABELS[self]
+
+
+_PROVIDER_LABELS: dict[AuthProvider, str] = {
+    AuthProvider.GOOGLE: "Google",
+    AuthProvider.EMAIL: "Email",
+}
+
+
+class AuthProviderType(TypeDecorator):
+    """Store AuthProvider as a plain VARCHAR but read it back as the enum.
+
+    A bare ``mapped_column(String(16))`` typed as ``AuthProvider`` would hand
+    back raw strings on load, so ``user.auth_provider is AuthProvider.GOOGLE``
+    would silently be False and ``.label`` would not exist. Coercing here keeps
+    the column a VARCHAR (no Postgres enum type to migrate) while callers get a
+    real enum. Unknown values fail loudly rather than degrading to a string.
+    """
+
+    impl = String(16)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        return AuthProvider(value).value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return AuthProvider(value)
+
+
+# Every tier that pays. Use this instead of literal (PRO, STANDARD) tuples so a
+# future tier can never be silently omitted from a paid-feature gate.
+PAID_TIERS: tuple[PlanTier, ...] = (PlanTier.LITE, PlanTier.STANDARD, PlanTier.PRO)
+
+
+# Included videos for plan FREE (before video_limit_bonus). Used for limits and delete-account capping.
+FREE_TIER_INCLUDED_VIDEOS = 1
+
+# Included custom templates for plan FREE (before custom_template_bonus). Used for
+# the limit and for delete-account capping (mirrors FREE_TIER_INCLUDED_VIDEOS).
+FREE_TIER_CUSTOM_TEMPLATES = 1
+
+# AI-assisted edits granted per purchased video. Per-user, non-expirable pool,
+# added on top of the free grant. Spent only AFTER the monthly plan allowance
+# below is exhausted, so a period reset can never destroy purchased credits.
+AI_EDIT_CREDITS_PER_VIDEO = 20
+
+# Free AI-assisted edits every user starts with. A single per-user pool shared
+# across all their projects (replaces the old per-project allowance of 3).
+FREE_AI_EDIT_CREDITS = 6
+
+# ─── Per-plan monthly allowances ─────────────────────────────────────────────
+# Single source of truth for what each tier includes. Every lookup below uses an
+# EXPLICIT FREE default rather than a silent else-branch, so an unlisted tier
+# fails closed (free-tier limits) instead of being handed Pro's allowance.
+
+# Monthly AI-edit allowance, refreshed each billing period by
+# reset_ai_edit_period(). FREE has no periodic allowance — free users draw only
+# on the non-expirable purchased pool (FREE_AI_EDIT_CREDITS + per-video grants).
+PLAN_AI_EDIT_ALLOWANCE: dict[PlanTier, int] = {
+    PlanTier.LITE: 300,
+    PlanTier.STANDARD: 2000,
+    PlanTier.PRO: 5000,
+}
+
+# Base videos per billing period (before purchased/referral bonuses).
+PLAN_VIDEO_LIMIT: dict[PlanTier, int] = {
+    PlanTier.FREE: FREE_TIER_INCLUDED_VIDEOS,
+    PlanTier.LITE: 10,
+    PlanTier.STANDARD: 30,
+    PlanTier.PRO: 100,
+}
+
+# Base custom-template slots per billing period (before purchased $5 slots).
+PLAN_CUSTOM_TEMPLATES: dict[PlanTier, int] = {
+    PlanTier.FREE: FREE_TIER_CUSTOM_TEMPLATES,
+    PlanTier.LITE: 2,
+    PlanTier.STANDARD: 5,
+    PlanTier.PRO: 20,
+}
+
+# ─── Free-tools (/tools) generation limits ───────────────────────────────────
+# FREE allowances are LIFETIME (never reset — reactivating a deleted account
+# cannot refill them, see delete_account capping in routers/auth.py). Paid
+# allowances are PER BILLING PERIOD and refresh via reset_tool_usage_period().
+FREE_BOOK_COVER_LIMIT = 5
+PAID_BOOK_COVER_LIMIT = 30
+# The text generators (video script, YouTube description, thumbnail text) share
+# the same numbers but keep independent per-tool counters.
+FREE_TOOL_LIMIT = 10
+PAID_TOOL_LIMIT = 100
+# PDF -> Audio narration is a metered ElevenLabs synthesis, so it gets a single
+# taste on every plan rather than a plan-scaled allowance. Same number for FREE
+# and paid because upgrading genuinely does not lift this one.
+PDF_NARRATION_LIMIT = 1
+
+# Tool key -> (User counter attribute, FREE limit, paid limit). Single source of
+# truth for the quota gate in routers/free_tools.py and the delete-account cap.
+TOOL_QUOTAS: dict[str, tuple[str, int, int]] = {
+    "book_cover": ("free_book_covers_used", FREE_BOOK_COVER_LIMIT, PAID_BOOK_COVER_LIMIT),
+    "video_script": ("video_scripts_used", FREE_TOOL_LIMIT, PAID_TOOL_LIMIT),
+    "youtube_description": ("youtube_descriptions_used", FREE_TOOL_LIMIT, PAID_TOOL_LIMIT),
+    "thumbnail_text": ("thumbnail_texts_used", FREE_TOOL_LIMIT, PAID_TOOL_LIMIT),
+    "pdf_narration": ("pdf_narrations_used", PDF_NARRATION_LIMIT, PDF_NARRATION_LIMIT),
+}
+
+# Tools whose allowance is LIFETIME on *every* plan. The ordinary entries above
+# are lifetime only on FREE and refresh each billing period once paid; these
+# never refresh for anyone, so a new period (and a plan upgrade) grants nothing.
+# Both counter-mutating paths below — reset_tool_usage_period and
+# cap_tool_usage_to_free — must skip them. Keys must exist in TOOL_QUOTAS.
+LIFETIME_TOOLS: frozenset[str] = frozenset({"pdf_narration"})
+
+
+def _add_one_month(dt: datetime) -> datetime:
+    """Return ``dt`` advanced by exactly one calendar month.
+
+    Months vary in length, so we step by calendar month (same day-of-month,
+    same time-of-day) rather than a flat 30 days — this keeps the billing
+    anniversary stable and avoids the ~5-day/year drift a 30-day step causes.
+    When the next month is shorter than the anchor's day (e.g. Jan 31 → Feb),
+    the day is clamped to that month's last day. relativedelta handles both.
+    """
+    from dateutil.relativedelta import relativedelta
+
+    return dt + relativedelta(months=1)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    picture: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+
+    # ─── Identity ────────────────────────────────────────────────────────────
+    # google_id is set iff auth_provider is GOOGLE; an EMAIL account has none
+    # (its credential is password_hash below). It keeps a UNIQUE index, and
+    # NULLs are not considered equal by Postgres or SQLite, so any number of
+    # email accounts may leave it empty.
+    google_id: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True, index=True)
+    auth_provider: Mapped[AuthProvider] = mapped_column(
+        AuthProviderType(),
+        default=AuthProvider.GOOGLE,
+        server_default=AuthProvider.GOOGLE.value,
+        nullable=False,
+    )
+    # Argon2id encoded hash, set only for AuthProvider.EMAIL accounts — the
+    # social providers hold the credential themselves, so this stays NULL for
+    # them and verify_password() treats NULL as "never matches". A row only
+    # ever gets one once a one-time code has proven the mailbox (see
+    # services/email_verification.py), so an unverified email never puts a
+    # credential in this table.
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Bumped to invalidate every JWT already issued for this account. Our tokens
+    # are stateless, so without this there is no way to revoke one before it
+    # expires: signing out only clears the browser's copy, and changing a
+    # password would leave a thief's token working for the rest of its 72 hours.
+    # Every token carries the value current at issue (the "tv" claim) and
+    # get_current_user rejects any that no longer matches. Tokens minted before
+    # this column existed have no claim and are read as 0, which is the default,
+    # so adding it logs nobody out.
+    token_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+    # Subscription
+    plan: Mapped[PlanTier] = mapped_column(Enum(PlanTier), default=PlanTier.FREE)
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+    stripe_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    videos_used_this_period: Mapped[int] = mapped_column(Integer, default=0)
+    video_limit_bonus: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # per-video credits purchased
+    ai_edit_credits: Mapped[int] = mapped_column(Integer, default=FREE_AI_EDIT_CREDITS, server_default=str(FREE_AI_EDIT_CREDITS))  # PURCHASED pool: per-user, shared across all projects; starts at FREE_AI_EDIT_CREDITS, +20 per purchased video, non-expirable and never cleared by a period reset
+    ai_edits_used_this_period: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # draw against the plan's monthly AI-edit allowance; mirrors videos_used_this_period
+    custom_template_bonus: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # +1 custom-template slot per $5 purchase
+    custom_templates_created: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # lifetime counter, never decrements
+    retention_offer_shown_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    retention_offer_suppressed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    period_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    email_unsubscribed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+
+    # Last time we sent a post-checkout win-back coupon email; used to dedup
+    # the abandoned-checkout email when a user spawns several Stripe sessions.
+    last_coupon_email_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Set once the weekly "get started" onboarding email has been sent to this
+    # user; also doubles as the guard that it is never sent more than once.
+    get_started_email_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Lifetime referral counter — never reset on delete/reactivate so the cap cannot be bypassed
+    referrals_given: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+    # Permanent referral bonus videos (separate from expiring per-video purchase credits)
+    referral_video_bonus: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+    free_templates_downloaded: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # /tools generation counters. On FREE these are LIFETIME totals (never reset);
+    # on paid plans they are per-billing-period and cleared by
+    # ``reset_tool_usage_period``. Limits live in TOOL_QUOTAS above.
+    # (Name kept for backwards compatibility — it predates the other three.)
+    free_book_covers_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    video_scripts_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    youtube_descriptions_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    thumbnail_texts_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Lifetime on every plan — see LIFETIME_TOOLS.
+    pdf_narrations_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+    # Remembered narration emotion/tone default, auto-selected in the create form next time.
+    preferred_voice_emotion: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # A compact, reusable writing-style profile learned from accepted script
+    # review edits.  The version is used by background jobs for optimistic
+    # concurrency and also makes clearing the profile stale-job safe.
+    script_preferences: Mapped[str | None] = mapped_column(Text, nullable=True)
+    script_preferences_version: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    script_preferences_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
+    subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
+    custom_templates = relationship("CustomTemplate", back_populates="user", cascade="all, delete-orphan")
+    saved_voices = relationship("SavedVoice", back_populates="user", cascade="all, delete-orphan")
+    custom_voices = relationship("CustomVoice", back_populates="user", cascade="all, delete-orphan")
+    reviews = relationship("Review", back_populates="user", cascade="all, delete-orphan")
+    template_ratings = relationship("TemplateRating", back_populates="user", cascade="all, delete-orphan")
+    avatar_reviews = relationship("AvatarReview", back_populates="user", cascade="all, delete-orphan")
+    brand_kits = relationship("BrandKit", back_populates="user", cascade="all, delete-orphan")
+    crafted_template_entitlements = relationship("CraftedTemplateEntitlement", back_populates="user", cascade="all, delete-orphan")
+    template_change_jobs = relationship("ProjectTemplateChangeJob", back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
+    regenerate_script_jobs = relationship("ProjectRegenerateScriptJob", back_populates="user", foreign_keys="ProjectRegenerateScriptJob.user_id", cascade="all, delete-orphan", passive_deletes=True)
+    voice_change_jobs = relationship("ProjectVoiceChangeJob", back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
+    scene_avatar_jobs = relationship("SceneAvatarJob", back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
+    language_change_jobs = relationship("ProjectLanguageChangeJob", back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
+    social_connections = relationship("SocialConnection", back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
+    social_publish_jobs = relationship("SocialPublishJob", back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
+    referrals = relationship("Referral", foreign_keys="Referral.referrer_id", cascade="all, delete-orphan", passive_deletes=True)
+    survey_response = relationship("SurveyResponse", uselist=False, cascade="all, delete-orphan", passive_deletes=True)
+    script_preference_learning_jobs = relationship(
+        "ScriptPreferenceLearningJob",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    custom_video_styles = relationship(
+        "CustomVideoStyle", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    video_style_slots = relationship(
+        "UserVideoStyleSlot", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    video_style_settings = relationship(
+        "UserVideoStyleSettings", back_populates="user", cascade="all, delete-orphan",
+        passive_deletes=True, uselist=False,
+    )
+    builtin_video_styles = relationship(
+        "UserBuiltinVideoStyle", back_populates="user", cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    @property
+    def survey_submitted(self) -> bool:
+        return self.survey_response is not None
+
+    @property
+    def video_limit(self) -> int:
+        """Max videos allowed in the current billing period."""
+        base = PLAN_VIDEO_LIMIT.get(self.plan, FREE_TIER_INCLUDED_VIDEOS)
+        return base + (self.video_limit_bonus or 0) + (self.referral_video_bonus or 0)
+
+    @property
+    def ai_edit_allowance(self) -> int:
+        """This plan's monthly AI-edit allowance (0 on FREE)."""
+        return PLAN_AI_EDIT_ALLOWANCE.get(self.plan, 0)
+
+    @property
+    def ai_edit_allowance_remaining(self) -> int:
+        """Unspent portion of the monthly allowance, floored at zero.
+
+        Floored because a downgrade mid-period can leave ``ai_edits_used_this_period``
+        above the new (smaller) allowance; that user simply has 0 allowance left
+        for the rest of the cycle rather than a negative balance.
+        """
+        return max(0, self.ai_edit_allowance - (self.ai_edits_used_this_period or 0))
+
+    @property
+    def ai_edit_credits_available(self) -> int:
+        """Total spendable AI-edit budget: monthly allowance + purchased pool."""
+        return self.ai_edit_allowance_remaining + (self.ai_edit_credits or 0)
+
+    def reset_ai_edit_period(self) -> None:
+        """Refresh the monthly AI-edit allowance for a new billing period.
+
+        Only clears the per-period counter — the purchased ``ai_edit_credits``
+        pool is non-expirable and must never be touched here.
+        """
+        self.ai_edits_used_this_period = 0
+
+    @property
+    def can_create_video(self) -> bool:
+        return self.videos_used_this_period < self.video_limit
+
+    def ensure_purchased_credit_usable(self, qty: int) -> None:
+        """After granting `qty` per-video credits, guarantee they are net-positive
+        headroom even if pre-existing usage was at/over the (possibly lowered) limit.
+
+        Because ``video_limit`` is blended (base + bonus + referral), a purchase that
+        only bumps ``video_limit_bonus`` can be fully swallowed when ``videos_used_this_period``
+        was already >= the limit (e.g. after the FREE base was lowered). This clamps
+        ``videos_used_this_period`` so the just-purchased ``qty`` always yields ``qty``
+        usable videos. Only ever lowers videos_used — the ``>`` guard makes it a no-op
+        for users who aren't maxed, so it is safe for all plans. Call AFTER
+        ``video_limit_bonus`` has been incremented so ``self.video_limit`` is current.
+        """
+        if self.videos_used_this_period > self.video_limit - qty:
+            self.videos_used_this_period = max(0, self.video_limit - qty)
+
+    def _needs_lazy_monthly_reset(self, db: Session) -> bool:
+        """True if this user's monthly allotment must be reset in-app rather than
+        by Stripe's ``invoice.paid`` webhook.
+
+        Stripe re-invoices MONTHLY subscribers every month, so their reset is
+        webhook-driven and must NOT be double-handled here. Two cases never get a
+        monthly Stripe invoice and so depend on the in-app reset:
+
+          • **Lifetime** buyers — one-time payment, no recurring subscription, so
+            Stripe never re-invoices them at all (no ``stripe_subscription_id``).
+            Their allotment (30 Standard / 100 Pro) refreshes every month forever.
+          • **Annual** subscribers — Stripe issues ``invoice.paid`` only once a
+            YEAR, so without this the allotment would reset annually not monthly.
+        """
+        if self.plan not in PAID_TIERS:
+            return False
+
+        # Lifetime buyers have no recurring Stripe subscription → always in-app.
+        if not self.stripe_subscription_id:
+            return True
+
+        from app.models.subscription import (
+            Subscription,
+            SubscriptionStatus,
+            BillingInterval,
+        )
+
+        # Prefer the ACTIVE row, but fall back to the most recent matching row so a
+        # transient status blip (PAST_DUE→ACTIVE on an SCA/retry) can't silently
+        # freeze the reset forever. We only care about the plan's billing interval.
+        sub = (
+            db.query(Subscription)
+            .filter(
+                Subscription.stripe_subscription_id == self.stripe_subscription_id,
+                Subscription.status == SubscriptionStatus.ACTIVE,
+            )
+            .first()
+        )
+        if sub is None:
+            sub = (
+                db.query(Subscription)
+                .filter(
+                    Subscription.stripe_subscription_id == self.stripe_subscription_id,
+                )
+                .order_by(Subscription.created_at.desc())
+                .first()
+            )
+        return bool(
+            sub and sub.plan and sub.plan.billing_interval == BillingInterval.ANNUAL
+        )
+
+    def reset_billing_period(self, db: Session, new_period_start: datetime) -> None:
+        """Roll the monthly allotment for one billing cycle.
+
+        Mirrors the reset performed by ``_handle_invoice_paid`` for monthly
+        subscribers so annual and lifetime users get an identical monthly
+        rollover: usage cleared, expired per-video credits dropped, referral
+        bonus reset.
+        Does NOT commit — the caller controls the transaction (so a multi-cycle
+        catch-up commits once).
+        """
+        # Imported lazily to avoid a circular import (billing imports User).
+        from app.routers.billing import _count_active_per_video_credits
+
+        self.videos_used_this_period = 0
+        self.period_start = new_period_start
+        # Recount non-expired per-video credits so expired ones fall off, exactly
+        # as invoice.paid does. Usage is already 0 so no delta adjustment needed.
+        self.video_limit_bonus = _count_active_per_video_credits(self.id, db)
+        # Referral bonus is earned once per billing cycle.
+        self.referral_video_bonus = 0
+        # Custom-template allowance is per-period for paid plans: refresh the base
+        # (via created→0) and consume only the purchased slots actually used.
+        self.reset_custom_template_period()
+        # /tools generation allowances are per-period for paid plans (no-op on FREE,
+        # whose allowances are lifetime).
+        self.reset_tool_usage_period()
+        # Monthly AI-edit allowance refreshes; the purchased pool carries forward.
+        self.reset_ai_edit_period()
+
+    def _custom_template_base(self) -> int:
+        """Plan base custom-template allowance (before purchased bonus)."""
+        return PLAN_CUSTOM_TEMPLATES.get(self.plan, FREE_TIER_CUSTOM_TEMPLATES)
+
+    def reset_custom_template_period(self) -> None:
+        """Refresh the custom-template allowance for a new billing period.
+
+        The plan base refreshes each period (via ``custom_templates_created`` → 0).
+        Purchased $5 slots are NOT wiped wholesale — only the ones actually spent
+        this period are consumed: any templates created beyond the plan base drew
+        from the bonus, so deduct that overage from ``custom_template_bonus`` and
+        leave the remainder to carry forward. Called at every period-start point
+        (recurring renewal + plan-change/checkout resets). FREE users never reach
+        these paths, so their allowance stays a lifetime 1.
+
+        Uses the base of the plan held during the just-ended period (``self.plan``
+        at call time), which is the allowance the created templates were charged
+        against — correct for renewals, upgrades, and downgrades alike.
+        """
+        created = self.custom_templates_created or 0
+        overage = created - self._custom_template_base()
+        if overage > 0:
+            self.custom_template_bonus = max(0, (self.custom_template_bonus or 0) - overage)
+        self.custom_templates_created = 0
+
+    def tool_limit(self, tool: str) -> int:
+        """Generation allowance for a /tools generator on this user's plan.
+
+        FREE returns the lifetime allowance; STANDARD/PRO return the (larger)
+        per-billing-period allowance. Both tiers share the same paid numbers.
+        """
+        _, free_limit, paid_limit = TOOL_QUOTAS[tool]
+        return free_limit if self.plan == PlanTier.FREE else paid_limit
+
+    def tool_used(self, tool: str) -> int:
+        """Current usage count for a /tools generator."""
+        return getattr(self, TOOL_QUOTAS[tool][0], 0) or 0
+
+    def cap_tool_usage_to_free(self, was_paid: bool) -> None:
+        """Normalize /tools counters when an account drops to FREE.
+
+        Called from the delete-account teardown and the paid→FREE downgrade/cancel
+        paths so a user can never regain free-tier quota they already consumed:
+
+        * ``was_paid`` — set every counter to the FREE limit. A paid user already
+          had (or could have had) the free grant, so a low paid-era count (e.g.
+          3/30) must not become fresh free quota (3/5) on the way down.
+        * otherwise — only cap counters that exceed the FREE limit; a user below it
+          keeps their partial usage (e.g. 2/5 stays 2/5 across delete→reactivate).
+
+        LIFETIME_TOOLS are skipped: their FREE and paid limits are identical, so
+        there is no free-tier quota to claw back — and the ``was_paid`` branch
+        would actively *burn* an unused narration by setting the counter to the
+        limit on a downgrade the user may never have narrated under.
+        """
+        for tool, (attr, free_limit, _paid_limit) in TOOL_QUOTAS.items():
+            if tool in LIFETIME_TOOLS:
+                continue
+            if was_paid or (getattr(self, attr, 0) or 0) > free_limit:
+                setattr(self, attr, free_limit)
+
+    def reset_tool_usage_period(self) -> None:
+        """Refresh the /tools generation allowances for a new billing period.
+
+        Paid plans get a fresh allowance every cycle, so all counters go to 0.
+        FREE allowances are LIFETIME and must never be cleared here — otherwise a
+        free user would silently regain quota whenever a period-reset path ran.
+        Guarding inside this method (not at each call site) keeps that rule in one
+        place, since it is invoked from ``reset_billing_period`` plus every
+        plan-change/checkout reset in routers/billing.py.
+
+        LIFETIME_TOOLS are exempt on every plan — a per-account cap that a new
+        billing period silently refilled would not be a per-account cap.
+        """
+        if self.plan == PlanTier.FREE:
+            return
+        for tool, (attr, *_) in TOOL_QUOTAS.items():
+            if tool in LIFETIME_TOOLS:
+                continue
+            setattr(self, attr, 0)
+
+    def roll_video_period_if_due(self, db: Session) -> bool:
+        """Lazily reset the monthly video counter when Stripe won't.
+
+        Opportunistic fallback called at limit read/gate points. The authoritative
+        driver is the hourly scheduled task (see main.py); this ensures a user who
+        acts before that task runs still sees a fresh allotment.
+
+        Uses **calendar-month** cycles anchored on ``period_start`` (not a flat
+        30 days) so the reset lands on the same day-of-month each month and never
+        drifts as month lengths vary. Catches up every whole cycle that has
+        elapsed, so a user who was idle for several months is rolled to the
+        current cycle in one pass. Returns True if any reset occurred.
+        """
+        if not self._needs_lazy_monthly_reset(db):
+            return False
+
+        now = datetime.utcnow()
+
+        # No anchor yet (e.g. comp account, or a checkout path that didn't set it):
+        # start the clock now so future cycles are well-defined. Nothing to reset.
+        if not self.period_start:
+            self.period_start = now
+            db.commit()
+            return False
+
+        rolled = False
+        # Advance one calendar month at a time until the next boundary is in the
+        # future. Guard the loop count so a bad clock/anchor can't spin forever.
+        for _ in range(120):
+            next_start = _add_one_month(self.period_start)
+            if next_start > now:
+                break
+            self.reset_billing_period(db, next_start)
+            rolled = True
+
+        if rolled:
+            db.commit()
+        return rolled
+
+    @property
+    def custom_template_limit(self) -> int:
+        """Max custom templates this user may create (plan base + purchased slots)."""
+        return self._custom_template_base() + (self.custom_template_bonus or 0)
+
+    @property
+    def can_create_custom_template(self) -> bool:
+        return (self.custom_templates_created or 0) < self.custom_template_limit
+
+
+    def sync_video_limit_bonus(self, db: Session) -> bool:
+    
+        from app.models.subscription import Subscription, SubscriptionStatus, SubscriptionPlan
+
+        now = datetime.utcnow()
+        per_video_plan = db.query(SubscriptionPlan).filter_by(slug="per_video").first()
+        if not per_video_plan:
+            return False
+
+        # Sum Subscription.quantity so slider packs (N credits in one row)
+        # are counted correctly.
+        active_credits = int(
+            db.query(func.coalesce(func.sum(Subscription.quantity), 0))
+            .filter(
+                Subscription.user_id == self.id,
+                Subscription.plan_id == per_video_plan.id,
+                Subscription.status == SubscriptionStatus.COMPLETED,
+                (
+                    (Subscription.current_period_end == None) |
+                    (Subscription.current_period_end > now)
+                ),
+            )
+            .scalar() or 0
+        )
+
+        current_bonus = self.video_limit_bonus or 0
+
+        total_purchased_credits = int(
+            db.query(func.coalesce(func.sum(Subscription.quantity), 0))
+            .filter(
+                Subscription.user_id == self.id,
+                Subscription.plan_id == per_video_plan.id,
+                Subscription.status == SubscriptionStatus.COMPLETED,
+            )
+            .scalar() or 0
+        )
+
+        expired_credits = total_purchased_credits - active_credits
+
+        # Only reduce expired portion
+        if expired_credits > 0 and self.plan != PlanTier.FREE:
+            new_bonus = max(0, current_bonus - expired_credits)
+
+            print(
+                f"[USER] sync_video_limit_bonus: user {self.id} "
+                f"expired {expired_credits}, bonus {current_bonus} → {new_bonus}"
+            )
+
+            self.video_limit_bonus = new_bonus
+            db.commit()
+            return True
+
+        return False

@@ -1,0 +1,953 @@
+{
+  "id": "gridcraft",
+  "name": "Gridcraft",
+  "new_template": false,
+  "description": "Bento grid layouts with editorial typography and data clarity. Spatial content arrangement with accent-pop cells. SaaS landing page in motion.",
+  "genres": [
+    "Technology",
+    "Business"
+  ],
+  "preview_colors": {
+    "accent": "#F97316",
+    "bg": "#FAFAFA",
+    "text": "#171717"
+  },
+  "composition_id": "GridcraftVideo",
+  "hero_layout": "bento_hero",
+  "fallback_layout": "editorial_body",
+  "valid_layouts": [
+    "bento_hero",
+    "bento_features",
+    "bento_highlight",
+    "editorial_body",
+    "kpi_grid",
+    "bento_compare",
+    "bento_code",
+    "pull_quote",
+    "bento_steps",
+    "data_visualisation",
+    "ticker_table",
+    "ending_socials"
+  ],
+  "layout_prop_schema": {
+    "bento_hero": {
+      "label": "Bento Hero",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 72,
+          "landscape": 128
+        },
+        "descriptionFontSize": {
+          "portrait": 30,
+          "landscape": 41
+        },
+        "categoryFontSize": {
+          "portrait": 24,
+          "landscape": 28
+        },
+        "tagline": "Ship faster with less friction",
+        "category": "Product"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "categoryFontSize",
+          "label": "Category Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "tagline",
+          "label": "Tagline",
+          "type": "string"
+        },
+        {
+          "key": "category",
+          "label": "Category",
+          "type": "string"
+        }
+      ]
+    },
+    "bento_features": {
+      "label": "Bento Features",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 41,
+          "landscape": 40
+        },
+        "descriptionFontSize": {
+          "portrait": 40,
+          "landscape": 27
+        },
+        "features": [
+          {
+            "icon": "⚡",
+            "label": "Fast Setup",
+            "description": "Go live in minutes"
+          },
+          {
+            "icon": "🧠",
+            "label": "Smart Logic",
+            "description": "Automate key decisions"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Feature Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Feature Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "features",
+          "label": "Features",
+          "type": "object_array",
+          "maxItems": 8,
+          "subFields": [
+            {
+              "key": "icon",
+              "label": "Icon"
+            },
+            {
+              "key": "label",
+              "label": "Label"
+            },
+            {
+              "key": "description",
+              "label": "Description"
+            }
+          ]
+        }
+      ]
+    },
+    "bento_highlight": {
+      "label": "Bento Highlight",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 50,
+          "landscape": 52
+        },
+        "descriptionFontSize": {
+          "portrait": 47,
+          "landscape": 28
+        },
+        "subtitle": "Why this matters",
+        "mainPoint": "A single insight can reframe your roadmap.",
+        "supportingFacts": [
+          "Faster iteration",
+          "Lower cost",
+          "Better outcomes"
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "subtitle",
+          "label": "Subtitle",
+          "type": "string"
+        },
+        {
+          "key": "mainPoint",
+          "label": "Main Point",
+          "type": "text"
+        },
+        {
+          "key": "supportingFacts",
+          "label": "Supporting Facts",
+          "type": "string_array",
+          "maxItems": 8
+        }
+      ]
+    },
+    "editorial_body": {
+      "label": "Editorial Body",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 65,
+          "landscape": 64
+        },
+        "descriptionFontSize": {
+          "portrait": 37,
+          "landscape": 38
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Heading Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 140,
+          "step": 1
+        }
+      ]
+    },
+    "kpi_grid": {
+      "label": "KPI Grid",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 57,
+          "landscape": 75
+        },
+        "descriptionFontSize": {
+          "portrait": 45,
+          "landscape": 39
+        },
+        "dataPoints": [
+          {
+            "label": "Growth",
+            "value": "42%"
+          },
+          {
+            "label": "CAC",
+            "value": "$18"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Metric Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Metric Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "dataPoints",
+          "label": "Data Points",
+          "type": "object_array",
+          "maxItems": 8,
+          "subFields": [
+            {
+              "key": "label",
+              "label": "Label"
+            },
+            {
+              "key": "value",
+              "label": "Value"
+            }
+          ]
+        }
+      ]
+    },
+    "bento_compare": {
+      "label": "Bento Compare",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 49,
+          "landscape": 49
+        },
+        "descriptionFontSize": {
+          "portrait": 29,
+          "landscape": 35
+        },
+        "leftLabel": "Before",
+        "rightLabel": "After",
+        "leftDescription": "Slow, manual process",
+        "rightDescription": "Automated, predictable delivery",
+        "verdict": "After wins"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Label Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "leftLabel",
+          "label": "Left Label",
+          "type": "string"
+        },
+        {
+          "key": "rightLabel",
+          "label": "Right Label",
+          "type": "string"
+        },
+        {
+          "key": "leftDescription",
+          "label": "Left Description",
+          "type": "text"
+        },
+        {
+          "key": "rightDescription",
+          "label": "Right Description",
+          "type": "text"
+        },
+        {
+          "key": "verdict",
+          "label": "Verdict",
+          "type": "string"
+        }
+      ]
+    },
+    "bento_code": {
+      "label": "Bento Code",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 39,
+          "landscape": 37
+        },
+        "descriptionFontSize": {
+          "portrait": 26,
+          "landscape": 27
+        },
+        "codeLanguage": "javascript",
+        "codeLines": [
+          "const launch = true;",
+          "if (launch) deploy();"
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Header Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Code Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "codeLanguage",
+          "label": "Language",
+          "type": "string"
+        },
+        {
+          "key": "codeLines",
+          "label": "Code Lines",
+          "type": "string_array",
+          "maxItems": 20
+        }
+      ]
+    },
+    "pull_quote": {
+      "label": "Pull Quote",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 49,
+          "landscape": 50
+        },
+        "descriptionFontSize": {
+          "portrait": 33,
+          "landscape": 29
+        },
+        "quote": "Good design is obvious. Great design is transparent.",
+        "attribution": "Joe Sparano",
+        "highlightPhrase": "Great design"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Quote Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Attribution Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "quote",
+          "label": "Quote",
+          "type": "text"
+        },
+        {
+          "key": "attribution",
+          "label": "Attribution",
+          "type": "string"
+        },
+        {
+          "key": "highlightPhrase",
+          "label": "Highlight Phrase",
+          "type": "string"
+        }
+      ]
+    },
+    "bento_steps": {
+      "label": "Bento Steps",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 47,
+          "landscape": 42
+        },
+        "descriptionFontSize": {
+          "portrait": 26,
+          "landscape": 22
+        },
+        "steps": [
+          {
+            "label": "Plan",
+            "description": "Define objective and scope"
+          },
+          {
+            "label": "Build",
+            "description": "Ship core functionality"
+          },
+          {
+            "label": "Scale",
+            "description": "Automate and optimize"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Step Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 160,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Step Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "steps",
+          "label": "Steps",
+          "type": "object_array",
+          "maxItems": 8,
+          "subFields": [
+            {
+              "key": "label",
+              "label": "Label"
+            },
+            {
+              "key": "description",
+              "label": "Description"
+            }
+          ]
+        }
+      ]
+    },
+    "data_visualisation": {
+      "label": "Data Visualisation",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 89,
+          "landscape": 57
+        },
+        "descriptionFontSize": {
+          "portrait": 32,
+          "landscape": 28
+        },
+        "chartType": "line",
+        "chartSummary": "Values climb steadily across the set before leveling near the top.",
+        "chartTable": {
+          "headers": [
+            "Stage",
+            "Value",
+            "Prior"
+          ],
+          "rows": [
+            [
+              "A",
+              "298",
+              "272"
+            ],
+            [
+              "B",
+              "308",
+              "268"
+            ],
+            [
+              "C",
+              "315",
+              "261"
+            ],
+            [
+              "D",
+              "324",
+              "255"
+            ],
+            [
+              "E",
+              "318",
+              "259"
+            ]
+          ]
+        },
+        "chartYAxisTicks": [],
+        "subtitle": "Stage",
+        "yAxisLabel": "Value",
+        "barPrimaryColor": "#F97316",
+        "barSecondaryColor": "#171717",
+        "barTertiaryColor": "#6B7280"
+      },
+      "scene_defaults": {
+        "title": "The data at a glance",
+        "narration": "A clean read on the key figures.",
+        "durationSeconds": 6
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "chartType",
+          "label": "Chart Type",
+          "type": "select",
+          "options": [
+            {
+              "label": "Auto (infer from data)",
+              "value": "auto"
+            },
+            {
+              "label": "Line",
+              "value": "line"
+            },
+            {
+              "label": "Bar",
+              "value": "bar"
+            },
+            {
+              "label": "Histogram",
+              "value": "histogram"
+            }
+          ]
+        },
+        {
+          "key": "chartTable",
+          "label": "Chart data — col 1: X labels; cols 2–4: up to 3 numeric series (max 20 data rows). Use bar for named categories; histogram for bins/ranges (0–10, <5, 50+).",
+          "type": "chart_table"
+        },
+        {
+          "key": "yAxisLabel",
+          "label": "Y-axis label (overrides chart header)",
+          "type": "string"
+        },
+        {
+          "key": "subtitle",
+          "label": "X-axis / category caption (overrides first column header)",
+          "type": "string"
+        },
+        {
+          "key": "chartYAxisTicks",
+          "label": "Y-axis tick labels (top → bottom; 2–4 values)",
+          "type": "string_array"
+        },
+        {
+          "key": "chartSummary",
+          "label": "Chart summary (short read beside the graphic)",
+          "type": "string"
+        },
+        {
+          "key": "barPrimaryColor",
+          "label": "Series color 1",
+          "type": "color"
+        },
+        {
+          "key": "barSecondaryColor",
+          "label": "Series color 2",
+          "type": "color"
+        },
+        {
+          "key": "barTertiaryColor",
+          "label": "Series color 3",
+          "type": "color"
+        }
+      ]
+    },
+    "ending_socials": {
+      "label": "Ending / Follow along",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 87,
+          "landscape": 80
+        },
+        "descriptionFontSize": {
+          "portrait": 41,
+          "landscape": 34
+        },
+        "hideImage": true,
+        "socials": [
+          {
+            "platform": "facebook",
+            "enabled": "true",
+            "label": "Facebook"
+          },
+          {
+            "platform": "instagram",
+            "enabled": "true",
+            "label": "Instagram"
+          },
+          {
+            "platform": "youtube",
+            "enabled": "true",
+            "label": "YouTube"
+          },
+          {
+            "platform": "medium",
+            "enabled": "false",
+            "label": "Medium"
+          },
+          {
+            "platform": "substack",
+            "enabled": "false",
+            "label": "Substack"
+          },
+          {
+            "platform": "linkedin",
+            "enabled": "false",
+            "label": "LinkedIn"
+          },
+          {
+            "platform": "tiktok",
+            "enabled": "false",
+            "label": "TikTok"
+          }
+        ],
+        "showWebsiteButton": true,
+        "websiteLink": "https://yourwebsite.com",
+        "ctaButtonText": "Get started"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subtext Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "ctaButtonText",
+          "label": "CTA Button Text",
+          "type": "string"
+        },
+        {
+          "key": "socials",
+          "label": "Social Platforms",
+          "type": "object_array",
+          "maxItems": 7,
+          "subFields": [
+            {
+              "key": "platform",
+              "label": "Platform (facebook, instagram, youtube, medium, substack, linkedin, tiktok)"
+            },
+            {
+              "key": "enabled",
+              "label": "Enabled (true/false)"
+            },
+            {
+              "key": "label",
+              "label": "Label / handle / URL text"
+            }
+          ]
+        },
+        {
+          "key": "showWebsiteButton",
+          "label": "Show Website CTA Button",
+          "type": "select",
+          "options": [
+            {
+              "label": "Enabled",
+              "value": "true"
+            },
+            {
+              "label": "Disabled",
+              "value": "false"
+            }
+          ]
+        },
+        {
+          "key": "websiteLink",
+          "label": "Website Link",
+          "type": "string",
+          "placeholder": "https://yourwebsite.com"
+        }
+      ]
+    },
+    "ending_socials__v2": {
+      "label": "Ending / Follow along — Action Footer",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 109,
+          "landscape": 108
+        },
+        "descriptionFontSize": {
+          "portrait": 46,
+          "landscape": 61
+        },
+        "hideImage": true,
+        "socials": [
+          {
+            "platform": "facebook",
+            "enabled": "true",
+            "label": "Facebook"
+          },
+          {
+            "platform": "instagram",
+            "enabled": "true",
+            "label": "Instagram"
+          },
+          {
+            "platform": "youtube",
+            "enabled": "true",
+            "label": "YouTube"
+          },
+          {
+            "platform": "medium",
+            "enabled": "false",
+            "label": "Medium"
+          },
+          {
+            "platform": "substack",
+            "enabled": "false",
+            "label": "Substack"
+          },
+          {
+            "platform": "linkedin",
+            "enabled": "false",
+            "label": "LinkedIn"
+          },
+          {
+            "platform": "tiktok",
+            "enabled": "false",
+            "label": "TikTok"
+          }
+        ],
+        "showWebsiteButton": true,
+        "websiteLink": "https://yourwebsite.com",
+        "ctaButtonText": "Get started"
+      }
+    },
+    "ticker_table": {
+      "label": "Data Table",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 90,
+          "landscape": 87
+        },
+        "descriptionFontSize": {
+          "portrait": 39,
+          "landscape": 33
+        },
+        "tickerTitle": "Key Figures",
+        "tickerFootnote": "Source: editorial research",
+        "tickerHighlightCol": 2,
+        "tickerTable": {
+          "headers": [
+            "Category",
+            "Value",
+            "Change"
+          ],
+          "rows": [
+            [
+              "Item A",
+              "1,240",
+              "+4.2%"
+            ],
+            [
+              "Item B",
+              "980",
+              "-1.8%"
+            ],
+            [
+              "Item C",
+              "2,100",
+              "+7.1%"
+            ]
+          ]
+        }
+      },
+      "scene_defaults": {
+        "title": "The numbers at a glance",
+        "narration": "Key figures from the story.",
+        "durationSeconds": 6
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "tickerTitle",
+          "label": "Table subtitle",
+          "type": "string"
+        },
+        {
+          "key": "tickerTable",
+          "label": "Table data — col 1: row labels; cols 2–6: values (max 20 rows, 6 cols)",
+          "type": "ticker_table"
+        },
+        {
+          "key": "tickerHighlightCol",
+          "label": "Highlight column index (0-based, -1 to disable)",
+          "type": "number",
+          "min": -1,
+          "max": 5,
+          "step": 1
+        },
+        {
+          "key": "tickerFootnote",
+          "label": "Source / Footnote",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "layout_variants": {
+    "ending_socials": [
+      "ending_socials",
+      "ending_socials__v2"
+    ]
+  },
+  "layout_variant_labels": {
+    "ending_socials": "Classic",
+    "ending_socials__v2": "Action Footer"
+  },
+  "layouts_without_image": [
+    "bento_code",
+    "editorial_body",
+    "data_visualisation",
+    "ending_socials",
+    "ticker_table"
+  ]
+}

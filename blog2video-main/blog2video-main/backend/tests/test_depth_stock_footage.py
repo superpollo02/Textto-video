@@ -1,0 +1,2633 @@
+"""
+Depth tier — stock footage (Pexels/Pixabay clips attached to scenes).
+
+Covers the two things most likely to break silently:
+
+  1. The image auto-assignment cascade in ``write_remotion_data`` must treat a
+     scene holding a clip as FULL. If it doesn't, a generic scraped image is
+     assigned underneath and the scene renders a still *and* a clip.
+  2. Provider response parsing — the shapes were verified against the live docs,
+     so these lock them in against drift.
+"""
+import json
+import textwrap
+from types import SimpleNamespace
+
+import pytest
+
+from app.models.project import Project, ProjectStatus
+from app.models.scene import Scene
+from app.services import stock_footage
+
+pytestmark = pytest.mark.depth
+
+
+@pytest.fixture(autouse=True)
+def _clear_stock_search_cache():
+    """Provider responses are cached for 24h, so without this a monkeypatched
+    payload from one test leaks into the next (same query + params = same key)."""
+    stock_footage.clear_search_cache()
+    yield
+    stock_footage.clear_search_cache()
+
+
+@pytest.fixture(autouse=True)
+def _both_provider_keys_present(monkeypatch):
+    """search() skips a provider with no API key, so tests that monkeypatch the
+    provider functions must still look configured. Real deployments may run with
+    one key (Pixabay-only); tests that care about that set it explicitly."""
+    monkeypatch.setattr(stock_footage.settings, "PEXELS_API_KEY", "test-pexels", raising=False)
+    monkeypatch.setattr(stock_footage.settings, "PIXABAY_API_KEY", "test-pixabay", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_llm_query_gen(monkeypatch):
+    """The pipeline now writes stock queries with an LLM. Stub it out: these
+    tests must not make network calls, and a real one costs ~7s per scene and
+    fails in CI. Returning {} exercises the keyword-fallback path."""
+    async def _none(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "app.dspy_modules.stock_query_gen.generate_stock_queries", _none
+    )
+
+
+# ─── Provider parsing ───────────────────────────────────────────────────────
+
+
+def test_pexels_search__sends_max_duration_to_api(monkeypatch):
+    captured: dict = {}
+
+    def fake_get(url, **kwargs):
+        captured.update(kwargs.get("params") or {})
+        return SimpleNamespace(json=lambda: {"videos": []}, raise_for_status=lambda: None)
+
+    monkeypatch.setattr(stock_footage.settings, "PEXELS_API_KEY", "k", raising=False)
+    monkeypatch.setattr(stock_footage.requests, "get", fake_get)
+
+    stock_footage._pexels_search("news", 6, 1, "landscape")
+
+    assert captured["max_duration"] == int(stock_footage.MAX_CLIP_DURATION_SECONDS)
+    assert captured["size"] == "medium"
+    assert captured["per_page"] == 6
+
+
+def test_pexels_search__prefers_720p_rendition_when_available(monkeypatch):
+    """Without a scene box, prefer a 720p file over 1080p when both exist."""
+    payload = {
+        "videos": [{
+            "id": 123, "width": 1920, "height": 1080, "url": "u", "image": "i",
+            "duration": 8, "user": {"name": "Jane"},
+            "video_files": [
+                {"width": 1280, "height": 720, "fps": 30, "link": "https://cdn/720.mp4"},
+                {"width": 1920, "height": 1080, "fps": 30, "link": "https://cdn/1080.mp4"},
+            ],
+        }]
+    }
+    monkeypatch.setattr(stock_footage.settings, "PEXELS_API_KEY", "k", raising=False)
+    monkeypatch.setattr(
+        stock_footage.requests, "get",
+        lambda *a, **k: SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None),
+    )
+
+    clips = stock_footage._pexels_search("news", 6, 1, "landscape")
+    assert clips[0].download_url == "https://cdn/720.mp4"
+    assert clips[0].height == 720
+
+
+def test_pexels_search__picks_largest_variant_at_or_under_1080p(monkeypatch):
+    """4K variants are skipped: renders top out at 1080p."""
+    payload = {
+        "videos": [
+            {
+                "id": 123,
+                "width": 3840,
+                "height": 2160,
+                "url": "https://www.pexels.com/video/x-123/",
+                "image": "https://images.pexels.com/thumb.jpg",
+                "duration": 12,
+                "user": {"id": 7, "name": "Jane Doe", "url": "https://pexels.com/@jane"},
+                "video_files": [
+                    {"id": 1, "quality": "sd", "file_type": "video/mp4",
+                     "width": 640, "height": 360, "fps": 25, "link": "https://cdn/360.mp4"},
+                    {"id": 2, "quality": "hd", "file_type": "video/mp4",
+                     "width": 1920, "height": 1080, "fps": 30, "link": "https://cdn/1080.mp4"},
+                    {"id": 3, "quality": "hd", "file_type": "video/mp4",
+                     "width": 3840, "height": 2160, "fps": 30, "link": "https://cdn/2160.mp4"},
+                ],
+            }
+        ]
+    }
+    monkeypatch.setattr(stock_footage.settings, "PEXELS_API_KEY", "k", raising=False)
+    monkeypatch.setattr(
+        stock_footage.requests, "get",
+        lambda *a, **k: SimpleNamespace(
+            json=lambda: payload, raise_for_status=lambda: None
+        ),
+    )
+
+    clips = stock_footage._pexels_search("news", 10, 1, "landscape")
+
+    assert len(clips) == 1
+    clip = clips[0]
+    assert clip.download_url == "https://cdn/1080.mp4"   # not the 2160 variant
+    assert clip.height == 1080
+    assert clip.provider == "pexels"
+    assert clip.author == "Jane Doe"
+    assert clip.page_url == "https://www.pexels.com/video/x-123/"
+
+
+def test_pexels_search__falls_back_to_smallest_when_all_variants_exceed_1080p(monkeypatch):
+    payload = {
+        "videos": [{
+            "id": 9, "width": 3840, "height": 2160, "url": "u", "image": "i", "duration": 5,
+            "user": {"name": "A"},
+            "video_files": [
+                {"width": 3840, "height": 2160, "fps": 30, "link": "https://cdn/2160.mp4"},
+                {"width": 2560, "height": 1440, "fps": 30, "link": "https://cdn/1440.mp4"},
+            ],
+        }]
+    }
+    monkeypatch.setattr(stock_footage.settings, "PEXELS_API_KEY", "k", raising=False)
+    monkeypatch.setattr(
+        stock_footage.requests, "get",
+        lambda *a, **k: SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None),
+    )
+
+    clips = stock_footage._pexels_search("q", 10, 1, None)
+    # Downscaled in ffmpeg rather than dropping an otherwise-good result.
+    assert clips[0].download_url == "https://cdn/1440.mp4"
+
+
+def test_pixabay_search__filters_portrait_client_side(monkeypatch):
+    """Pixabay's video API has no `orientation` param, so we filter ourselves."""
+    payload = {
+        "hits": [
+            {   # landscape — must be dropped when portrait is requested
+                "id": 1, "pageURL": "https://pixabay.com/videos/1/", "duration": 10,
+                "user": "Bob", "picture_id": "abc",
+                "videos": {"large": {"url": "https://cdn/l1.mp4", "width": 1920,
+                                     "height": 1080, "size": 100}},
+            },
+            {   # portrait — kept
+                "id": 2, "pageURL": "https://pixabay.com/videos/2/", "duration": 8,
+                "user": "Ann", "picture_id": "def",
+                "videos": {"large": {"url": "https://cdn/l2.mp4", "width": 1080,
+                                     "height": 1920, "size": 100}},
+            },
+        ]
+    }
+    monkeypatch.setattr(stock_footage.settings, "PIXABAY_API_KEY", "k", raising=False)
+    monkeypatch.setattr(
+        stock_footage.requests, "get",
+        lambda *a, **k: SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None),
+    )
+
+    clips = stock_footage._pixabay_search("q", 10, 1, "portrait")
+
+    assert [c.id for c in clips] == ["2"]
+    assert clips[0].author == "Ann"
+
+
+def test_fps_rank__orders_by_how_cleanly_a_rate_maps_onto_30():
+    """30 first, clean multiples next, unknown mid, genuine resampling last."""
+    assert stock_footage.fps_rank(30.0) == 0
+    # 29.97 is a sub-frame nudge; 60/120 decimate cleanly.
+    assert stock_footage.fps_rank(29.97) == 1
+    assert stock_footage.fps_rank(60.0) == 1
+    assert stock_footage.fps_rank(120.0) == 1
+    # Pixabay reports no fps — unknown, not known-bad, so it beats 25/24.
+    assert stock_footage.fps_rank(None) == 2
+    for bad in (25.0, 24.0, 23.98, 50.0, 100.0):
+        assert stock_footage.fps_rank(bad) == 3, bad
+    assert stock_footage.fps_rank(30.0) < stock_footage.fps_rank(25.0)
+
+
+def test_search__sorts_30fps_first_and_keeps_provider_interleave(monkeypatch):
+    """Ranking must reorder by fps while preserving interleave within a rank."""
+    def clip(provider, cid, fps):
+        return stock_footage.StockClip(
+            provider=provider, id=cid, preview_url="p", thumbnail_url="t",
+            download_url="d", width=1920, height=1080, duration=5.0, fps=fps,
+            author="a", page_url="u",
+        )
+
+    monkeypatch.setattr(
+        stock_footage, "_pexels_search",
+        lambda *a, **k: [clip("pexels", "p25", 25.0), clip("pexels", "p30", 30.0)],
+    )
+    monkeypatch.setattr(
+        stock_footage, "_pixabay_search",
+        lambda *a, **k: [clip("pixabay", "x-none", None)],
+    )
+
+    out = stock_footage.search("q")
+    assert [c.id for c in out] == [
+        "p30",      # exact 30 wins
+        "x-none",   # unknown fps beats known-bad
+        "p25",      # genuine resampling last
+    ]
+
+
+def test_search__caps_results(monkeypatch):
+    """search() returns at most MAX_SEARCH_RESULTS."""
+    def clip(provider, cid, duration):
+        return stock_footage.StockClip(
+            provider=provider, id=cid, preview_url="p", thumbnail_url="t",
+            download_url="d", width=1920, height=1080, duration=duration, fps=30.0,
+            author="a", page_url="u",
+        )
+
+    monkeypatch.setattr(
+        stock_footage, "_pexels_search",
+        lambda *a, **k: [clip("pexels", f"p{i}", 5.0) for i in range(20)],
+    )
+    monkeypatch.setattr(
+        stock_footage, "_pixabay_search",
+        lambda *a, **k: [clip("pixabay", "x-ok", 12.0)],
+    )
+
+    out = stock_footage.search("q")
+    assert len(out) == stock_footage.MAX_SEARCH_RESULTS
+
+
+def test_pick_top_for_query__requests_one_clip(monkeypatch):
+    captured: dict = {}
+
+    def fake_search(*args, **kwargs):
+        captured.update(kwargs)
+        return [
+            stock_footage.StockClip(
+                provider="pexels", id="1", preview_url="p", thumbnail_url="t",
+                download_url="d", width=1280, height=720, duration=5.0, fps=30.0,
+                author="a", page_url="u",
+            )
+        ]
+
+    monkeypatch.setattr(stock_footage, "search", fake_search)
+
+    clip = stock_footage.pick_top_for_query("startup", orientation="landscape")
+    assert clip is not None
+    assert clip.id == "1"
+    assert captured["per_page"] == stock_footage.AUTO_SEARCH_PER_PAGE
+    assert captured["max_results"] == 1
+
+
+def test_pick_rendition__smallest_that_covers_the_box():
+    files = [
+        {"width": 426, "height": 240}, {"width": 640, "height": 360},
+        {"width": 960, "height": 540}, {"width": 1280, "height": 720},
+        {"width": 1920, "height": 1080},
+    ]
+    # A full-bleed box needs the full 1080p rendition.
+    assert stock_footage._pick_rendition(files, 1920, 1080)["height"] == 1080
+    # A smaller box only needs a rendition that covers it.
+    assert stock_footage._pick_rendition(files, 640, 360)["height"] == 360
+    assert stock_footage._pick_rendition(files, 700, 400)["height"] == 540
+    # Unknown box → prefer 720p when available, else fall back to 1080p.
+    assert stock_footage._pick_rendition(files, None, None)["height"] == 720
+    # 4K-only upload → smallest, and let ffmpeg downscale.
+    assert stock_footage._pick_rendition(
+        [{"width": 3840, "height": 2160}, {"width": 2560, "height": 1440}], 1920, 1080
+    )["height"] == 1440
+
+
+def test_search__missing_api_keys_yield_no_results_rather_than_erroring(monkeypatch):
+    monkeypatch.setattr(stock_footage.settings, "PEXELS_API_KEY", "", raising=False)
+    monkeypatch.setattr(stock_footage.settings, "PIXABAY_API_KEY", "", raising=False)
+    assert stock_footage.search("anything") == []
+
+
+def test_search__empty_query_short_circuits():
+    assert stock_footage.search("   ") == []
+
+
+# ─── Render-workspace assignment ────────────────────────────────────────────
+
+
+def _newscast_project(db, user, n_scenes=2):
+    project = Project(user_id=user.id, name="Clips", blog_url="https://c.test",
+                      status=ProjectStatus.GENERATED, template="newscast")
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    scenes = []
+    for i in range(1, n_scenes + 1):
+        s = Scene(project_id=project.id, order=i, title=f"S{i}",
+                  narration_text="n", visual_description="v",
+                  remotion_code=json.dumps({"layout": "anchor_narrative", "layoutProps": {}}))
+        db.add(s)
+        scenes.append(s)
+    db.commit()
+    for s in scenes:
+        db.refresh(s)
+    return project, scenes
+
+
+def test_project_response_serializes_video_asset_audio_field(
+    client, db_session, paid_user, auth
+):
+    """AssetOut must expose audio_variant_filename + duration.
+
+    The editor decides whether to show the audio toggle from these; if they are
+    dropped in serialization every clip looks silent (the reported bug).
+    """
+    from app.models.asset import Asset, AssetType
+
+    project = Project(user_id=paid_user.id, name="V", blog_url="https://v.test",
+                      status=ProjectStatus.GENERATED, template="newscast")
+    db_session.add(project); db_session.commit(); db_session.refresh(project)
+    db_session.add(Asset(
+        project_id=project.id, asset_type=AssetType.VIDEO,
+        local_path="/x.mp4", filename="clip.mp4", excluded=False,
+        duration_seconds=7.0, width=1920, height=1080,
+        source_provider="pexels", source_author="A",
+        audio_variant_filename="clip_audio.mp4",
+    ))
+    db_session.commit()
+
+    resp = client.get(f"/api/projects/{project.id}", headers=auth(paid_user))
+    assert resp.status_code == 200, resp.text
+    vids = [a for a in resp.json()["assets"] if a["asset_type"] == "video"]
+    assert len(vids) == 1
+    v = vids[0]
+    assert v["audio_variant_filename"] == "clip_audio.mp4"
+    assert v["duration_seconds"] == 7.0
+    assert v["width"] == 1920
+
+
+def test_upload_endpoint_creates_asset_but_does_not_link_scene(
+    client, db_session, paid_user, auth, tmp_path, monkeypatch
+):
+    """Staging contract: uploading a clip must NOT touch the scene descriptor.
+
+    The scene link is written later by the normal scene Save. If upload eagerly
+    wrote ``assignedVideo`` the 'stage then cancel' flow would leak clips onto
+    scenes the user never confirmed.
+    """
+    from app.services import stock_footage
+
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=1)
+    scene = scenes[0]
+    descriptor_before = scene.remotion_code
+
+    # Stub the network + ffmpeg boundaries so no real download/transcode happens.
+    def _fake_download(url):
+        p = tmp_path / "dl.mp4"
+        p.write_bytes(b"x")
+        return str(p)
+
+    def _fake_normalise(src, dest, with_audio=False):
+        import os
+        os.makedirs(os.path.dirname(dest), exist_ok=True)  # real normalise() does this
+        with open(dest, "wb") as f:
+            f.write(b"y")
+
+    monkeypatch.setattr(stock_footage, "download_to_temp", _fake_download)
+    monkeypatch.setattr(stock_footage, "normalise", _fake_normalise)
+    monkeypatch.setattr(stock_footage, "has_audio_stream", lambda p: False)
+    monkeypatch.setattr(
+        stock_footage, "probe",
+        lambda p: {"duration_seconds": 8.0, "width": 1920, "height": 1080, "fps": 30.0},
+    )
+    monkeypatch.setattr("app.services.r2_storage.is_r2_configured", lambda: False)
+
+    resp = client.post(
+        f"/api/projects/{project.id}/scenes/{scene.id}/stock-footage",
+        headers=auth(paid_user),
+        json={
+            "provider": "pexels", "clip_id": "1",
+            "download_url": "https://cdn.example/clip.mp4",
+            "width": 1920, "height": 1080, "duration": 8.0,
+            "author": "Someone", "page_url": "https://pexels.com/x",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["filename"].startswith(f"scene_{scene.id}_")
+    assert body["has_audio"] is False
+    assert body["duration_seconds"] == 8.0
+
+    # The asset exists…
+    from app.models.asset import Asset
+    asset = db_session.query(Asset).filter(
+        Asset.project_id == project.id, Asset.asset_type == "VIDEO"
+    ).one()
+    assert asset.filename == body["filename"]
+
+    # …but the scene descriptor is byte-for-byte unchanged (no eager link).
+    db_session.refresh(scene)
+    assert scene.remotion_code == descriptor_before
+    assert "assignedVideo" not in (scene.remotion_code or "")
+
+
+def _stub_stock_pipeline(monkeypatch, tmp_path):
+    """Stub the network + ffmpeg boundaries so no real download/transcode runs."""
+    from app.services import stock_footage
+
+    def _fake_download(url):
+        p = tmp_path / "dl.mp4"
+        p.write_bytes(b"x")
+        return str(p)
+
+    def _fake_normalise(src, dest, with_audio=False):
+        import os
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(b"y")
+
+    monkeypatch.setattr(stock_footage, "download_to_temp", _fake_download)
+    monkeypatch.setattr(stock_footage, "normalise", _fake_normalise)
+    monkeypatch.setattr(stock_footage, "has_audio_stream", lambda p: False)
+    monkeypatch.setattr(
+        stock_footage, "probe",
+        lambda p: {"duration_seconds": 8.0, "width": 1920, "height": 1080, "fps": 30.0},
+    )
+    monkeypatch.setattr("app.services.r2_storage.is_r2_configured", lambda: False)
+
+
+_CLIP_BODY = {
+    "provider": "pexels", "clip_id": "1",
+    "download_url": "https://cdn.example/clip.mp4",
+    "width": 1920, "height": 1080, "duration": 8.0,
+    "author": "A", "page_url": "https://pexels.com/x",
+}
+
+
+def test_adding_stock_footage_charges_three_ai_edits(
+    client, db_session, free_user, auth, tmp_path, monkeypatch
+):
+    from app.routers.projects import STOCK_FOOTAGE_CREDIT_COST
+
+    assert STOCK_FOOTAGE_CREDIT_COST == 3
+
+    _stub_stock_pipeline(monkeypatch, tmp_path)
+    project, scenes = _newscast_project(db_session, free_user, n_scenes=1)
+    free_user.ai_edit_credits = 10
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/projects/{project.id}/scenes/{scenes[0].id}/stock-footage",
+        headers=auth(free_user), json=_CLIP_BODY,
+    )
+    assert resp.status_code == 200, resp.text
+
+    db_session.refresh(free_user)
+    assert free_user.ai_edit_credits == 7   # 10 - 3
+
+
+def test_adding_stock_footage_blocked_when_credits_insufficient(
+    client, db_session, free_user, auth, tmp_path, monkeypatch
+):
+    """Gate runs BEFORE the download, so nothing is fetched and no asset is made."""
+    from app.models.asset import Asset
+    from app.services import stock_footage
+
+    project, scenes = _newscast_project(db_session, free_user, n_scenes=1)
+    free_user.ai_edit_credits = 2   # one short of the 3 required
+    db_session.commit()
+
+    def _boom(url):
+        raise AssertionError("download must not run when credits are insufficient")
+
+    monkeypatch.setattr(stock_footage, "download_to_temp", _boom)
+
+    resp = client.post(
+        f"/api/projects/{project.id}/scenes/{scenes[0].id}/stock-footage",
+        headers=auth(free_user), json=_CLIP_BODY,
+    )
+    assert resp.status_code == 403
+    assert "3 AI edits" in resp.json()["detail"]
+
+    db_session.refresh(free_user)
+    assert free_user.ai_edit_credits == 2   # untouched
+    assert db_session.query(Asset).filter(Asset.project_id == project.id).count() == 0
+
+
+def test_pro_owner_is_not_charged_for_stock_footage(
+    client, db_session, paid_user, auth, tmp_path, monkeypatch
+):
+    _stub_stock_pipeline(monkeypatch, tmp_path)
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=1)
+    paid_user.ai_edit_credits = 4
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/projects/{project.id}/scenes/{scenes[0].id}/stock-footage",
+        headers=auth(paid_user), json=_CLIP_BODY,
+    )
+    assert resp.status_code == 200, resp.text
+
+    db_session.refresh(paid_user)
+    assert paid_user.ai_edit_credits == 4   # PRO is unlimited — nothing spent
+
+
+def test_upload_broadcasts_project_reload_to_collaborators(
+    client, db_session, paid_user, auth, tmp_path, monkeypatch
+):
+    """Collaborators must be told to refetch, or the new clip asset never reaches them."""
+    _stub_stock_pipeline(monkeypatch, tmp_path)
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=1)
+
+    sent: list[dict] = []
+
+    async def _capture(project_id, message, exclude_user_id=None):
+        sent.append(
+            {"project_id": project_id, "message": message, "exclude_user_id": exclude_user_id}
+        )
+
+    from app.routers import collab_ws
+    monkeypatch.setattr(collab_ws.collab_manager, "broadcast", _capture)
+
+    resp = client.post(
+        f"/api/projects/{project.id}/scenes/{scenes[0].id}/stock-footage",
+        headers=auth(paid_user), json=_CLIP_BODY,
+    )
+    assert resp.status_code == 200, resp.text
+
+    reloads = [s for s in sent if s["message"].get("type") == "project_reloaded"]
+    assert len(reloads) == 1, f"expected one project_reloaded, got {sent}"
+    assert reloads[0]["project_id"] == project.id
+    # The actor already has the data — only OTHER collaborators reload.
+    assert reloads[0]["exclude_user_id"] == paid_user.id
+
+
+def test_deleting_a_clip_removes_both_files_and_unlinks_scenes(
+    client, db_session, paid_user, auth, tmp_path, monkeypatch
+):
+    """Deleting a VIDEO asset must purge the silent file AND its audio sibling."""
+    from app.models.asset import Asset, AssetType
+
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=1)
+    scene = scenes[0]
+
+    vid = tmp_path / "clip.mp4"
+    aud = tmp_path / "clip_audio.mp4"
+    vid.write_bytes(b"v")
+    aud.write_bytes(b"a")
+
+    asset = Asset(
+        project_id=project.id, asset_type=AssetType.VIDEO,
+        local_path=str(vid), filename="clip.mp4", excluded=False,
+        duration_seconds=5.0, audio_variant_filename="clip_audio.mp4",
+        r2_key="dev/users/1/projects/1/videos/clip.mp4",
+    )
+    db_session.add(asset)
+    db_session.commit()
+    db_session.refresh(asset)
+
+    desc = json.loads(scene.remotion_code)
+    desc["layoutProps"]["assignedVideo"] = "clip.mp4"
+    desc["layoutProps"]["videoMuted"] = False
+    scene.remotion_code = json.dumps(desc)
+    db_session.commit()
+
+    deleted_keys: list[str] = []
+    monkeypatch.setattr(
+        "app.services.r2_storage.delete_object",
+        lambda key: deleted_keys.append(key),
+    )
+
+    resp = client.delete(
+        f"/api/projects/{project.id}/assets/{asset.id}", headers=auth(paid_user)
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Both local files gone.
+    assert not vid.exists(), "silent variant still on disk"
+    assert not aud.exists(), "audio variant still on disk"
+    # Both R2 objects deleted.
+    assert deleted_keys == [
+        "dev/users/1/projects/1/videos/clip.mp4",
+        "dev/users/1/projects/1/videos/clip_audio.mp4",
+    ]
+    # Row gone, and the scene no longer references it.
+    assert db_session.query(Asset).filter(Asset.id == asset.id).first() is None
+    db_session.refresh(scene)
+    lp = json.loads(scene.remotion_code)["layoutProps"]
+    assert "assignedVideo" not in lp
+    assert "videoMuted" not in lp
+    assert lp["hideImage"] is True
+
+
+def test_resolve_stock_footage_flag_allows_every_template(paid_user, free_user):
+    """No template gate: the flag only reflects what was requested."""
+    from app.routers.projects import _resolve_stock_footage_flag
+
+    for template_id in ("newscast", "custom_1", "crafted_abc", "nonexistent_template"):
+        assert _resolve_stock_footage_flag(True, paid_user, template_id) is True
+        assert _resolve_stock_footage_flag(True, free_user, template_id) is True
+        assert _resolve_stock_footage_flag(False, paid_user, template_id) is False
+
+
+def test_upload_endpoint_rejected_on_dataviz_scene_for_custom_template(
+    client, db_session, paid_user, auth
+):
+    project = Project(user_id=paid_user.id, name="Custom", blog_url="https://c.test",
+                      status=ProjectStatus.GENERATED, template="custom_1")
+    db_session.add(project); db_session.commit(); db_session.refresh(project)
+    scene = Scene(project_id=project.id, order=1, title="S", narration_text="n",
+                  visual_description="v", scene_type="dataviz_chart",
+                  remotion_code=json.dumps({"layoutConfig": {}, "layoutProps": {}}))
+    db_session.add(scene); db_session.commit(); db_session.refresh(scene)
+
+    resp = client.post(
+        f"/api/projects/{project.id}/scenes/{scene.id}/stock-footage",
+        headers=auth(paid_user),
+        json={"provider": "pexels", "clip_id": "1",
+              "download_url": "https://cdn.example/clip.mp4"},
+    )
+    assert resp.status_code == 400
+    assert "does not support a background clip" in resp.json()["detail"]
+
+
+def test_assigning_image_clears_an_existing_clip(client, db_session, paid_user, auth, tmp_path):
+    """Mutual exclusivity: uploading an image onto a clip scene drops the clip."""
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=1)
+    scene = scenes[0]
+    desc = json.loads(scene.remotion_code)
+    desc["layoutProps"]["assignedVideo"] = "clip.mp4"
+    desc["layoutProps"]["videoMuted"] = False
+    scene.remotion_code = json.dumps(desc)
+    db_session.commit()
+
+    # A tiny valid PNG.
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+        "01f15c4890000000d49444154789c6360000002000100ffff03000006"
+        "0005a30f0a0000000049454e44ae426082"
+    )
+    resp = client.post(
+        f"/api/projects/{project.id}/scenes/{scene.id}/image",
+        headers=auth(paid_user),
+        files={"image": ("x.png", png, "image/png")},
+    )
+    assert resp.status_code == 200, resp.text
+
+    db_session.refresh(scene)
+    lp = json.loads(scene.remotion_code)["layoutProps"]
+    assert "assignedImage" in lp
+    assert "assignedVideo" not in lp    # clip cleared
+    assert "videoMuted" not in lp
+
+
+def test_image_focus_endpoint_accepts_a_clip_scene(client, db_session, paid_user, auth):
+    """Framing (focus/zoom) is shared between stills and clips.
+
+    A scene with assignedVideo (and no assignedImage) must be able to save
+    framing — otherwise the Adjust-framing flow 400s on every clip.
+    """
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=1)
+    scene = scenes[0]
+    desc = json.loads(scene.remotion_code)
+    desc["layoutProps"]["assignedVideo"] = "scene_x.mp4"
+    scene.remotion_code = json.dumps(desc)
+    db_session.commit()
+
+    resp = client.patch(
+        f"/api/projects/{project.id}/scenes/{scene.id}/image-focus",
+        headers=auth(paid_user),
+        json={"image_focus_x": 30, "image_focus_y": 70, "image_zoom": 1.2},
+    )
+    assert resp.status_code == 200, resp.text
+
+    db_session.refresh(scene)
+    lp = json.loads(scene.remotion_code)["layoutProps"]
+    assert lp["imageFocusX"] == 30
+    assert lp["imageFocusY"] == 70
+    assert lp["imageZoom"] == 1.2
+    assert lp["assignedVideo"] == "scene_x.mp4"  # untouched
+
+
+def test_video_scene_is_not_also_given_a_generic_image(db_session, paid_user, tmp_path, monkeypatch):
+    """The core regression: a clip fills the slot, so no still may be assigned."""
+    from app.models.asset import Asset, AssetType
+    from app.services import remotion as remotion_service
+
+    # Three scenes: the last is treated as an outro (hideImage) by the existing
+    # cascade, so we need a genuine middle scene to prove images still flow.
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=3)
+
+    # One clip on scene 1, plus a generic scraped image in the pool.
+    clip_path = tmp_path / "scene_1_1.mp4"
+    clip_path.write_bytes(b"fake-mp4")
+    img_path = tmp_path / "generic.jpg"
+    img_path.write_bytes(b"fake-jpg")
+
+    db_session.add(Asset(project_id=project.id, asset_type=AssetType.VIDEO,
+                         local_path=str(clip_path), filename="scene_1_1.mp4",
+                         duration_seconds=6.0, excluded=False))
+    db_session.add(Asset(project_id=project.id, asset_type=AssetType.IMAGE,
+                         local_path=str(img_path), filename="generic.jpg",
+                         excluded=False))
+    db_session.commit()
+
+    desc = json.loads(scenes[0].remotion_code)
+    desc["layoutProps"]["assignedVideo"] = "scene_1_1.mp4"
+    scenes[0].remotion_code = json.dumps(desc)
+    db_session.commit()
+
+    workspace = tmp_path / "ws"
+    (workspace / "public").mkdir(parents=True)
+    monkeypatch.setattr(remotion_service, "provision_workspace", lambda *a, **k: str(workspace))
+
+    db_session.refresh(project)
+    remotion_service.write_remotion_data(
+        project, db_session.query(Scene).filter(Scene.project_id == project.id)
+        .order_by(Scene.order).all(), db_session,
+    )
+
+    data = json.loads((workspace / "public" / "data.json").read_text())
+    s1, s2 = data["scenes"][0], data["scenes"][1]
+
+    # Scene 1: the clip, and NO still underneath it.
+    assert s1["video"] == "scene_1_1.mp4"
+    assert s1["images"] == []
+    assert s1["videoDurationSeconds"] == 6.0
+    assert s1["videoMuted"] is True
+
+    # The middle scene still receives the generic image as normal — the guards
+    # must not starve ordinary image assignment.
+    assert s2.get("video") is None
+    assert s2["images"] == ["generic.jpg"]
+
+
+def test_guaranteed_clip_displaces_image_when_images_cover_every_scene(
+    db_session, paid_user, tmp_path, monkeypatch
+):
+    """The render-side half of the at-least-one-clip guarantee.
+
+    The pipeline hands the last eligible scene a clip even when the project has
+    an image for every scene. That only produces visible stock footage if the
+    image cascade yields the slot — so this proves the clip survives a FULL
+    image pool rather than being starved, and that the displaced still simply
+    goes to another scene.
+    """
+    from app.models.asset import Asset, AssetType
+    from app.services import remotion as remotion_service
+
+    # 3 scenes; scene 3 is the outro, so scenes 1-2 are the eligible pool and
+    # the guarantee targets scene 2.
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=3)
+
+    clip_path = tmp_path / "scene_2_1.mp4"
+    clip_path.write_bytes(b"fake-mp4")
+    db_session.add(Asset(project_id=project.id, asset_type=AssetType.VIDEO,
+                         local_path=str(clip_path), filename="scene_2_1.mp4",
+                         duration_seconds=6.0, excluded=False))
+    # An image for every scene — enough to cover the whole video on its own.
+    for name in ("g1.jpg", "g2.jpg", "g3.jpg"):
+        p = tmp_path / name
+        p.write_bytes(b"fake-jpg")
+        db_session.add(Asset(project_id=project.id, asset_type=AssetType.IMAGE,
+                             local_path=str(p), filename=name, excluded=False))
+    db_session.commit()
+
+    desc = json.loads(scenes[1].remotion_code)
+    desc["layoutProps"]["assignedVideo"] = "scene_2_1.mp4"
+    scenes[1].remotion_code = json.dumps(desc)
+    db_session.commit()
+
+    workspace = tmp_path / "ws"
+    (workspace / "public").mkdir(parents=True)
+    monkeypatch.setattr(remotion_service, "provision_workspace", lambda *a, **k: str(workspace))
+
+    db_session.refresh(project)
+    remotion_service.write_remotion_data(
+        project, db_session.query(Scene).filter(Scene.project_id == project.id)
+        .order_by(Scene.order).all(), db_session,
+    )
+
+    data = json.loads((workspace / "public" / "data.json").read_text())
+    s1, s2 = data["scenes"][0], data["scenes"][1]
+
+    # Scene 2 keeps the clip and takes NO still, despite images being available
+    # for every scene — this is the displacement the guarantee relies on.
+    assert s2["video"] == "scene_2_1.mp4"
+    assert s2["images"] == []
+    # The displaced still cascades to another scene rather than vanishing.
+    assert s1["images"] and s1.get("video") is None
+
+
+def test_redistribute_assigns_images_before_clips(db_session, paid_user, tmp_path, monkeypatch):
+    """Template change / script regeneration: images first, clips fill the rest.
+
+    Previously the spare-clip pass ran BEFORE the image cascade and popped
+    assignedImage, so a clip took every open slot and images got the residue.
+    """
+    from app.models.asset import Asset, AssetType
+    from app.services import remotion as remotion_service
+
+    # 3 scenes; scene 3 is the outro (hideImage), leaving 2 usable slots.
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=3)
+
+    clip_path = tmp_path / "scene_1_1.mp4"
+    clip_path.write_bytes(b"fake-mp4")
+    img_path = tmp_path / "generic.jpg"
+    img_path.write_bytes(b"fake-jpg")
+    db_session.add(Asset(project_id=project.id, asset_type=AssetType.VIDEO,
+                         local_path=str(clip_path), filename="scene_1_1.mp4",
+                         duration_seconds=6.0, excluded=False))
+    db_session.add(Asset(project_id=project.id, asset_type=AssetType.IMAGE,
+                         local_path=str(img_path), filename="generic.jpg",
+                         excluded=False))
+    db_session.commit()
+
+    # The clip starts pinned to scene 1 — redistribution must release it so the
+    # image gets first pick of that slot.
+    desc = json.loads(scenes[0].remotion_code)
+    desc["layoutProps"]["assignedVideo"] = "scene_1_1.mp4"
+    scenes[0].remotion_code = json.dumps(desc)
+    db_session.commit()
+
+    workspace = tmp_path / "ws"
+    (workspace / "public").mkdir(parents=True)
+    monkeypatch.setattr(remotion_service, "provision_workspace", lambda *a, **k: str(workspace))
+
+    db_session.refresh(project)
+    remotion_service.write_remotion_data(
+        project, db_session.query(Scene).filter(Scene.project_id == project.id)
+        .order_by(Scene.order).all(), db_session, redistribute_images=True,
+    )
+
+    data = json.loads((workspace / "public" / "data.json").read_text())
+    s1, s2 = data["scenes"][0], data["scenes"][1]
+
+    # Scene 1 takes the image; the clip moves to scene 2 rather than evicting it.
+    assert s1["images"] == ["generic.jpg"]
+    assert s1.get("video") is None
+    assert s2["video"] == "scene_1_1.mp4"
+    assert s2["images"] == []
+
+    # The clip is re-placed, never orphaned — that was the "more videos than
+    # scenes" regression.
+    placed = [s.get("video") for s in data["scenes"] if s.get("video")]
+    assert placed == ["scene_1_1.mp4"]
+
+
+def test_manual_clip_survives_plain_save(db_session, paid_user, tmp_path, monkeypatch):
+    """Without redistribute_images a user's clip choice stays put."""
+    from app.models.asset import Asset, AssetType
+    from app.services import remotion as remotion_service
+
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=3)
+    clip_path = tmp_path / "scene_2_9.mp4"
+    clip_path.write_bytes(b"fake-mp4")
+    img_path = tmp_path / "generic.jpg"
+    img_path.write_bytes(b"fake-jpg")
+    db_session.add(Asset(project_id=project.id, asset_type=AssetType.VIDEO,
+                         local_path=str(clip_path), filename="scene_2_9.mp4",
+                         duration_seconds=5.0, excluded=False))
+    db_session.add(Asset(project_id=project.id, asset_type=AssetType.IMAGE,
+                         local_path=str(img_path), filename="generic.jpg",
+                         excluded=False))
+    db_session.commit()
+
+    desc = json.loads(scenes[1].remotion_code)
+    desc["layoutProps"]["assignedVideo"] = "scene_2_9.mp4"
+    scenes[1].remotion_code = json.dumps(desc)
+    db_session.commit()
+
+    workspace = tmp_path / "ws"
+    (workspace / "public").mkdir(parents=True)
+    monkeypatch.setattr(remotion_service, "provision_workspace", lambda *a, **k: str(workspace))
+
+    db_session.refresh(project)
+    remotion_service.write_remotion_data(
+        project, db_session.query(Scene).filter(Scene.project_id == project.id)
+        .order_by(Scene.order).all(), db_session,
+    )
+
+    data = json.loads((workspace / "public" / "data.json").read_text())
+    assert data["scenes"][1]["video"] == "scene_2_9.mp4"
+    assert data["scenes"][1]["images"] == []
+    # The image goes to the other open scene, not underneath the clip.
+    assert data["scenes"][0]["images"] == ["generic.jpg"]
+
+
+def test_stale_assigned_video_is_pruned(db_session, paid_user, tmp_path, monkeypatch):
+    """A clip whose asset was deleted must not leave the scene rendering nothing."""
+    from app.services import remotion as remotion_service
+
+    project, scenes = _newscast_project(db_session, paid_user, n_scenes=1)
+    desc = json.loads(scenes[0].remotion_code)
+    desc["layoutProps"]["assignedVideo"] = "gone.mp4"   # no matching asset row
+    scenes[0].remotion_code = json.dumps(desc)
+    db_session.commit()
+
+    workspace = tmp_path / "ws"
+    (workspace / "public").mkdir(parents=True)
+    monkeypatch.setattr(remotion_service, "provision_workspace", lambda *a, **k: str(workspace))
+
+    db_session.refresh(project)
+    remotion_service.write_remotion_data(
+        project, db_session.query(Scene).filter(Scene.project_id == project.id).all(), db_session,
+    )
+
+    data = json.loads((workspace / "public" / "data.json").read_text())
+    assert data["scenes"][0].get("video") is None
+
+    db_session.refresh(scenes[0])
+    assert "assignedVideo" not in json.loads(scenes[0].remotion_code)["layoutProps"]
+
+
+# ─── Generation-time verification gate ──────────────────────────────────────
+
+
+def _scripted_newscast_project(db, user, *, enabled=True, is_bulk=False, layouts=("opening", "anchor_narrative")):
+    """A project parked at SCRIPTED with scenes that have preferred_layout set."""
+    project = Project(
+        user_id=user.id, name="Gate", blog_url="https://g.test",
+        status=ProjectStatus.SCRIPTED, template="newscast",
+        stock_footage_enabled=enabled, is_bulk=is_bulk,
+    )
+    db.add(project); db.commit(); db.refresh(project)
+    for i, layout in enumerate(layouts, start=1):
+        db.add(Scene(
+            project_id=project.id, order=i, title=f"Scene {i}",
+            narration_text="n", visual_description="v", preferred_layout=layout,
+        ))
+    db.commit()
+    return project
+
+
+def test_image_capable_scenes__excludes_no_image_layouts(db_session, paid_user):
+    """Capability is read from preferred_layout — remotion_code does not exist yet."""
+    from app.routers.pipeline import _image_capable_scenes
+
+    project = _scripted_newscast_project(
+        db_session, paid_user, layouts=("opening", "anchor_narrative", "ending_socials"),
+    )
+    got = _image_capable_scenes(project, db_session)
+    titles = [s.title for s in got]
+    assert "Scene 1" in titles and "Scene 2" in titles
+    assert "Scene 3" not in titles, "ending_socials should be excluded"
+
+
+def test_stock_footage_scene_cap__paid_uncapped_free_one(db_session, paid_user, free_user):
+    """The per-plan cap keyed off the project OWNER: paid = every image-capable
+    scene (None), free = a single scene (1)."""
+    from app.routers.pipeline import _stock_footage_scene_cap
+
+    paid_project = _scripted_newscast_project(db_session, paid_user)
+    free_project = _scripted_newscast_project(db_session, free_user)
+
+    assert _stock_footage_scene_cap(paid_project, db_session) is None
+    assert _stock_footage_scene_cap(free_project, db_session) == 1
+
+
+def test_stock_footage_cap__free_owner_gets_exactly_one_clip(db_session, free_user):
+    """A FREE owner gets exactly one clip — here, with no images, the first scene.
+
+    Asserts against the production selector rather than re-implementing the
+    slice, which is what let the review endpoints drift from the auto-pick.
+    """
+    from app.routers.pipeline import (
+        _image_capable_scenes,
+        _stock_footage_target_scenes,
+    )
+
+    project = _scripted_newscast_project(
+        db_session, free_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative"),
+    )
+    # All three are image-capable, but Scene 3 is the implicit outro, so the
+    # eligible pool is scenes 1-2.
+    assert len(_image_capable_scenes(project, db_session)) == 3
+
+    picked = _stock_footage_target_scenes(project, db_session)
+    assert [s.title for s in picked] == ["Scene 1"], "exactly one, no images to follow"
+
+
+def test_resolve_stock_footage_flag__all_plans_newscast_only(db_session, paid_user, free_user):
+    from app.routers.projects import _resolve_stock_footage_flag
+
+    # Available on every plan now — the per-scene cap (paid: all, free: one) is
+    # applied later in the pipeline, not by this flag.
+    assert _resolve_stock_footage_flag(True, paid_user, "newscast") is True
+    assert _resolve_stock_footage_flag(True, free_user, "newscast") is True
+    assert _resolve_stock_footage_flag(False, paid_user, "newscast") is False
+    assert _resolve_stock_footage_flag(False, free_user, "newscast") is False
+
+
+def test_bulk_project_auto_approves_instead_of_parking(db_session, paid_user):
+    """Bulk projects skip the interactive review: the gate stamps approved_at and
+    falls through to generation, so it never parks at AWAITING_FOOTAGE. A single
+    (non-bulk) project with the same flags still parks."""
+    from datetime import datetime
+
+    def gate_fires(p) -> bool:
+        return (
+            p.status == ProjectStatus.SCRIPTED
+            and bool(getattr(p, "stock_footage_enabled", False))
+            and getattr(p, "stock_footage_approved_at", None) is None
+        )
+
+    bulk = _scripted_newscast_project(db_session, paid_user, is_bulk=True)
+    single = _scripted_newscast_project(db_session, paid_user, is_bulk=False)
+
+    # Both initially satisfy the gate (auto-pick runs for both).
+    assert gate_fires(bulk) is True
+    assert gate_fires(single) is True
+
+    # Simulate the gate's per-flow decision: bulk auto-approves, single parks.
+    if bulk.is_bulk:
+        bulk.stock_footage_approved_at = datetime.utcnow()
+    else:
+        bulk.status = ProjectStatus.AWAITING_FOOTAGE
+    if single.is_bulk:
+        single.stock_footage_approved_at = datetime.utcnow()
+    else:
+        single.status = ProjectStatus.AWAITING_FOOTAGE
+
+    # Bulk stayed SCRIPTED (continues to generation) with the approval stamp; the
+    # gate no longer fires for it. Single parked at AWAITING_FOOTAGE.
+    assert bulk.status == ProjectStatus.SCRIPTED
+    assert bulk.stock_footage_approved_at is not None
+    assert gate_fires(bulk) is False
+    assert single.status == ProjectStatus.AWAITING_FOOTAGE
+
+
+def test_gate_condition_is_false_once_approved(db_session, paid_user):
+    """Regression: approve returns the project to SCRIPTED with the flag STILL
+    enabled. Without the approval stamp the gate condition stays true and the
+    pipeline re-parks it forever (approve -> SCRIPTED -> re-park -> ...).
+
+    Asserts the guard itself rather than driving _run_pipeline, which opens its
+    own SessionLocal and so cannot see this test transaction.
+    """
+    from datetime import datetime
+
+    project = _scripted_newscast_project(db_session, paid_user)
+
+    def gate_fires(p) -> bool:
+        return (
+            p.status == ProjectStatus.SCRIPTED
+            and bool(getattr(p, "stock_footage_enabled", False))
+            and getattr(p, "stock_footage_approved_at", None) is None
+        )
+
+    assert gate_fires(project) is True
+
+    # Parked: the status alone blocks re-entry.
+    project.status = ProjectStatus.AWAITING_FOOTAGE
+    assert gate_fires(project) is False
+
+    # Approved: back to SCRIPTED with the flag still on — the stamp is the ONLY
+    # thing preventing an infinite re-park.
+    project.stock_footage_approved_at = datetime.utcnow()
+    project.status = ProjectStatus.SCRIPTED
+    db_session.commit()
+    assert project.stock_footage_enabled is True
+    assert gate_fires(project) is False, "approved project must not re-park"
+
+
+def test_approve_endpoint_stamps_and_resumes(client, db_session, paid_user, auth, monkeypatch):
+    from types import SimpleNamespace
+    from app.routers import pipeline as pipeline_mod
+
+    project = _scripted_newscast_project(db_session, paid_user)
+
+    # Not at the gate yet → 400.
+    resp = client.post(
+        f"/api/projects/{project.id}/stock-footage/approve", headers=auth(paid_user)
+    )
+    assert resp.status_code == 400
+
+    project.status = ProjectStatus.AWAITING_FOOTAGE
+    db_session.commit()
+
+    launched: list[tuple] = []
+    monkeypatch.setattr(
+        pipeline_mod.asyncio, "get_event_loop",
+        lambda: SimpleNamespace(
+            run_in_executor=lambda _pool, fn, *a: launched.append((fn.__name__, a))
+        ),
+    )
+
+    resp = client.post(
+        f"/api/projects/{project.id}/stock-footage/approve", headers=auth(paid_user)
+    )
+    assert resp.status_code == 200, resp.text
+    db_session.refresh(project)
+    assert project.status == ProjectStatus.SCRIPTED
+    # The stamp is what stops the gate re-firing on re-entry.
+    assert project.stock_footage_approved_at is not None
+    assert launched and launched[0][0] == "_run_pipeline_sync"
+
+
+def test_pending_endpoint_lists_image_scenes_with_clip(db_session, paid_user, client, auth):
+    from app.models.asset import Asset, AssetType
+
+    project = _scripted_newscast_project(
+        db_session, paid_user, layouts=("opening", "ending_socials"),
+    )
+    project.status = ProjectStatus.AWAITING_FOOTAGE
+    db_session.add(Asset(
+        project_id=project.id, asset_type=AssetType.VIDEO,
+        local_path="/x.mp4", filename="clip.mp4", excluded=False,
+        duration_seconds=6.0, source_author="A", source_provider="pexels",
+    ))
+    db_session.commit()
+
+    scene1 = db_session.query(Scene).filter(
+        Scene.project_id == project.id, Scene.order == 1
+    ).first()
+    scene1.remotion_code = json.dumps({"layoutProps": {"assignedVideo": "clip.mp4"}})
+    db_session.commit()
+
+    resp = client.get(
+        f"/api/projects/{project.id}/stock-footage/pending", headers=auth(paid_user)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["awaiting"] is True
+    assert len(body["scenes"]) == 1, "ending_socials must be excluded"
+    entry = body["scenes"][0]
+    assert entry["title"] == "Scene 1"
+    assert entry["clip"]["filename"] == "clip.mp4"
+
+
+def test_scene_generation_preserves_assigned_video(db_session, paid_user):
+    """Regression: _generate_scenes rebuilds the descriptor from the LLM output and
+    only carried `assignedImage`/`hideImage` forward. A clip chosen at the review
+    gate was therefore dropped here, and write_remotion_data's auto-assign cascade
+    then filled the empty visual slot with a generic scraped image.
+
+    Mirrors the preserve block's logic (the function itself needs a full LLM run).
+    """
+    old_lp = {
+        "title": "T",
+        "assignedVideo": "scene_1_123.mp4",
+        "videoMuted": True,
+        "videoVolume": 0.35,
+        "imageFocusX": 40,
+        "imageFocusY": 60,
+    }
+    # A freshly generated descriptor knows nothing about the clip.
+    descriptor = {"layout": "opening", "layoutProps": {"title": "T"}}
+
+    old_assigned = old_lp.get("assignedImage")
+    old_hide = old_lp.get("hideImage")
+    old_video = old_lp.get("assignedVideo")
+    if old_assigned or old_hide or old_video:
+        descriptor.setdefault("layoutProps", {})
+        if old_video:
+            descriptor["layoutProps"]["assignedVideo"] = old_video
+            for key in ("videoMuted", "videoVolume", "imageFocusX", "imageFocusY", "imageZoom"):
+                if key in old_lp:
+                    descriptor["layoutProps"][key] = old_lp[key]
+            descriptor["layoutProps"].pop("assignedImage", None)
+            descriptor["layoutProps"]["hideImage"] = False
+        elif old_assigned:
+            descriptor["layoutProps"]["assignedImage"] = old_assigned
+        if old_hide and not old_video:
+            descriptor["layoutProps"]["hideImage"] = True
+
+    lp = descriptor["layoutProps"]
+    assert lp["assignedVideo"] == "scene_1_123.mp4", "clip must survive the rebuild"
+    # Settings + framing ride along with it.
+    assert lp["videoMuted"] is True and lp["videoVolume"] == 0.35
+    assert lp["imageFocusX"] == 40 and lp["imageFocusY"] == 60
+    # A clip and a still are mutually exclusive, and hideImage must not suppress it.
+    assert "assignedImage" not in lp
+    assert lp["hideImage"] is False
+
+
+def test_link_endpoint_points_a_scene_at_an_uploaded_clip(
+    client, db_session, paid_user, auth
+):
+    """Regression: the upload endpoint creates the asset but deliberately does NOT
+    touch the scene (the editor stages that and commits on Save). The review gate
+    has no Save step, so swapping a clip there uploaded it and then orphaned it —
+    the scene kept the old clip, even after a refresh.
+    """
+    from app.models.asset import Asset, AssetType
+
+    project = _scripted_newscast_project(db_session, paid_user)
+    scene = db_session.query(Scene).filter(
+        Scene.project_id == project.id, Scene.order == 1
+    ).first()
+
+    for fn in ("old.mp4", "new.mp4"):
+        db_session.add(Asset(
+            project_id=project.id, asset_type=AssetType.VIDEO,
+            local_path=f"/{fn}", filename=fn, excluded=False, duration_seconds=5.0,
+        ))
+    scene.remotion_code = json.dumps({
+        "layout": "opening",
+        "layoutProps": {"assignedVideo": "old.mp4", "assignedImage": "stale.png"},
+    })
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/projects/{project.id}/stock-footage/link",
+        headers=auth(paid_user),
+        json={"scene_id": scene.id, "filename": "new.mp4"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    db_session.refresh(scene)
+    lp = json.loads(scene.remotion_code)["layoutProps"]
+    assert lp["assignedVideo"] == "new.mp4", "scene must point at the swapped clip"
+    # A clip fills the visual slot exclusively.
+    assert "assignedImage" not in lp
+    assert lp["hideImage"] is False
+
+    # A clip that isn't in this project is rejected rather than silently linked.
+    bad = client.post(
+        f"/api/projects/{project.id}/stock-footage/link",
+        headers=auth(paid_user),
+        json={"scene_id": scene.id, "filename": "not_mine.mp4"},
+    )
+    assert bad.status_code == 404
+
+
+def test_fill_missing_stock_clips_targets_final_image_layout(
+    db_session, paid_user, monkeypatch,
+):
+    """Regression: economist scenes scripted as chart_line (no-image at the gate)
+    can resolve to leader_article during scene generation and need a clip afterward."""
+    import asyncio
+    from app.models.project import Project
+    from app.models.scene import Scene
+    from app.routers.pipeline import _fill_missing_stock_clips_after_scene_gen
+
+    project = Project(
+        user_id=paid_user.id,
+        name="Economist fill",
+        blog_url="https://e.test",
+        status=ProjectStatus.GENERATED,
+        template="economist",
+        stock_footage_enabled=True,
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    scene = Scene(
+        project_id=project.id,
+        order=1,
+        title="The central bank's hardest year",
+        narration_text="n",
+        visual_description="v",
+        preferred_layout="leader_article",
+        remotion_code=json.dumps(
+            {"layout": "leader_article", "layoutProps": {"title": "The central bank's hardest year"}}
+        ),
+    )
+    db_session.add(scene)
+    db_session.commit()
+
+    called: list[int] = []
+
+    async def _fake_assign(
+        project, scene, db, *, orientation, loop,
+        used_generics=None, used_clip_ids=None, llm_query=None,
+    ):
+        called.append(scene.id)
+        return True
+
+    monkeypatch.setattr(
+        "app.routers.pipeline._try_assign_stock_clip_to_scene", _fake_assign
+    )
+
+    n = asyncio.run(
+        _fill_missing_stock_clips_after_scene_gen(
+            project, [scene], db_session, "economist"
+        )
+    )
+    assert n == 1
+    assert called == [scene.id]
+
+    called.clear()
+    scene.remotion_code = json.dumps({"layout": "chart_line", "layoutProps": {}})
+    n = asyncio.run(
+        _fill_missing_stock_clips_after_scene_gen(
+            project, [scene], db_session, "economist"
+        )
+    )
+    assert n == 0
+    assert called == []
+
+
+def _add_image(db, project, tmp_path, filename):
+    from app.models.asset import Asset, AssetType
+
+    p = tmp_path / filename
+    p.write_bytes(b"fake-jpg")
+    db.add(
+        Asset(
+            project_id=project.id,
+            asset_type=AssetType.IMAGE,
+            local_path=str(p),
+            filename=filename,
+            excluded=False,
+        )
+    )
+    db.commit()
+
+
+def test_prepare_stock_footage_leaves_slot_empty_when_no_clip(
+    db_session, paid_user, monkeypatch, tmp_path,
+):
+    """A search miss must NOT duplicate an image an earlier scene already owns.
+
+    Images are the primary visual, so the one image here covers scene 1 and only
+    scene 2 is fetched for. When that search finds nothing the slot is left empty
+    — write_remotion_data's Step 5 then persists hideImage=true.
+    """
+    import asyncio
+    from app.models.scene import Scene
+    from app.routers.pipeline import _prepare_stock_footage_candidates
+
+    project = _scripted_newscast_project(
+        db_session,
+        paid_user,
+        layouts=("opening", "anchor_narrative"),
+    )
+    _add_image(db_session, project, tmp_path, "hero.jpg")
+
+    monkeypatch.setattr(
+        "app.services.stock_footage.pick_best_for_scene",
+        lambda *a, **k: None,
+    )
+
+    n = asyncio.run(_prepare_stock_footage_candidates(project, db_session))
+    assert n == 0
+
+    scenes = (
+        db_session.query(Scene)
+        .filter(Scene.project_id == project.id)
+        .order_by(Scene.order)
+        .all()
+    )
+    for scene in scenes:
+        lp = json.loads(scene.remotion_code)["layoutProps"] if scene.remotion_code else {}
+        assert "assignedVideo" not in lp
+        # No still is force-assigned here any more; the image cascade in
+        # write_remotion_data owns that decision.
+        assert not lp.get("stockFootageImageFallback")
+
+
+def test_image_coverage_count__generics_and_scene_specific(
+    db_session, paid_user, tmp_path,
+):
+    """Coverage mirrors write_remotion_data: generics spread one per scene."""
+    from app.routers.pipeline import _image_capable_scenes, _image_coverage_count
+
+    project = _scripted_newscast_project(
+        db_session, paid_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative"),
+    )
+    capable = _image_capable_scenes(project, db_session)
+    assert len(capable) == 3
+
+    assert _image_coverage_count(project, db_session, capable) == 0
+
+    _add_image(db_session, project, tmp_path, "a.jpg")
+    assert _image_coverage_count(project, db_session, capable) == 1
+
+    # Scene 3 is the implicit outro, so coverage saturates at 2 of the 3
+    # image-capable scenes no matter how many images the project holds.
+    _add_image(db_session, project, tmp_path, "b.jpg")
+    _add_image(db_session, project, tmp_path, "c.jpg")
+    _add_image(db_session, project, tmp_path, "d.jpg")
+    assert _image_coverage_count(project, db_session, capable) == 2
+
+
+@pytest.mark.parametrize(
+    "n_images,expected_orders",
+    [(10, [4]), (2, [4]), (1, [2, 4]), (0, [1, 2, 4])],
+)
+def test_reconciler_reserves_scenes_images_will_cover(
+    db_session, paid_user, tmp_path, monkeypatch, n_images, expected_orders
+):
+    """The reconciler must reserve image-covered scenes, same as the main pass.
+
+    CRITICAL ORDERING BUG this locks down: the reconciler runs BEFORE
+    write_remotion_data, which is the only writer of ``assignedImage``. So every
+    layoutProps is still empty here and an "already has an image" test can never
+    fire. Without an explicit coverage reservation the reconciler fetched a clip
+    for every image-capable scene — the reported "10 images but still 3 clips".
+
+    The n_images=10 case is the guarantee: coverage reserves every eligible
+    scene, but enabling the feature must still buy one clip, so the reservation
+    is walked back to the LAST eligible scene (4) — not to all three.
+    """
+    import asyncio
+    from app.models.asset import Asset, AssetType
+    from app.routers.pipeline import _fill_missing_stock_clips_after_scene_gen
+
+    project = Project(
+        user_id=paid_user.id, name="recon", blog_url="https://r.test",
+        status=ProjectStatus.SCRIPTED, template="newspaper",
+        stock_footage_enabled=True,
+    )
+    db_session.add(project); db_session.commit(); db_session.refresh(project)
+
+    # newspaper: pull_quote and ending_socials cannot show a visual, so scenes
+    # 1, 2 and 4 are the clip-eligible ones.
+    layouts = ["news_headline", "article_lead", "pull_quote", "fact_check", "ending_socials"]
+    for i, layout in enumerate(layouts, start=1):
+        db_session.add(Scene(
+            project_id=project.id, order=i, title=f"S{i}", narration_text="n",
+            visual_description="v", preferred_layout=layout, scene_type=None,
+            remotion_code=json.dumps({"layout": layout, "layoutProps": {}}),
+        ))
+    for i in range(n_images):
+        f = tmp_path / f"img_{i}.png"
+        f.write_bytes(b"x")
+        db_session.add(Asset(
+            project_id=project.id, asset_type=AssetType.IMAGE,
+            local_path=str(f), filename=f"img_{i}.png", excluded=False,
+        ))
+    db_session.commit()
+
+    searched: list[int] = []
+
+    async def _fake_assign(project, scene, db, **kw):
+        searched.append(scene.order)
+        return False
+
+    monkeypatch.setattr(
+        "app.routers.pipeline._try_assign_stock_clip_to_scene", _fake_assign
+    )
+
+    scenes = (
+        db_session.query(Scene)
+        .filter(Scene.project_id == project.id)
+        .order_by(Scene.order)
+        .all()
+    )
+    asyncio.run(
+        _fill_missing_stock_clips_after_scene_gen(
+            project, scenes, db_session, "newspaper"
+        )
+    )
+    assert searched == expected_orders
+
+
+def _reconciler_project(db, user, tmp_path, *, n_images=0, preassigned=None):
+    """A newspaper project parked mid-pipeline, for reconciler tests.
+
+    newspaper's pull_quote and ending_socials cannot show a visual, so scenes
+    1, 2 and 4 are clip-eligible; scene 5 (ending_socials) is also the implicit
+    outro. ``preassigned`` maps a 1-based scene order to an assignedVideo
+    filename, standing in for clips the main pass already landed.
+    """
+    from app.models.asset import Asset, AssetType
+
+    project = Project(
+        user_id=user.id, name="recon", blog_url="https://r.test",
+        status=ProjectStatus.SCRIPTED, template="newspaper",
+        stock_footage_enabled=True,
+    )
+    db.add(project); db.commit(); db.refresh(project)
+
+    layouts = ["news_headline", "article_lead", "pull_quote", "fact_check", "ending_socials"]
+    for i, layout in enumerate(layouts, start=1):
+        lp = {}
+        if preassigned and i in preassigned:
+            lp["assignedVideo"] = preassigned[i]
+        db.add(Scene(
+            project_id=project.id, order=i, title=f"S{i}", narration_text="n",
+            visual_description="v", preferred_layout=layout, scene_type=None,
+            remotion_code=json.dumps({"layout": layout, "layoutProps": lp}),
+        ))
+    for i in range(n_images):
+        f = tmp_path / f"img_{i}.png"
+        f.write_bytes(b"x")
+        db.add(Asset(
+            project_id=project.id, asset_type=AssetType.IMAGE,
+            local_path=str(f), filename=f"img_{i}.png", excluded=False,
+        ))
+    db.commit()
+    return project
+
+
+def _run_reconciler(db, project, monkeypatch):
+    """Run the reconciler with the provider stubbed; returns fetched scene orders."""
+    import asyncio
+    from app.routers.pipeline import _fill_missing_stock_clips_after_scene_gen
+
+    searched: list[int] = []
+
+    async def _fake_assign(project, scene, db, **kw):
+        searched.append(scene.order)
+        return True
+
+    monkeypatch.setattr(
+        "app.routers.pipeline._try_assign_stock_clip_to_scene", _fake_assign
+    )
+    scenes = (
+        db.query(Scene)
+        .filter(Scene.project_id == project.id)
+        .order_by(Scene.order)
+        .all()
+    )
+    asyncio.run(
+        _fill_missing_stock_clips_after_scene_gen(project, scenes, db, "newspaper")
+    )
+    return searched
+
+
+def test_fill_reconciler_guarantee_when_main_pass_missed(
+    db_session, paid_user, tmp_path, monkeypatch
+):
+    """Main pass came up empty (search miss) and images cover all — fetch one."""
+    project = _reconciler_project(db_session, paid_user, tmp_path, n_images=10)
+    assert _run_reconciler(db_session, project, monkeypatch) == [4]
+
+
+def test_fill_reconciler_no_double_buy_when_main_pass_succeeded(
+    db_session, paid_user, tmp_path, monkeypatch
+):
+    """A clip the main pass already landed satisfies the guarantee — buy nothing.
+
+    The scene carrying it never enters `needing`, and `existing_clips` being
+    non-zero keeps the guarantee from firing on some other scene.
+    """
+    project = _reconciler_project(
+        db_session, paid_user, tmp_path, n_images=10,
+        preassigned={4: "scene_4_clip.mp4"},
+    )
+    assert _run_reconciler(db_session, project, monkeypatch) == []
+
+
+def test_fill_reconciler_free_cap_exhausted_assigns_nothing(
+    db_session, free_user, tmp_path, monkeypatch
+):
+    """A free plan that already has its one clip must not get a second.
+
+    Guards the `needing[-0:]` trap: tail-slicing with remaining == 0 returns the
+    WHOLE list, which would clip every scene on a capped-out free project.
+    """
+    project = _reconciler_project(
+        db_session, free_user, tmp_path, n_images=0,
+        preassigned={1: "scene_1_clip.mp4"},
+    )
+    assert _run_reconciler(db_session, project, monkeypatch) == []
+
+
+def test_fill_reconciler_spare_clip_satisfies_guarantee(
+    db_session, paid_user, tmp_path, monkeypatch
+):
+    """An unreferenced clip will be re-placed by write_remotion_data — don't refetch."""
+    from app.models.asset import Asset, AssetType
+
+    project = _reconciler_project(db_session, paid_user, tmp_path, n_images=10)
+    f = tmp_path / "spare.mp4"
+    f.write_bytes(b"x")
+    db_session.add(Asset(
+        project_id=project.id, asset_type=AssetType.VIDEO,
+        local_path=str(f), filename="spare.mp4", excluded=False,
+    ))
+    db_session.commit()
+
+    assert _run_reconciler(db_session, project, monkeypatch) == []
+
+
+def test_descriptor_rebuild_image_beats_clip():
+    """A scene carrying BOTH a still and a clip must keep the still.
+
+    The descriptor generator assigns images while the stock task fetches clips
+    concurrently, so a scene can reach the rebuild holding both. Testing
+    `old_video` before `old_assigned` (the old branch order) popped
+    assignedImage here — the reported "images are assigned, then replaced by
+    video clips at the end" behaviour.
+
+    Exercises the carry-over block of _generate_scenes by running the real
+    source of that block, so the branch order cannot silently regress.
+    """
+    import inspect
+    from app.routers import pipeline as pipeline_mod
+
+    src = inspect.getsource(pipeline_mod._generate_scenes)
+    start = src.index("if old_assigned or old_hide or old_video:")
+    end = src.index("except (json.JSONDecodeError, TypeError):", start)
+    block = textwrap.dedent(src[start:end])
+
+    def run(old_lp):
+        descriptor = {"layout": "news_headline", "layoutProps": {}}
+        ns = {
+            "descriptor": descriptor,
+            "old_lp": old_lp,
+            "old_assigned": old_lp.get("assignedImage"),
+            "old_hide": old_lp.get("hideImage"),
+            "old_video": old_lp.get("assignedVideo"),
+        }
+        exec(block, {}, ns)
+        return ns["descriptor"]["layoutProps"]
+
+    # The reported bug: both present -> the image must survive.
+    both = run({"assignedImage": "a.jpg", "assignedVideo": "c.mp4"})
+    assert both["assignedImage"] == "a.jpg"
+    assert "assignedVideo" not in both, "clip must not evict the still"
+
+    # A clip with no competing still still carries across.
+    clip_only = run({"assignedVideo": "c.mp4"})
+    assert clip_only["assignedVideo"] == "c.mp4"
+
+    # A deliberate hide with neither asset is preserved.
+    hidden = run({"hideImage": True})
+    assert hidden["hideImage"] is True
+
+
+def test_image_coverage_count__excludes_implicit_outro(
+    db_session, paid_user, tmp_path,
+):
+    """With scene_type NULL, write_remotion_data Step 3 treats the LAST scene as
+    an outro and forces hideImage. Coverage must not count it, or the prediction
+    over-reports by one and a real scene silently loses its clip."""
+    from app.routers.pipeline import _image_capable_scenes, _image_coverage_count
+
+    project = _scripted_newscast_project(
+        db_session, paid_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative"),
+    )
+    capable = _image_capable_scenes(project, db_session)
+    assert [s.scene_type for s in capable] == [None, None, None]
+
+    for fn in ("a.jpg", "b.jpg", "c.jpg"):
+        _add_image(db_session, project, tmp_path, fn)
+
+    # 3 images, 3 capable scenes, but the last is the implicit outro -> 2.
+    assert _image_coverage_count(project, db_session, capable) == 2
+
+
+def test_stock_fetch_skips_outro_scene(db_session, paid_user, monkeypatch, tmp_path):
+    """An outro can never display a clip, so none may be bought for it."""
+    import asyncio
+    from app.routers.pipeline import _prepare_stock_footage_candidates
+
+    project = _scripted_newscast_project(
+        db_session, paid_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative"),
+    )
+    _add_image(db_session, project, tmp_path, "a.jpg")
+
+    searched: list[int] = []
+
+    async def _fake_assign(project, scene, db, **kw):
+        searched.append(scene.order)
+        return False
+
+    monkeypatch.setattr(
+        "app.routers.pipeline._try_assign_stock_clip_to_scene", _fake_assign
+    )
+
+    asyncio.run(_prepare_stock_footage_candidates(project, db_session))
+    # Scene 1 covered by a.jpg, scene 3 is the implicit outro -> only scene 2.
+    assert searched == [2]
+
+
+def test_prepare_stock_footage_skips_scenes_images_cover(
+    db_session, paid_user, monkeypatch, tmp_path,
+):
+    """Clips are fetched only for the image-capable scenes no image can fill."""
+    import asyncio
+    from app.routers.pipeline import _prepare_stock_footage_candidates
+
+    project = _scripted_newscast_project(
+        db_session, paid_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative", "anchor_narrative"),
+    )
+    _add_image(db_session, project, tmp_path, "a.jpg")
+
+    searched: list[int] = []
+
+    async def _fake_assign(project, scene, db, **kw):
+        searched.append(scene.order)
+        return False
+
+    monkeypatch.setattr(
+        "app.routers.pipeline._try_assign_stock_clip_to_scene", _fake_assign
+    )
+
+    asyncio.run(_prepare_stock_footage_candidates(project, db_session))
+    # Scene 1 covered by a.jpg, scene 4 is the implicit outro -> 2 and 3.
+    assert searched == [2, 3]
+
+
+def test_prepare_stock_footage_assigns_one_clip_when_images_cover_all(
+    db_session, paid_user, monkeypatch, tmp_path,
+):
+    """The headline case: enabling the feature always buys at least one clip.
+
+    Enough images to cover every eligible scene used to yield ZERO clips, so a
+    user who ticked "stock footage" saw none. The guarantee now falls back to the
+    LAST eligible scene, displacing its image.
+    """
+    import asyncio
+    from app.routers.pipeline import _prepare_stock_footage_candidates
+
+    project = _scripted_newscast_project(
+        db_session, paid_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative"),
+    )
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        _add_image(db_session, project, tmp_path, name)
+
+    searched: list[int] = []
+
+    async def _fake_assign(project, scene, db, **kw):
+        searched.append(scene.order)
+        return True
+
+    monkeypatch.setattr(
+        "app.routers.pipeline._try_assign_stock_clip_to_scene", _fake_assign
+    )
+
+    assert asyncio.run(_prepare_stock_footage_candidates(project, db_session)) == 1
+    # Scene 3 is the implicit outro, so eligible = scenes 1-2; the guarantee
+    # lands on the last of those.
+    assert searched == [2]
+
+
+def test_free_plan_cap_applies_to_uncovered_surplus_only(
+    db_session, free_user, monkeypatch, tmp_path,
+):
+    """A free plan gets exactly one clip, on the last eligible scene.
+
+    The image count does not influence WHICH scene is picked — only the tail
+    position does. Here scenes 1-2 happen to be image-covered and scene 4 is the
+    implicit outro, so the last eligible scene is 3 either way.
+    """
+    import asyncio
+    from app.routers.pipeline import _prepare_stock_footage_candidates
+
+    project = _scripted_newscast_project(
+        db_session, free_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative", "anchor_narrative"),
+    )
+    _add_image(db_session, project, tmp_path, "a.jpg")
+    _add_image(db_session, project, tmp_path, "b.jpg")
+
+    searched: list[int] = []
+
+    async def _fake_assign(project, scene, db, **kw):
+        searched.append(scene.order)
+        return False
+
+    monkeypatch.setattr(
+        "app.routers.pipeline._try_assign_stock_clip_to_scene", _fake_assign
+    )
+
+    asyncio.run(_prepare_stock_footage_candidates(project, db_session))
+    # Scenes 1-2 covered by images; free cap of 1 allows a clip on scene 3 only.
+    assert searched == [3]
+
+
+def test_prepare_stock_footage_candidates_skips_already_assigned(
+    db_session, paid_user, monkeypatch,
+):
+    """Re-entering the stock gate (e.g. page refresh) must not re-pick clips."""
+    import asyncio
+    from app.models.scene import Scene
+    from app.routers.pipeline import _prepare_stock_footage_candidates
+
+    project = _scripted_newscast_project(
+        db_session,
+        paid_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative"),
+    )
+    scenes = (
+        db_session.query(Scene)
+        .filter(Scene.project_id == project.id)
+        .order_by(Scene.order)
+        .all()
+    )
+    scenes[0].remotion_code = json.dumps(
+        {"layoutProps": {"assignedVideo": "scene_1_existing.mp4"}}
+    )
+    scenes[1].remotion_code = json.dumps(
+        {"layoutProps": {"assignedVideo": "scene_2_existing.mp4"}}
+    )
+    db_session.commit()
+
+    called: list[int] = []
+
+    async def _fake_assign(
+        project, scene, db, *, orientation, loop,
+        used_generics=None, used_clip_ids=None, llm_query=None,
+    ):
+        called.append(scene.id)
+        return True
+
+    monkeypatch.setattr(
+        "app.routers.pipeline._try_assign_stock_clip_to_scene", _fake_assign
+    )
+
+    n = asyncio.run(_prepare_stock_footage_candidates(project, db_session))
+    # Scenes 1-2 already carry clips and are skipped. Scene 3 is the implicit
+    # outro (scene_type NULL, last scene), whose slot is forced to hideImage —
+    # so nothing is fetched for it and the count is the 2 pre-existing clips.
+    assert n == 2
+    assert called == []
+
+
+# ---------------------------------------------------------------------------
+# _stock_footage_target_scenes — the ONE definition of "which scenes get a clip"
+# ---------------------------------------------------------------------------
+
+
+def test_target_scenes__paid_no_images_all_eligible(db_session, paid_user):
+    """No images: every eligible scene gets a clip, outro excluded."""
+    from app.routers.pipeline import _stock_footage_target_scenes
+
+    project = _scripted_newscast_project(
+        db_session, paid_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative", "anchor_narrative"),
+    )
+    picked = _stock_footage_target_scenes(project, db_session)
+    assert [s.order for s in picked] == [1, 2, 3], "scene 4 is the implicit outro"
+
+
+def test_target_scenes__paid_images_cover_all_still_yields_a_clip(
+    db_session, paid_user, tmp_path
+):
+    """Images covering every eligible scene still yields one clip.
+
+    The last image slot is given back, so the clip lands on the scene after the
+    images — which, with coverage saturated, is the final eligible scene (3).
+    """
+    from app.routers.pipeline import _stock_footage_target_scenes
+
+    project = _scripted_newscast_project(
+        db_session, paid_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative", "anchor_narrative"),
+    )
+    for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"):
+        _add_image(db_session, project, tmp_path, name)
+
+    picked = _stock_footage_target_scenes(project, db_session)
+    assert [s.order for s in picked] == [3], "last eligible scene, never the outro"
+
+
+@pytest.mark.parametrize("n_images,expected", [(0, 1), (1, 2), (2, 3), (5, 3)])
+def test_target_scenes__free_clip_follows_the_images(
+    db_session, free_user, tmp_path, n_images, expected
+):
+    """A free plan gets exactly one clip, on the scene right after the images.
+
+    Eligible = scenes 1-3 (scene 4 is the implicit outro). The clip tracks the
+    image count rather than sitting at a fixed position; with images enough to
+    cover everything (5) the last image slot is given back, so it lands on 3.
+    """
+    from app.routers.pipeline import _stock_footage_target_scenes
+
+    project = _scripted_newscast_project(
+        db_session, free_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative", "anchor_narrative"),
+    )
+    for i in range(n_images):
+        _add_image(db_session, project, tmp_path, f"img_{i}.jpg")
+
+    picked = _stock_footage_target_scenes(project, db_session)
+    assert [s.order for s in picked] == [expected], "one clip, directly after the images"
+
+
+def test_target_scenes__outro_never_selected(db_session, paid_user, tmp_path):
+    """Neither an explicit nor the implicit outro may be handed a clip.
+
+    An outro's visual slot is forced to hideImage, so a clip there is paid for
+    and never renders — the guarantee must skip past it rather than land on it.
+    """
+    from app.routers.pipeline import _stock_footage_target_scenes
+
+    project = _scripted_newscast_project(
+        db_session, paid_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative", "anchor_narrative"),
+    )
+    # Mark scene 3 an explicit outro; scene 4 is the implicit one. That leaves
+    # scenes 1-2 eligible, so the guarantee must fall to scene 2.
+    scenes = (
+        db_session.query(Scene)
+        .filter(Scene.project_id == project.id)
+        .order_by(Scene.order)
+        .all()
+    )
+    scenes[2].scene_type = "outro"
+    db_session.commit()
+    for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
+        _add_image(db_session, project, tmp_path, name)
+
+    picked = _stock_footage_target_scenes(project, db_session)
+    assert [s.order for s in picked] == [2]
+
+
+def test_target_scenes__single_eligible_scene(db_session, paid_user, tmp_path):
+    """One eligible scene with images present — guarantee and cap agree on it."""
+    from app.routers.pipeline import _stock_footage_target_scenes
+
+    project = _scripted_newscast_project(
+        db_session, paid_user, layouts=("opening", "anchor_narrative"),
+    )
+    _add_image(db_session, project, tmp_path, "a.jpg")
+    _add_image(db_session, project, tmp_path, "b.jpg")
+
+    picked = _stock_footage_target_scenes(project, db_session)
+    assert [s.order for s in picked] == [1], "scene 2 is the implicit outro"
+
+
+def test_target_scenes__empty_when_no_eligible_scenes(db_session, paid_user):
+    """The one path where the guarantee must NOT fire: nothing can show a clip."""
+    import asyncio
+    from app.routers.pipeline import (
+        _prepare_stock_footage_candidates,
+        _stock_footage_target_scenes,
+    )
+
+    # ending_socials cannot display a visual, and the remaining scene is the
+    # implicit outro — so no scene is eligible at all.
+    project = _scripted_newscast_project(
+        db_session, paid_user, layouts=("ending_socials", "anchor_narrative"),
+    )
+    assert _stock_footage_target_scenes(project, db_session) == []
+    assert asyncio.run(_prepare_stock_footage_candidates(project, db_session)) == 0
+
+
+def test_pending_review_lists_same_scene_as_autopick(
+    db_session, free_user, tmp_path, monkeypatch
+):
+    """The review endpoint must point at the scene the auto-pick actually clipped.
+
+    Both used to slice the per-plan cap off the HEAD of the image-capable list.
+    Now that a free user's clip is tail-anchored, a front slice would show the
+    wrong scene — this locks the two to one shared selector.
+    """
+    import asyncio
+    from app.routers.pipeline import (
+        _prepare_stock_footage_candidates,
+        _stock_footage_target_scenes,
+    )
+
+    project = _scripted_newscast_project(
+        db_session, free_user,
+        layouts=("opening", "anchor_narrative", "anchor_narrative", "anchor_narrative"),
+    )
+    for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
+        _add_image(db_session, project, tmp_path, name)
+
+    searched: list[int] = []
+
+    async def _fake_assign(project, scene, db, **kw):
+        searched.append(scene.id)
+        return True
+
+    monkeypatch.setattr(
+        "app.routers.pipeline._try_assign_stock_clip_to_scene", _fake_assign
+    )
+    asyncio.run(_prepare_stock_footage_candidates(project, db_session))
+
+    review_ids = [s.id for s in _stock_footage_target_scenes(project, db_session)]
+    assert searched == review_ids, "review list must match what got a clip"
+    assert len(review_ids) == 1
+
+
+# ─── Relevance metadata + candidate pool ────────────────────────────────────
+
+
+def test_pexels_search__derives_description_from_url_slug(monkeypatch):
+    """Pexels video hits carry no title — the URL slug is the only text we get."""
+    payload = {
+        "videos": [{
+            "id": 3209828, "width": 1920, "height": 1080, "duration": 8,
+            "url": "https://www.pexels.com/video/a-woman-typing-on-a-laptop-3209828/",
+            "image": "i", "user": {"name": "Jane"},
+            "video_files": [
+                {"width": 1280, "height": 720, "fps": 30, "link": "https://cdn/720.mp4"},
+            ],
+        }]
+    }
+    monkeypatch.setattr(stock_footage.settings, "PEXELS_API_KEY", "k", raising=False)
+    monkeypatch.setattr(
+        stock_footage.requests, "get",
+        lambda *a, **k: SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None),
+    )
+
+    clips = stock_footage._pexels_search("typing", 6, 1, None)
+
+    assert clips[0].description == "a woman typing on a laptop"
+
+
+def test_pixabay_search__carries_tags_through(monkeypatch):
+    """Pixabay's comma-separated tags are the richest relevance signal we have."""
+    payload = {
+        "hits": [{
+            "id": 55, "duration": 9, "picture_id": "pic", "user": "Bob",
+            "pageURL": "https://pixabay.com/videos/x-55/",
+            "tags": "nature, forest, trees",
+            "videos": {"medium": {"url": "https://cdn/m.mp4", "width": 1280, "height": 720}},
+        }]
+    }
+    monkeypatch.setattr(stock_footage.settings, "PIXABAY_API_KEY", "k", raising=False)
+    monkeypatch.setattr(
+        stock_footage.requests, "get",
+        lambda *a, **k: SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None),
+    )
+
+    clips = stock_footage._pixabay_search("forest", 6, 1, None)
+
+    assert clips[0].tags == "nature, forest, trees"
+
+
+def test_stock_clip_to_dict__includes_relevance_fields():
+    """to_dict() feeds the manual picker API — the new keys must be present."""
+    clip = stock_footage.StockClip(
+        provider="pexels", id="1", preview_url="p", thumbnail_url="t",
+        download_url="d", width=1280, height=720, duration=5.0, fps=30.0,
+        author="a", page_url="u",
+    )
+    out = clip.to_dict()
+    assert out["tags"] == ""
+    assert out["description"] == ""
+
+
+def _pool_clip(provider: str, cid: str, fps: float = 30.0):
+    return stock_footage.StockClip(
+        provider=provider, id=cid, preview_url="p", thumbnail_url="t",
+        download_url="d", width=1280, height=720, duration=5.0, fps=fps,
+        author="a", page_url="u",
+    )
+
+
+def test_pick_best_for_scene__requests_a_pool_not_one_clip(monkeypatch):
+    """per_page and the pool cap are different numbers — guard both."""
+    captured: dict = {}
+
+    def fake_search(*args, **kwargs):
+        captured.update(kwargs)
+        return [_pool_clip("pexels", "1")]
+
+    monkeypatch.setattr(stock_footage, "search", fake_search)
+
+    clip = stock_footage.pick_best_for_scene("startup", orientation="landscape")
+
+    assert clip is not None
+    assert captured["per_page"] == stock_footage.AUTO_SEARCH_PER_PAGE
+    assert captured["max_results"] == stock_footage.AUTO_CANDIDATE_POOL_SIZE
+
+
+def test_pick_best_for_scene__issues_exactly_one_search(monkeypatch):
+    calls: list[str] = []
+
+    def fake_search(query, **kwargs):
+        calls.append(query)
+        return [_pool_clip("pexels", "1"), _pool_clip("pixabay", "2")]
+
+    monkeypatch.setattr(stock_footage, "search", fake_search)
+
+    stock_footage.pick_best_for_scene("solar panels")
+
+    assert calls == ["solar panels"]
+
+
+def test_pick_best_for_scene__skips_excluded_clips(monkeypatch):
+    """Cross-scene dedup: a clip another scene already took must not come back."""
+    monkeypatch.setattr(
+        stock_footage, "search",
+        lambda *a, **k: [_pool_clip("pexels", "1"), _pool_clip("pixabay", "2")],
+    )
+
+    clip = stock_footage.pick_best_for_scene("q", exclude_ids={"pexels:1"})
+
+    assert clip is not None
+    assert f"{clip.provider}:{clip.id}" == "pixabay:2"
+
+
+def test_pick_best_for_scene__returns_none_when_all_excluded(monkeypatch):
+    monkeypatch.setattr(
+        stock_footage, "search", lambda *a, **k: [_pool_clip("pexels", "1")]
+    )
+
+    assert stock_footage.pick_best_for_scene("q", exclude_ids={"pexels:1"}) is None
+
+
+def test_pick_best_for_scene__returns_none_on_empty_pool(monkeypatch):
+    monkeypatch.setattr(stock_footage, "search", lambda *a, **k: [])
+
+    assert stock_footage.pick_best_for_scene("q") is None
+
+
+def test_search__caches_provider_responses(monkeypatch):
+    """Pixabay's terms require 24h caching; it also removes a ~650ms round-trip."""
+    calls: list[str] = []
+
+    def fake_pixabay(query, per_page, page, orientation):
+        calls.append(query)
+        return [_pool_clip("pixabay", "1")]
+
+    monkeypatch.setattr(stock_footage, "_pixabay_search", fake_pixabay)
+
+    first = stock_footage.search("solar", provider="pixabay", per_page=6)
+    second = stock_footage.search("solar", provider="pixabay", per_page=6)
+
+    assert len(calls) == 1, "second identical search should be served from cache"
+    assert [c.id for c in first] == [c.id for c in second]
+
+
+def test_search__cache_is_keyed_by_query_and_params(monkeypatch):
+    calls: list[tuple] = []
+
+    def fake_pixabay(query, per_page, page, orientation):
+        calls.append((query, orientation))
+        return [_pool_clip("pixabay", "1")]
+
+    monkeypatch.setattr(stock_footage, "_pixabay_search", fake_pixabay)
+
+    stock_footage.search("solar", provider="pixabay", per_page=6)
+    stock_footage.search("wind", provider="pixabay", per_page=6)
+    stock_footage.search("solar", provider="pixabay", per_page=6, orientation="portrait")
+
+    assert len(calls) == 3, "different query or params must miss the cache"
+
+
+def test_search__does_not_cache_empty_responses(monkeypatch):
+    """A transient failure must not be pinned for 24 hours."""
+    calls: list[str] = []
+
+    def fake_pixabay(query, per_page, page, orientation):
+        calls.append(query)
+        return []
+
+    monkeypatch.setattr(stock_footage, "_pixabay_search", fake_pixabay)
+
+    stock_footage.search("solar", provider="pixabay", per_page=6)
+    stock_footage.search("solar", provider="pixabay", per_page=6)
+
+    assert len(calls) == 2
+
+
+def test_search__cached_list_is_isolated_from_caller_mutation(monkeypatch):
+    """Callers filter/sort results in place — that must not corrupt the cache."""
+    monkeypatch.setattr(
+        stock_footage, "_pixabay_search",
+        lambda *a, **k: [_pool_clip("pixabay", "1"), _pool_clip("pixabay", "2")],
+    )
+
+    first = stock_footage.search("solar", provider="pixabay", per_page=6)
+    first.clear()
+    second = stock_footage.search("solar", provider="pixabay", per_page=6)
+
+    assert len(second) == 2
+
+
+def test_pixabay_search__clamps_per_page_to_provider_minimum(monkeypatch):
+    """Pixabay 400s below per_page=3; search() allows 1."""
+    captured: dict = {}
+
+    def fake_get(url, **kwargs):
+        captured.update(kwargs.get("params") or {})
+        return SimpleNamespace(json=lambda: {"hits": []}, raise_for_status=lambda: None)
+
+    monkeypatch.setattr(stock_footage.settings, "PIXABAY_API_KEY", "k", raising=False)
+    monkeypatch.setattr(stock_footage.requests, "get", fake_get)
+
+    stock_footage._pixabay_search("solar", 1, 1, None)
+
+    assert captured["per_page"] >= 3
+    assert captured["safesearch"] == "true"
+    assert captured["order"] == "popular"
+
+
+def test_pixabay_search__truncates_overlong_query(monkeypatch):
+    """The API caps q at 100 characters."""
+    captured: dict = {}
+
+    def fake_get(url, **kwargs):
+        captured.update(kwargs.get("params") or {})
+        return SimpleNamespace(json=lambda: {"hits": []}, raise_for_status=lambda: None)
+
+    monkeypatch.setattr(stock_footage.settings, "PIXABAY_API_KEY", "k", raising=False)
+    monkeypatch.setattr(stock_footage.requests, "get", fake_get)
+
+    stock_footage._pixabay_search("x" * 250, 6, 1, None)
+
+    assert len(captured["q"]) == 100
+
+
+def test_pixabay_search__enforces_duration_cap_client_side(monkeypatch):
+    """Pixabay accepts `max_duration` and ignores it — verified live: a request
+    capped at 12s returned 14s, 30s, 41s and 169s clips. The ceiling must be
+    applied to the response, not delegated to the API."""
+    payload = {
+        "hits": [
+            {"id": 1, "duration": 8, "pageURL": "p1", "user": "A", "tags": "a",
+             "videos": {"medium": {"url": "https://cdn/1.mp4", "width": 1280, "height": 720}}},
+            {"id": 2, "duration": 169, "pageURL": "p2", "user": "B", "tags": "b",
+             "videos": {"medium": {"url": "https://cdn/2.mp4", "width": 1280, "height": 720}}},
+            {"id": 3, "duration": 12, "pageURL": "p3", "user": "C", "tags": "c",
+             "videos": {"medium": {"url": "https://cdn/3.mp4", "width": 1280, "height": 720}}},
+        ]
+    }
+    monkeypatch.setattr(stock_footage.settings, "PIXABAY_API_KEY", "k", raising=False)
+    monkeypatch.setattr(
+        stock_footage.requests, "get",
+        lambda *a, **k: SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None),
+    )
+
+    clips = stock_footage._pixabay_search("q", 6, 1, None)
+
+    assert [c.id for c in clips] == ["1", "3"]          # 169s dropped
+    assert all(c.duration <= stock_footage.MAX_CLIP_DURATION_SECONDS for c in clips)
+
+
+def test_pixabay_search__overfetches_to_survive_the_duration_filter(monkeypatch):
+    """Only ~30-50% of a page survives the 12s cap, so ask for more than we need."""
+    captured: dict = {}
+
+    def fake_get(url, **kwargs):
+        captured.update(kwargs.get("params") or {})
+        return SimpleNamespace(json=lambda: {"hits": []}, raise_for_status=lambda: None)
+
+    monkeypatch.setattr(stock_footage.settings, "PIXABAY_API_KEY", "k", raising=False)
+    monkeypatch.setattr(stock_footage.requests, "get", fake_get)
+
+    stock_footage._pixabay_search("q", 6, 1, None)
+
+    assert captured["per_page"] > 6
+    # And `max_duration` must not be sent — it is silently ignored, so sending it
+    # would imply a guarantee the API does not provide.
+    assert "max_duration" not in captured
+
+
+def test_pixabay_search__returns_no_more_than_requested(monkeypatch):
+    """Over-fetching must not let Pixabay dominate the provider interleave."""
+    payload = {
+        "hits": [
+            {"id": i, "duration": 5, "pageURL": f"p{i}", "user": "A", "tags": "a",
+             "videos": {"medium": {"url": f"https://cdn/{i}.mp4", "width": 1280, "height": 720}}}
+            for i in range(40)
+        ]
+    }
+    monkeypatch.setattr(stock_footage.settings, "PIXABAY_API_KEY", "k", raising=False)
+    monkeypatch.setattr(
+        stock_footage.requests, "get",
+        lambda *a, **k: SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None),
+    )
+
+    assert len(stock_footage._pixabay_search("q", 6, 1, None)) == 6
+
+
+def test_unknown_fps_ranks_between_clean_and_resampling_rates():
+    """Pixabay reports no fps. Unknown must beat a known-bad 25fps but lose to a
+    known 30fps, so 'prefer 30fps' still holds across both providers."""
+    assert stock_footage.fps_rank(30.0) < stock_footage.fps_rank(None)
+    assert stock_footage.fps_rank(None) < stock_footage.fps_rank(25.0)
+
+
+def test_search__never_returns_an_over_length_clip(monkeypatch):
+    """Single enforcement point: Pexels applies max_duration server-side and
+    Pixabay ignores it entirely, so search() re-checks. An over-length clip
+    costs a download and two ffmpeg passes for footage the renderer loops."""
+    long_clip = stock_footage.StockClip(
+        provider="pexels", id="long", preview_url="p", thumbnail_url="t",
+        download_url="d", width=1280, height=720, duration=169.0, fps=30.0,
+        author="a", page_url="u",
+    )
+    ok_clip = _pool_clip("pixabay", "ok")
+
+    monkeypatch.setattr(stock_footage, "_pexels_search", lambda *a, **k: [long_clip])
+    monkeypatch.setattr(stock_footage, "_pixabay_search", lambda *a, **k: [ok_clip])
+
+    out = stock_footage.search("q", provider="all", per_page=4, max_results=8)
+
+    assert [c.id for c in out] == ["ok"]
+
+
+def test_pexels_search__skips_over_length_hits(monkeypatch):
+    payload = {
+        "videos": [
+            {"id": 1, "duration": 8, "url": "https://www.pexels.com/video/a-b-1/",
+             "image": "i", "user": {"name": "A"},
+             "video_files": [{"width": 1280, "height": 720, "fps": 30, "link": "https://cdn/1.mp4"}]},
+            {"id": 2, "duration": 40, "url": "https://www.pexels.com/video/c-d-2/",
+             "image": "i", "user": {"name": "B"},
+             "video_files": [{"width": 1280, "height": 720, "fps": 30, "link": "https://cdn/2.mp4"}]},
+        ]
+    }
+    monkeypatch.setattr(stock_footage.settings, "PEXELS_API_KEY", "k", raising=False)
+    monkeypatch.setattr(
+        stock_footage.requests, "get",
+        lambda *a, **k: SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None),
+    )
+
+    assert [c.id for c in stock_footage._pexels_search("q", 4, 1, None)] == ["1"]
+
+
+def test_auto_pool__one_provider_can_fill_it_alone():
+    """With a single key configured there is no second provider to cover a
+    shortfall, so each must be able to supply the whole pool by itself."""
+    assert stock_footage.AUTO_SEARCH_PER_PAGE >= stock_footage.AUTO_CANDIDATE_POOL_SIZE
+    assert stock_footage.AUTO_CANDIDATE_POOL_SIZE == 8
+
+
+def test_search__skips_providers_with_no_api_key(monkeypatch):
+    """An unconfigured provider is off, not failing — it must not be dispatched."""
+    calls: list[str] = []
+    monkeypatch.setattr(stock_footage.settings, "PEXELS_API_KEY", "", raising=False)
+    monkeypatch.setattr(
+        stock_footage, "_pexels_search",
+        lambda *a, **k: calls.append("pexels") or [],
+    )
+    monkeypatch.setattr(
+        stock_footage, "_pixabay_search",
+        lambda *a, **k: [_pool_clip("pixabay", "1")],
+    )
+
+    out = stock_footage.search("q", provider="all", per_page=8, max_results=8)
+
+    assert calls == []                      # never dispatched
+    assert [c.provider for c in out] == ["pixabay"]
+
+
+def test_search__returns_empty_when_no_keys_configured(monkeypatch):
+    monkeypatch.setattr(stock_footage.settings, "PEXELS_API_KEY", "", raising=False)
+    monkeypatch.setattr(stock_footage.settings, "PIXABAY_API_KEY", "", raising=False)
+
+    assert stock_footage.search("q", provider="all") == []
+
+
+def test_pixabay_search__overfetch_covers_the_whole_pool(monkeypatch):
+    """Most of a Pixabay page is discarded by the 12s ceiling — measured across
+    12 real queries, per_page=40 left two unable to fill 8. The request must be
+    sized for the worst query, not the median."""
+    captured: dict = {}
+
+    def fake_get(url, **kwargs):
+        captured.update(kwargs.get("params") or {})
+        return SimpleNamespace(json=lambda: {"hits": []}, raise_for_status=lambda: None)
+
+    monkeypatch.setattr(stock_footage.requests, "get", fake_get)
+
+    stock_footage._pixabay_search("q", stock_footage.AUTO_CANDIDATE_POOL_SIZE, 1, None)
+
+    assert captured["per_page"] >= 80
+
+
+# ─── A removed clip stays removed ────────────────────────────────────────────
+#
+# Reported bug: unassign a stock clip from a scene, re-render, and the clip is
+# back. Two causes, both covered here.
+#
+# 1. `write_remotion_data` is not read-only — it commits scene descriptors. Its
+#    spare-clip pass ("re-place clips the project already owns") ran on EVERY
+#    call, including a plain re-render where nothing was released. The freed clip
+#    became a spare, the emptied scene looked like an open slot, and the pass put
+#    them back together — popping the user's hideImage marker on the way.
+#    Fixed by gating the pass on `redistribute_images`, the flag that already
+#    separates generation (True) from a plain re-render (False).
+#
+# 2. A REGENERATE legitimately re-places clips, so it needs to know the slot was
+#    emptied on purpose. `hideImage` cannot say that — Step 5 stamps it on every
+#    empty image-capable scene — hence the `visualClearedByUser` marker.
+
+
+def _run_write(project, db, tmp_path, monkeypatch, *, redistribute=False, ws="ws"):
+    from app.services import remotion as remotion_service
+
+    workspace = tmp_path / ws
+    (workspace / "public").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(remotion_service, "provision_workspace", lambda *a, **k: str(workspace))
+    db.refresh(project)
+    remotion_service.write_remotion_data(
+        project,
+        db.query(Scene).filter(Scene.project_id == project.id).order_by(Scene.order).all(),
+        db,
+        redistribute_images=redistribute,
+    )
+    return json.loads((workspace / "public" / "data.json").read_text())
+
+
+def _clip_project(db, user, tmp_path, n_scenes=3):
+    """A project owning one clip that is NOT assigned to any scene."""
+    from app.models.asset import Asset, AssetType
+
+    project, scenes = _newscast_project(db, user, n_scenes=n_scenes)
+    clip = tmp_path / "freed.mp4"
+    clip.write_bytes(b"fake-mp4")
+    db.add(Asset(project_id=project.id, asset_type=AssetType.VIDEO,
+                 local_path=str(clip), filename="freed.mp4",
+                 duration_seconds=6.0, excluded=False))
+    db.commit()
+    return project, scenes
+
+
+def test_a_plain_rerender_does_not_assign_clips(db_session, paid_user, tmp_path, monkeypatch):
+    """THE BUG. A re-render must not hand out a clip the user just freed."""
+    project, scenes = _clip_project(db_session, paid_user, tmp_path)
+
+    _run_write(project, db_session, tmp_path, monkeypatch, redistribute=False)
+
+    for s in db_session.query(Scene).filter(Scene.project_id == project.id).all():
+        lp = json.loads(s.remotion_code)["layoutProps"]
+        assert not lp.get("assignedVideo"), "a plain re-render assigned a clip"
+
+
+def test_a_plain_rerender_does_not_change_stored_descriptors(
+    db_session, paid_user, tmp_path, monkeypatch
+):
+    """The root cause, stated directly: rendering must not rewrite the project.
+
+    Sharper than asserting on any single key — it catches the next thing that
+    starts persisting from the render path.
+    """
+    project, scenes = _clip_project(db_session, paid_user, tmp_path)
+
+    # Settle any first-run bookkeeping, then snapshot.
+    _run_write(project, db_session, tmp_path, monkeypatch, redistribute=False, ws="w1")
+    before = {
+        s.id: s.remotion_code
+        for s in db_session.query(Scene).filter(Scene.project_id == project.id).all()
+    }
+
+    _run_write(project, db_session, tmp_path, monkeypatch, redistribute=False, ws="w2")
+
+    after = {
+        s.id: s.remotion_code
+        for s in db_session.query(Scene).filter(Scene.project_id == project.id).all()
+    }
+    assert after == before, "a plain re-render mutated stored scene descriptors"
+
+
+def test_a_regenerate_still_places_owned_clips(db_session, paid_user, tmp_path, monkeypatch):
+    """The gate must not disable the behaviour the pass exists for.
+
+    A regenerate releases every clip against a brand-new scene sequence; those
+    clips are paid for and must be re-placed.
+    """
+    project, scenes = _clip_project(db_session, paid_user, tmp_path)
+
+    _run_write(project, db_session, tmp_path, monkeypatch, redistribute=True)
+
+    placed = [
+        json.loads(s.remotion_code)["layoutProps"].get("assignedVideo")
+        for s in db_session.query(Scene).filter(Scene.project_id == project.id).all()
+    ]
+    assert "freed.mp4" in placed, "a regenerate should re-place an owned clip"
+
+
+def test_a_regenerate_skips_a_slot_the_user_emptied(
+    db_session, paid_user, tmp_path, monkeypatch
+):
+    """`visualClearedByUser` is what survives a regenerate.
+
+    hideImage cannot carry this: Step 5 sets it on every empty image-capable
+    scene, so it says nothing about intent.
+    """
+    project, scenes = _clip_project(db_session, paid_user, tmp_path)
+
+    # Mark EVERY scene as user-cleared, so there is no slot the clip may take.
+    for s in db_session.query(Scene).filter(Scene.project_id == project.id).all():
+        desc = json.loads(s.remotion_code)
+        desc["layoutProps"]["visualClearedByUser"] = True
+        desc["layoutProps"]["hideImage"] = True
+        s.remotion_code = json.dumps(desc)
+    db_session.commit()
+
+    _run_write(project, db_session, tmp_path, monkeypatch, redistribute=True)
+
+    for s in db_session.query(Scene).filter(Scene.project_id == project.id).all():
+        lp = json.loads(s.remotion_code)["layoutProps"]
+        assert not lp.get("assignedVideo"), "a user-cleared slot was refilled"
+        assert lp.get("visualClearedByUser"), "the user's marker was dropped"
+
+
+# ─── ...but only from the scene it was removed from ──────────────────────────
+#
+# Reported bug: one clip assigned to several scenes, removed from ONE, vanished
+# from the others too — and those scenes were not marked hideImage, so they fell
+# back to a generic still.
+#
+# Cause: `excluded` is project-wide and matched by FILENAME, while a clip (like a
+# still) may legitimately be assigned to several scenes. The other scenes kept a
+# valid `assignedVideo`, but every resolver filters on `excluded`, so nothing
+# rendered; the prune pass then stripped the key and opened the slot to an image.
+# Stills never had this failure mode — removing one only edits that descriptor.
+
+
+def _assign_clip(db, scene, filename="freed.mp4"):
+    desc = json.loads(scene.remotion_code)
+    desc["layoutProps"]["assignedVideo"] = filename
+    desc["layoutProps"]["videoMuted"] = True
+    desc["layoutProps"]["videoVolume"] = 0.35
+    scene.remotion_code = json.dumps(desc)
+    db.commit()
+
+
+def _cleared_descriptor(scene):
+    """The descriptor the editor PUTs when the user removes the visual."""
+    desc = json.loads(scene.remotion_code)
+    lp = desc["layoutProps"]
+    for k in ("assignedVideo", "videoMuted", "videoVolume", "videoStartSeconds",
+              "assignedImage", "imageFocusX", "imageFocusY", "imageZoom"):
+        lp.pop(k, None)
+    lp["hideImage"] = True
+    lp["visualClearedByUser"] = True
+    return json.dumps(desc)
+
+
+def _clip_asset(db, project_id, filename="freed.mp4"):
+    from app.models.asset import Asset, AssetType
+
+    return (
+        db.query(Asset)
+        .filter(
+            Asset.project_id == project_id,
+            Asset.filename == filename,
+            Asset.asset_type == AssetType.VIDEO,
+        )
+        .first()
+    )
+
+
+def test_removing_a_shared_clip_leaves_the_other_scene_alone(
+    client, db_session, paid_user, auth, tmp_path, monkeypatch
+):
+    """THE BUG. One clip on two scenes, removed from one, must survive on the other."""
+    project, scenes = _clip_project(db_session, paid_user, tmp_path, n_scenes=3)
+    _assign_clip(db_session, scenes[0])
+    _assign_clip(db_session, scenes[1])
+
+    resp = client.put(
+        f"/api/projects/{project.id}/scenes/{scenes[0].id}",
+        headers=auth(paid_user),
+        json={"remotion_code": _cleared_descriptor(scenes[0])},
+    )
+    assert resp.status_code == 200, resp.text
+
+    db_session.expire_all()
+    asset = _clip_asset(db_session, project.id)
+    assert asset.excluded is False, "a clip another scene still uses was retired"
+
+    _run_write(project, db_session, tmp_path, monkeypatch, redistribute=False)
+
+    by_id = {s.id: json.loads(s.remotion_code)["layoutProps"]
+             for s in db_session.query(Scene).filter(Scene.project_id == project.id).all()}
+    assert by_id[scenes[1].id].get("assignedVideo") == "freed.mp4", \
+        "the clip was stripped from a scene the user never touched"
+    assert not by_id[scenes[0].id].get("assignedVideo"), "the cleared scene kept its clip"
+    assert not by_id[scenes[1].id].get("assignedImage"), \
+        "the untouched scene fell back to a generic still"
+
+
+def test_removing_a_clips_last_use_still_retires_it(
+    client, db_session, paid_user, auth, tmp_path
+):
+    """The narrowed gate must not weaken the behaviour it guards.
+
+    No other scene uses the clip, so removing it retires it exactly as before.
+    """
+    project, scenes = _clip_project(db_session, paid_user, tmp_path, n_scenes=3)
+    _assign_clip(db_session, scenes[0])
+
+    resp = client.put(
+        f"/api/projects/{project.id}/scenes/{scenes[0].id}",
+        headers=auth(paid_user),
+        json={"remotion_code": _cleared_descriptor(scenes[0])},
+    )
+    assert resp.status_code == 200, resp.text
+
+    db_session.expire_all()
+    assert _clip_asset(db_session, project.id).excluded is True, \
+        "a clip no scene uses should stay removed"
+
+
+def test_write_remotion_data_restores_a_clip_a_scene_still_references(
+    db_session, paid_user, tmp_path, monkeypatch
+):
+    """Self-heal for projects already damaged by the project-wide exclusion."""
+    project, scenes = _clip_project(db_session, paid_user, tmp_path, n_scenes=3)
+    _assign_clip(db_session, scenes[1])
+    asset = _clip_asset(db_session, project.id)
+    asset.excluded = True
+    db_session.commit()
+
+    _run_write(project, db_session, tmp_path, monkeypatch, redistribute=False)
+
+    db_session.expire_all()
+    assert _clip_asset(db_session, project.id).excluded is False, \
+        "a referenced clip was not restored"
+    lp = json.loads(
+        db_session.query(Scene).filter(Scene.id == scenes[1].id).first().remotion_code
+    )["layoutProps"]
+    assert lp.get("assignedVideo") == "freed.mp4", "the scene lost its clip"
+
+
+def test_write_remotion_data_leaves_an_unreferenced_excluded_clip_alone(
+    db_session, paid_user, tmp_path, monkeypatch
+):
+    """The repair must not undo a deliberate removal."""
+    project, scenes = _clip_project(db_session, paid_user, tmp_path, n_scenes=3)
+    asset = _clip_asset(db_session, project.id)
+    asset.excluded = True
+    db_session.commit()
+
+    _run_write(project, db_session, tmp_path, monkeypatch, redistribute=False)
+
+    db_session.expire_all()
+    assert _clip_asset(db_session, project.id).excluded is True, \
+        "a removed clip came back"

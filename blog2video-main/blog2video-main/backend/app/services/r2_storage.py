@@ -1,0 +1,550 @@
+"""
+Cloudflare R2 storage service.
+
+Provides upload, download URL generation, and deletion for project assets
+(images, audio, rendered videos). Uses boto3 with S3-compatible API.
+
+R2 key structure:
+    {prefix}users/{user_id}/projects/{project_id}/images/{filename}
+    {prefix}users/{user_id}/projects/{project_id}/audio/{filename}
+    {prefix}users/{user_id}/projects/{project_id}/output/video.mp4
+    {prefix}users/{user_id}/voices/{voice_id}/preview.mp3
+
+    Set R2_KEY_PREFIX in .env (e.g. "dev") to namespace local uploads
+    away from production data. In production leave it empty.
+"""
+import os
+import mimetypes
+import json
+from typing import Optional
+
+import boto3
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
+
+from app.config import settings
+
+
+# ─── Lazy-initialised S3 client ──────────────────────────────
+
+_s3_client = None
+
+
+def _get_client():
+    """Return a cached boto3 S3 client configured for Cloudflare R2."""
+    global _s3_client
+    if _s3_client is None:
+        if not settings.R2_ACCOUNT_ID:
+            raise RuntimeError(
+                "R2_ACCOUNT_ID is not configured. "
+                "Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY in .env"
+            )
+        _s3_client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{settings.R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+            aws_access_key_id=settings.R2_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.R2_SECRET_ACCESS_KEY,
+            config=BotoConfig(
+                signature_version="s3v4",
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
+            region_name="auto",
+        )
+    return _s3_client
+
+
+def is_r2_configured() -> bool:
+    """Return True if R2 credentials are configured."""
+    return bool(
+        settings.R2_ACCOUNT_ID
+        and settings.R2_ACCESS_KEY_ID
+        and settings.R2_SECRET_ACCESS_KEY
+        and settings.R2_BUCKET_NAME
+    )
+
+
+# ─── Key helpers ──────────────────────────────────────────────
+
+
+def _prefix() -> str:
+    """Return the R2 key prefix (e.g. 'dev/' for local, '' for production).
+    Set R2_KEY_PREFIX=dev in .env to isolate local uploads from production data."""
+    p = settings.R2_KEY_PREFIX.strip().strip("/")
+    return f"{p}/" if p else ""
+
+
+def image_key(user_id: int, project_id: int, filename: str) -> str:
+    """R2 object key for a project image."""
+    return f"{_prefix()}users/{user_id}/projects/{project_id}/images/{filename}"
+
+
+def audio_key(user_id: int, project_id: int, filename: str) -> str:
+    """R2 object key for a project audio file."""
+    return f"{_prefix()}users/{user_id}/projects/{project_id}/audio/{filename}"
+
+
+def stock_video_key(user_id: int, project_id: int, filename: str) -> str:
+    """R2 object key for a stock-footage clip attached to a scene.
+
+    Distinct from ``video_key`` below, which is the project's *rendered output*.
+    """
+    return f"{_prefix()}users/{user_id}/projects/{project_id}/videos/{filename}"
+
+
+def avatar_key(user_id: int, project_id: int, filename: str) -> str:
+    """R2 object key for a project talking-head avatar clip."""
+    return f"{_prefix()}users/{user_id}/projects/{project_id}/avatars/{filename}"
+
+
+def video_key(user_id: int, project_id: int) -> str:
+    """R2 object key for a project's rendered video (legacy — same key every time)."""
+    return f"{_prefix()}users/{user_id}/projects/{project_id}/output/video.mp4"
+
+
+def video_key_versioned(user_id: int, project_id: int, version: str) -> str:
+    """R2 object key for a project's rendered video with a version (e.g. timestamp).
+    Use this so each re-render gets a new URL and caches don't serve the old file."""
+    return f"{_prefix()}users/{user_id}/projects/{project_id}/output/video_{version}.mp4"
+
+
+def render_progress_key(user_id: int, project_id: int) -> str:
+    """R2 object key for a project's temporary render progress payload."""
+    return f"{_prefix()}users/{user_id}/projects/{project_id}/output/render_progress.json"
+
+
+def project_prefix(user_id: int, project_id: int) -> str:
+    """R2 key prefix for all objects belonging to a project."""
+    return f"{_prefix()}users/{user_id}/projects/{project_id}/"
+
+
+def user_prefix(user_id: int) -> str:
+    """R2 key prefix for all objects belonging to a user."""
+    return f"{_prefix()}users/{user_id}/"
+
+
+def brand_asset_key(user_id: int, brand_kit_id: int, filename: str) -> str:
+    """R2 object key for a brand kit asset (logo, image)."""
+    return f"{_prefix()}users/{user_id}/brand-kits/{brand_kit_id}/{filename}"
+
+
+def voice_preview_key(user_id: int, voice_id: str) -> str:
+    """R2 object key for a custom voice preview (cloned voice TTS clip)."""
+    return f"{_prefix()}users/{user_id}/voices/{voice_id}/preview.mp3"
+
+
+def custom_template_preview_key(user_id: int, template_id: int, ext: str = "webp") -> str:
+    """R2 object key for a custom template's static preview snapshot."""
+    return f"{_prefix()}users/{user_id}/custom-templates/{template_id}/preview.{ext}"
+
+
+# ─── Public URL ───────────────────────────────────────────────
+
+
+def public_url(key: str) -> str:
+    """
+    Return the public URL for an R2 object.
+    Uses R2_PUBLIC_URL (custom domain or r2.dev subdomain).
+    """
+    base = settings.R2_PUBLIC_URL.rstrip("/")
+    return f"{base}/{key}"
+
+
+# ─── Upload ───────────────────────────────────────────────────
+
+
+def upload_file(
+    local_path: str,
+    key: str,
+    content_type: Optional[str] = None,
+    as_attachment: bool = False,
+) -> str:
+    """
+    Upload a local file to R2.
+
+    Args:
+        local_path: Path to the local file.
+        key: The R2 object key (e.g. "projects/42/images/img_abc123.webp").
+        content_type: Optional MIME type. Auto-detected if not provided.
+        as_attachment: Serve with `Content-Disposition: attachment` so browsers
+            DOWNLOAD the object instead of playing it inline. True only for the
+            finished project video, which is the one thing a user saves to disk.
+            Everything else — avatar clips, their transparent twins, portraits —
+            is consumed inline by a <video>/<img> tag and must NOT carry it.
+
+    Returns:
+        The public URL of the uploaded object.
+    """
+    if not is_r2_configured():
+        print("[R2] Skipping upload — R2 not configured")
+        return ""
+
+    if not os.path.exists(local_path):
+        raise FileNotFoundError(f"Local file not found: {local_path}")
+
+    if not content_type:
+        content_type, _ = mimetypes.guess_type(local_path)
+        content_type = content_type or "application/octet-stream"
+
+    client = _get_client()
+    extra_args = {"ContentType": content_type}
+
+    # Set cache and disposition headers based on file type
+    if content_type.startswith("video/"):
+        extra_args["CacheControl"] = "public, max-age=86400"  # 1 day
+        # Opt-in, NOT blanket on video/*. This header used to be attached to
+        # every video, which broke the two clips a browser has to play inline:
+        # the .webm avatar preview (fetched by a <video> tag — a VP9-with-alpha
+        # stream marked "attachment" simply will not render) and, once the
+        # content-type bug below was fixed, anything else served from the same
+        # helper.
+        if as_attachment:
+            extra_args["ContentDisposition"] = "attachment; filename=\"video.mp4\""
+    elif content_type.startswith("image/"):
+        extra_args["CacheControl"] = "public, max-age=604800"  # 7 days
+    elif content_type.startswith("audio/"):
+        extra_args["CacheControl"] = "public, max-age=604800"  # 7 days
+
+    client.upload_file(
+        Filename=local_path,
+        Bucket=settings.R2_BUCKET_NAME,
+        Key=key,
+        ExtraArgs=extra_args,
+    )
+
+    url = public_url(key)
+    print(f"[R2] Uploaded {key} ({content_type})")
+    return url
+
+
+def upload_bytes(key: str, body: bytes, content_type: Optional[str] = None) -> str:
+    """
+    Upload in-memory bytes to R2.
+
+    Args:
+        key: The R2 object key.
+        body: Raw bytes to upload.
+        content_type: Optional MIME type (default application/octet-stream).
+
+    Returns:
+        The public URL of the uploaded object, or "" if R2 not configured.
+    """
+    if not is_r2_configured():
+        print("[R2] Skipping upload — R2 not configured")
+        return ""
+
+    ct = content_type or "application/octet-stream"
+    extra_args: dict = {"ContentType": ct}
+    if ct.startswith("video/"):
+        extra_args["CacheControl"] = "public, max-age=86400"
+    elif ct.startswith("image/"):
+        extra_args["CacheControl"] = "public, max-age=604800"
+    elif ct.startswith("audio/"):
+        extra_args["CacheControl"] = "public, max-age=604800"
+    elif ct == "application/json":
+        # Progress payloads should never be cached by clients/CDN.
+        extra_args["CacheControl"] = "no-store, max-age=0"
+
+    client = _get_client()
+    client.put_object(
+        Bucket=settings.R2_BUCKET_NAME,
+        Key=key,
+        Body=body,
+        **extra_args,
+    )
+    url = public_url(key)
+    print(f"[R2] Uploaded {key} ({ct})")
+    return url
+
+
+def upload_voice_preview(user_id: int, voice_id: str, audio_bytes: bytes) -> str:
+    """Upload a voice preview (TTS clip) to R2. Returns the public URL or ""."""
+    key = voice_preview_key(user_id, voice_id)
+    return upload_bytes(key, audio_bytes, content_type="audio/mpeg")
+
+
+def upload_project_image(user_id: int, project_id: int, local_path: str, filename: str) -> str:
+    """Upload a project image to R2. Returns the public URL."""
+    key = image_key(user_id, project_id, filename)
+    return upload_file(local_path, key)
+
+
+def upload_project_audio(user_id: int, project_id: int, local_path: str, filename: str) -> str:
+    """Upload a project audio file to R2. Returns the public URL."""
+    key = audio_key(user_id, project_id, filename)
+    return upload_file(local_path, key, content_type="audio/mpeg")
+
+
+def upload_project_avatar(user_id: int, project_id: int, local_path: str, filename: str) -> str:
+    """Upload a project avatar file to R2. Returns the public URL.
+
+    Deliberately does NOT pass a content_type: this one helper carries FOUR
+    different formats, and passing anything here suppresses upload_file's
+    mimetypes.guess_type fallback for all of them.
+
+        .mp4   the rendered clip
+        .mov   the transparent ProRes 4444 cutout (services/avatar.py)
+        .webm  the browser-preview cutout, played by a <video> tag
+        .png/.jpg/.webp  the user's custom presenter portrait, shown in an <img>
+
+    It used to hardcode "video/mp4", so every cutout and every portrait was
+    stored mislabelled — a portrait served as video/mp4 is a broken <img>, and a
+    VP9-with-alpha stream served as video/mp4 silently fails to decode. guess_type
+    resolves all four correctly, and returns video/mp4 for .mp4, so the original
+    path is unchanged.
+
+    Objects already in R2 keep their stored metadata; they self-heal when a scene
+    is re-matted or a portrait re-uploaded to the same key.
+    """
+    key = avatar_key(user_id, project_id, filename)
+    return upload_file(local_path, key)
+
+
+def upload_project_video(user_id: int, project_id: int, local_path: str) -> str:
+    """Upload a rendered video to R2. Uses legacy key (same URL every time). Prefer upload_project_video_versioned for re-renders."""
+    key = video_key(user_id, project_id)
+    return upload_file(local_path, key, content_type="video/mp4", as_attachment=True)
+
+
+def upload_project_video_versioned(
+    user_id: int, project_id: int, local_path: str, version: str
+) -> str:
+    """Upload a rendered video to R2 with a versioned key. Returns the public URL.
+    Each render (including re-render) should use a new version so the URL changes and caches serve fresh content."""
+    key = video_key_versioned(user_id, project_id, version)
+    return upload_file(local_path, key, content_type="video/mp4", as_attachment=True)
+
+
+def upload_render_progress_json(user_id: int, project_id: int, payload: dict) -> str:
+    """Upload render progress JSON for cross-instance polling."""
+    key = render_progress_key(user_id, project_id)
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return upload_bytes(key, body, content_type="application/json")
+
+
+# ─── Presigned URLs ───────────────────────────────────────────
+
+
+def generate_presigned_url(key: str, expires_in: int = 3600) -> str:
+    """
+    Generate a presigned URL for downloading an R2 object.
+    Useful for private buckets or time-limited access.
+
+    Args:
+        key: The R2 object key.
+        expires_in: URL validity in seconds (default 1 hour).
+
+    Returns:
+        A presigned download URL.
+    """
+    client = _get_client()
+    url = client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": settings.R2_BUCKET_NAME, "Key": key},
+        ExpiresIn=expires_in,
+    )
+    return url
+
+
+def download_json(key: str) -> dict | None:
+    """Download and parse a JSON object from R2."""
+    if not is_r2_configured():
+        return None
+    try:
+        client = _get_client()
+        resp = client.get_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
+        raw = resp["Body"].read()
+        if not raw:
+            return None
+        parsed = json.loads(raw.decode("utf-8"))
+        return parsed if isinstance(parsed, dict) else None
+    except ClientError:
+        return None
+    except Exception:
+        return None
+
+
+def download_bytes(key: str) -> bytes | None:
+    """Download raw bytes from R2. Returns None if missing/unavailable."""
+    if not is_r2_configured():
+        return None
+    try:
+        client = _get_client()
+        resp = client.get_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
+        return resp["Body"].read()
+    except ClientError:
+        return None
+    except Exception:
+        return None
+
+
+def download_text(key: str, encoding: str = "utf-8") -> str | None:
+    """Download text content from R2. Returns None if missing/unavailable."""
+    raw = download_bytes(key)
+    if raw is None:
+        return None
+    try:
+        return raw.decode(encoding)
+    except Exception:
+        return None
+
+
+def object_size(key: str) -> int | None:
+    """Return object size in bytes, or None if missing/unavailable."""
+    if not is_r2_configured():
+        return None
+    try:
+        client = _get_client()
+        meta = client.head_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
+        size = meta.get("ContentLength")
+        return int(size) if size is not None else None
+    except ClientError:
+        return None
+    except Exception:
+        return None
+
+
+def download_to_file(key: str, dest_path: str) -> bool:
+    """Stream an object to a local path. Returns False if it isn't there.
+
+    Unlike ``download_bytes``, this never holds the object in memory — boto3's
+    ``download_file`` does a bounded multipart fetch. Use it for anything video
+    sized; a rendered MP4 can be hundreds of MB and the app runs in a container
+    sized for rendering, not for buffering its own output.
+    """
+    if not is_r2_configured():
+        return False
+    try:
+        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+        _get_client().download_file(settings.R2_BUCKET_NAME, key, dest_path)
+        return True
+    except ClientError:
+        # Missing key (the usual cause: a re-render replaced this version and
+        # deleted it) or no permission. Callers treat both as "gone".
+        return False
+    except Exception:
+        return False
+
+
+def download_render_progress_json(user_id: int, project_id: int) -> dict | None:
+    """Download per-project render progress JSON from R2."""
+    return download_json(render_progress_key(user_id, project_id))
+
+
+def delete_render_progress_json(user_id: int, project_id: int) -> bool:
+    """Delete per-project render progress payload."""
+    return delete_object(render_progress_key(user_id, project_id))
+
+
+# ─── Delete ───────────────────────────────────────────────────
+
+
+def delete_voice_preview(user_id: int, voice_id: str) -> bool:
+    """Delete the R2 object for a voice preview. Returns True if deleted or already absent."""
+    key = voice_preview_key(user_id, voice_id)
+    return delete_object(key)
+
+
+def delete_object(key: str) -> bool:
+    """
+    Delete a single object from R2.
+
+    Returns:
+        True if deleted (or already absent), False on error.
+    """
+    if not is_r2_configured():
+        return False
+
+    try:
+        client = _get_client()
+        client.delete_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
+        print(f"[R2] Deleted {key}")
+        return True
+    except ClientError as e:
+        print(f"[R2] Failed to delete {key}: {e}")
+        return False
+
+
+def copy_object(src_key: str, dest_key: str) -> Optional[str]:
+    """Server-side copy an R2 object from ``src_key`` to ``dest_key``.
+
+    Returns the public URL of the destination on success, or None on error /
+    when R2 is not configured / when the source object doesn't exist. Does not
+    delete the source — callers that want a move delete it afterwards.
+    """
+    if not is_r2_configured():
+        return None
+    if src_key == dest_key:
+        return public_url(dest_key)
+    try:
+        client = _get_client()
+        client.copy_object(
+            Bucket=settings.R2_BUCKET_NAME,
+            CopySource={"Bucket": settings.R2_BUCKET_NAME, "Key": src_key},
+            Key=dest_key,
+        )
+        print(f"[R2] Copied {src_key} -> {dest_key}")
+        return public_url(dest_key)
+    except ClientError as e:
+        print(f"[R2] Failed to copy {src_key} -> {dest_key}: {e}")
+        return None
+
+
+def delete_project_files(user_id: int, project_id: int) -> int:
+    """
+    Delete ALL R2 objects for a project (images, audio, video).
+    Uses list + batch delete for efficiency.
+
+    Returns:
+        Number of objects deleted.
+    """
+    if not is_r2_configured():
+        return 0
+
+    client = _get_client()
+    prefix = project_prefix(user_id, project_id)
+    deleted_count = 0
+
+    try:
+        # List all objects under the project prefix
+        paginator = client.get_paginator("list_objects_v2")
+        pages = paginator.paginate(
+            Bucket=settings.R2_BUCKET_NAME,
+            Prefix=prefix,
+        )
+
+        for page in pages:
+            contents = page.get("Contents", [])
+            if not contents:
+                continue
+
+            # Batch delete (up to 1000 at a time)
+            objects_to_delete = [{"Key": obj["Key"]} for obj in contents]
+            client.delete_objects(
+                Bucket=settings.R2_BUCKET_NAME,
+                Delete={"Objects": objects_to_delete, "Quiet": True},
+            )
+            deleted_count += len(objects_to_delete)
+
+        if deleted_count > 0:
+            print(f"[R2] Deleted {deleted_count} objects for project {project_id}")
+
+    except ClientError as e:
+        print(f"[R2] Error deleting project {project_id} files: {e}")
+
+    return deleted_count
+
+
+# ─── Check existence ─────────────────────────────────────────
+
+
+def object_exists(key: str) -> bool:
+    """Check if an object exists in R2."""
+    if not is_r2_configured():
+        return False
+
+    try:
+        client = _get_client()
+        client.head_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
+        return True
+    except ClientError:
+        return False

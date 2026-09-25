@@ -1,0 +1,1056 @@
+import { useState, useEffect, useRef } from "react";
+import { useNavigate, useSearchParams, Link } from "react-router-dom";
+import {
+  listProjectsPaged,
+  createProject,
+  createProjectFromDocs,
+  createProjectsBulk,
+  deleteProject,
+  createCheckoutSession,
+  createPortalSession,
+  uploadLogo,
+  startGeneration,
+  getPipelineStatus,
+  ProjectListItem,
+} from "../api/client";
+import { useAuth } from "../hooks/useAuth";
+import { preferredFormMode } from "../brand/brand";
+import { isPaidPlan } from "../lib/plan";
+import { useErrorModal, getErrorMessage } from "../contexts/ErrorModalContext";
+import { trackGoogleAdsPurchaseConversion } from "../gtag";
+import BlogUrlForm, { GENRE_CRAFTED } from "../components/BlogUrlForm";
+import DeleteProjectModal from "../components/DeleteProjectModal";
+import UpgradePlanModal from "../components/UpgradePlanModal";
+import OutOfVideosOfferModal from "../components/OutOfVideosOfferModal";
+import { useOutOfVideosOffer } from "../hooks/useOutOfVideosOffer";
+import StatusBadge from "../components/StatusBadge";
+import { setPendingUpload } from "../stores/pendingUpload";
+import CustomTemplates from "./CustomTemplates";
+import MyVoices from "./MyVoices";
+import VideoStyles from "./VideoStyles";
+import type { VideoStyleId } from "../constants/videoStyles";
+import { primeBlogUrlFormStep2Prefetch } from "../api/blogUrlFormStep2Prefetch";
+
+const BULK_PENDING_IDS_KEY = "b2v_bulk_pending_ids";
+/** Projects shown per dashboard page. */
+const PAGE_SIZE = 10;
+// `awaiting_stock_footage_review` (and the legacy `awaiting_footage`) are
+// terminal *for polling*: the project won't advance without the user opening
+// it and resolving the review, so we stop polling and surface it instead of
+// spinning. In practice bulk projects never actually reach either — clips
+// are auto-picked and auto-approved server-side (see pipeline.py) — these
+// entries exist defensively in case that ever changes or a non-bulk card is
+// somehow polled through this same code path.
+const BULK_TERMINAL_STATUSES = new Set([
+  "generated",
+  "done",
+  "error",
+  "failed",
+  "awaiting_stock_footage_review",
+  "awaiting_footage", // legacy, kept for any in-flight project
+]);
+
+export default function Dashboard() {
+  const { user, loading, refreshUser } = useAuth();
+  const { showError } = useErrorModal();
+  const offer = useOutOfVideosOffer();
+  const [projects, setProjects] = useState<ProjectListItem[]>([]);
+  // Server-side pagination: `projects` holds only the current page, so the
+  // unpaginated `total` is what any "how many projects exist" check must use.
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  // Set while a page fetch is in flight so switching pages shows the skeleton
+  // instead of leaving the previous page's rows on screen.
+  const [pageLoading, setPageLoading] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  /** Increment when opening + New so BlogUrlForm remounts and picks a new random template each time. */
+  const [blogFormMountKey, setBlogFormMountKey] = useState(0);
+  const [blogFormInitialGenre, setBlogFormInitialGenre] = useState<string | undefined>(undefined);
+  /**
+   * Step-1 tab the create-project form opens on. Defaults to Upload for users
+   * who arrived via pdf2video (sticky, see src/brand/brand.ts); a ?mode= param
+   * overrides it for campaign deep links.
+   */
+  const [blogFormMode, setBlogFormMode] = useState<"url" | "upload" | "bulk" | undefined>(
+    preferredFormMode
+  );
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; name: string } | null>(null);
+  const [creating, setCreating] = useState(false);
+  // Options the form can't pass through onSubmit's positional list (22 args).
+  const [extraCreateOptions, setExtraCreateOptions] = useState<{
+    stockFootageEnabled: boolean;
+    scriptReviewEnabled: boolean;
+  }>({
+    stockFootageEnabled: true,
+    scriptReviewEnabled: false,
+  });
+  const [loaded, setLoaded] = useState(false);
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const [showBulkUpgradeModal, setShowBulkUpgradeModal] = useState(false);
+  const [bulkPendingIds, setBulkPendingIds] = useState<number[]>([]);
+  const [bulkStatuses, setBulkStatuses] = useState<
+    Record<number, { step?: string; running?: boolean; error?: string; status?: string }>
+  >({});
+  const [pendingVideoStyleSaveName, setPendingVideoStyleSaveName] = useState<string | null>(null);
+  const [pendingVideoStyleDelete, setPendingVideoStyleDelete] = useState<{
+    id: VideoStyleId;
+    name: string;
+  } | null>(null);
+  const bulkStartedRef = useRef(false);
+  const bulkPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    primeBlogUrlFormStep2Prefetch();
+  }, []);
+
+  // Hydrate bulk IDs from localStorage (or URL for backward compatibility)
+  useEffect(() => {
+    const stored = localStorage.getItem(BULK_PENDING_IDS_KEY);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as unknown;
+        if (Array.isArray(parsed) && parsed.every((n) => typeof n === "number" && Number.isInteger(n))) {
+          setBulkPendingIds(parsed);
+          return;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    const q = searchParams.get("bulk");
+    if (q) {
+      const ids = q
+        .split(",")
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !Number.isNaN(n));
+      if (ids.length > 0) {
+        setBulkPendingIds(ids);
+        localStorage.setItem(BULK_PENDING_IDS_KEY, JSON.stringify(ids));
+      }
+    }
+  }, [searchParams]);
+  const isPro = isPaidPlan(user?.plan);
+  const templatesRequested = searchParams.get("tab") === "templates";
+  const voicesRequested = searchParams.get("tab") === "voices";
+  const stylesRequested = searchParams.get("tab") === "styles";
+  /** Document landing pages (/pdf-to-video, /docx-to-video, …) deep-link here with ?mode=upload. */
+  const requestedMode = searchParams.get("mode");
+  const initialFormMode =
+    requestedMode === "upload" || requestedMode === "bulk" || requestedMode === "url"
+      ? requestedMode
+      : undefined;
+  const [activeTab, setActiveTab] = useState<"projects" | "templates" | "voices" | "styles">(
+    stylesRequested ? "styles" : voicesRequested ? "voices" : templatesRequested ? "templates" : "projects"
+  );
+
+  useEffect(() => {
+    loadProjects();
+    // Landing on the dashboard is a natural sync point: re-pull the user so counts
+    // mutated elsewhere (project creation, jobs, re-renders, AI edits) that consume
+    // videos / AI-edit credits / template slots aren't shown stale.
+    refreshUser();
+    if (searchParams.get("upgraded") === "true") {
+      trackGoogleAdsPurchaseConversion(searchParams.get("session_id"));
+      refreshUser();
+    }
+    if (searchParams.get("purchased") === "true") {
+      trackGoogleAdsPurchaseConversion(searchParams.get("session_id"));
+    }
+  }, []);
+
+  // Refetch when the user switches pages. The mount effect already loaded page 1,
+  // so skip the first run to avoid a duplicate request.
+  const pageInitRef = useRef(true);
+  useEffect(() => {
+    if (pageInitRef.current) {
+      pageInitRef.current = false;
+      return;
+    }
+    loadProjects(page);
+  }, [page]);
+
+  useEffect(() => {
+    if (bulkPendingIds.length > 0) loadProjects();
+  }, [bulkPendingIds.length]);
+
+  useEffect(() => {
+    if (bulkPendingIds.length === 0) {
+      bulkStartedRef.current = false;
+      return;
+    }
+  }, [bulkPendingIds.length]);
+
+  // Start generation for each bulk id once
+  useEffect(() => {
+    if (bulkPendingIds.length === 0 || bulkStartedRef.current) return;
+    bulkStartedRef.current = true;
+    bulkPendingIds.forEach((id) => {
+      startGeneration(id).catch(() => {
+        setBulkStatuses((prev) => ({ ...prev, [id]: { running: false, error: "Failed to start", status: "created" } }));
+      });
+    });
+  }, [bulkPendingIds]);
+
+  // Poll pipeline status for bulk ids; remove each project from the list when it's done (generated/done or running false)
+  useEffect(() => {
+    if (bulkPendingIds.length === 0) return;
+    let tickCount = 0;
+    const poll = async () => {
+      const updates: Record<number, { step?: string; running?: boolean; error?: string; status?: string }> = {};
+      const results = await Promise.allSettled(
+        bulkPendingIds.map((id) => getPipelineStatus(id).then((res) => ({ id, data: res.data })))
+      );
+      results.forEach((r) => {
+        if (r.status === "fulfilled") {
+          const { step, running, error: pipelineError, status } = r.value.data;
+          updates[r.value.id] = {
+            step: step != null ? String(step) : undefined,
+            running,
+            error: pipelineError ?? undefined,
+            status,
+          };
+        }
+      });
+      setBulkStatuses((prev) => ({ ...prev, ...updates }));
+
+      // Status polling doesn't carry the project name, and the backend renames
+      // projects mid-pipeline (blog URL slug -> real article title). Without
+      // this, rows would show the placeholder name for the whole bulk run —
+      // refresh every 3rd tick (~6s) so renames show up without polling on
+      // every 2s tick.
+      tickCount += 1;
+      if (tickCount % 3 === 0) {
+        loadProjects();
+      }
+
+      // Consider a project done only when it reaches a terminal project status.
+      // `running` can be false transiently (e.g. in-memory progress loss), so
+      // removing by `running === false` drops active projects from this list.
+      const isDone = (id: number) => {
+        const u = updates[id];
+        return u != null && BULK_TERMINAL_STATUSES.has((u.status ?? "").toLowerCase());
+      };
+      const doneIds = new Set(bulkPendingIds.filter(isDone));
+      const newPending = bulkPendingIds.filter((id) => !doneIds.has(id));
+
+      setBulkPendingIds((prev) => prev.filter((id) => !doneIds.has(id)));
+
+      if (newPending.length === 0) {
+        if (bulkPollingRef.current) {
+          clearInterval(bulkPollingRef.current);
+          bulkPollingRef.current = null;
+        }
+        localStorage.removeItem(BULK_PENDING_IDS_KEY);
+        setBulkPendingIds([]);
+        setBulkStatuses({});
+        loadProjects();
+      }
+    };
+    poll();
+    bulkPollingRef.current = setInterval(poll, 2000);
+    return () => {
+      if (bulkPollingRef.current) {
+        clearInterval(bulkPollingRef.current);
+        bulkPollingRef.current = null;
+      }
+    };
+  }, [bulkPendingIds.join(",")]);
+  // Deep-link to templates/voices tab via ?tab= (reacts to param changes)
+  useEffect(() => {
+    const tab = searchParams.get("tab");
+    if (tab === "templates") setActiveTab("templates");
+    else if (tab === "voices") setActiveTab("voices");
+    else if (tab === "styles") setActiveTab("styles");
+    else setActiveTab("projects");
+  }, [searchParams]);
+
+  const selectDashboardTab = (tab: "projects" | "templates" | "voices" | "styles") => {
+    setActiveTab(tab);
+    const next = new URLSearchParams(searchParams);
+    if (tab === "projects") next.delete("tab");
+    else next.set("tab", tab);
+    const qs = next.toString();
+    navigate(qs ? `/dashboard?${qs}` : "/dashboard");
+  };
+
+  // Campaign deep link: ?mode=upload opens the create form on a given step-1 tab,
+  // overriding the sticky pdf2video default. Consumed then stripped from the URL.
+  useEffect(() => {
+    const mode = searchParams.get("mode");
+    if (mode !== "url" && mode !== "upload" && mode !== "bulk") return;
+    setBlogFormMode(mode);
+    setBlogFormMountKey((k) => k + 1);
+    setShowModal(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete("mode");
+    const qs = next.toString();
+    navigate(qs ? `/dashboard?${qs}` : "/dashboard", { replace: true });
+  }, [searchParams]);
+
+  // Open BlogUrlForm modal at step 2 with Designer Templates pre-selected
+  useEffect(() => {
+    if (searchParams.get("openDesignerTemplates") !== "1") return;
+    setBlogFormInitialGenre(GENRE_CRAFTED);
+    setBlogFormMountKey((k) => k + 1);
+    setShowModal(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete("openDesignerTemplates");
+    const qs = next.toString();
+    navigate(qs ? `/dashboard?${qs}` : "/dashboard", { replace: true });
+  }, [searchParams]);
+
+  // Leaving Projects (tab or URL) should close the new-project modal so returning does not reopen it.
+  useEffect(() => {
+    if (activeTab !== "projects") {
+      setShowModal(false);
+    }
+  }, [activeTab]);
+
+
+  /** Loads one page. Pass the page explicitly so callers firing from effects with
+   *  stale closures (mount, bulk polling) always fetch the page they mean. */
+  const loadProjects = async (targetPage: number = page) => {
+    setPageLoading(true);
+    try {
+      const res = await listProjectsPaged(targetPage, PAGE_SIZE);
+      const { items, total: totalCount } = res.data;
+      // The page can fall off the end (e.g. the last project on it was deleted);
+      // clamp back to the last page that still has rows and re-fetch.
+      const lastPage = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+      if (targetPage > lastPage) {
+        // The page-change effect re-fetches; stay in the loading state through it
+        // so the skeleton doesn't flicker off and back on between the two loads.
+        setPage(lastPage);
+        return;
+      }
+      setProjects(items);
+      setTotal(totalCount);
+      if (targetPage !== page) setPage(targetPage);
+      setPageLoading(false);
+    } catch (err) {
+      console.error("Failed to load projects:", err);
+      setPageLoading(false);
+    } finally {
+      setLoaded(true);
+    }
+  };
+
+  const handleCreateBulk = async (
+    items: import("../api/client").BulkProjectItem[],
+    logoOptions: { logoIndices: number[]; logoFiles: File[] } | null
+  ) => {
+    setCreating(true);
+    try {
+      const res = await createProjectsBulk(items, logoOptions);
+      await refreshUser();
+      setShowModal(false);
+      const ids = res.data.project_ids;
+      if (ids.length > 0) {
+        localStorage.setItem(BULK_PENDING_IDS_KEY, JSON.stringify(ids));
+        setBulkPendingIds(ids);
+      }
+      // New projects sort newest-first, so jump back to page 1 to reveal them.
+      setPage(1);
+      navigate("/dashboard");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      const isBulkUpgradeRequired =
+        err?.response?.status === 403 && typeof detail === "object" && detail?.code === "upgrade_required_bulk";
+      if (isBulkUpgradeRequired) {
+        setShowBulkUpgradeModal(true);
+      } else if (err?.response?.status === 403) {
+        // Out-of-videos offer: walled free users get the limited-time discount
+        // modal instead of a plain error. Past the 5-min window, fall through.
+        const opened = user?.plan === "free" ? offer.open() : false;
+        if (!opened) {
+          showError(
+            getErrorMessage(err, "Video limit reached. Upgrade to Pro for more."),
+            { showUpgrade: true }
+          );
+        }
+      } else {
+        console.error("Bulk create failed:", err);
+      }
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleCreate = async (
+    url: string,
+    name?: string,
+    voiceGender?: string,
+    voiceAccent?: string,
+    accentColor?: string,
+    bgColor?: string,
+    textColor?: string,
+    animationInstructions?: string,
+    logoFile?: File,
+    logoPosition?: string,
+    logoOpacity?: number,
+    customVoiceId?: string,
+    aspectRatio?: string,
+    uploadFiles?: File[],
+    template?: string,
+    videoStyle?: VideoStyleId,
+    videoLength?: "auto" | "short" | "medium" | "detailed" | "more_detailed",
+    contentLanguage?: string | null,
+    voiceEmotion?: string,
+    bgmTrackId?: string | null,
+    bgmVolume?: number
+  ) => {
+    setCreating(true);
+    try {
+      let res;
+
+      if (uploadFiles && uploadFiles.length > 0) {
+        // Document upload flow – use FormData endpoint to send files + config together
+        res = await createProjectFromDocs(uploadFiles, {
+          name,
+          voice_gender: voiceGender,
+          voice_accent: voiceAccent,
+          voice_emotion: voiceEmotion,
+          accent_color: accentColor,
+          bg_color: bgColor,
+          text_color: textColor,
+          animation_instructions: animationInstructions,
+          logo_position: logoPosition,
+          logo_opacity: logoOpacity,
+          custom_voice_id: customVoiceId,
+          aspect_ratio: aspectRatio,
+          template,
+          video_style: videoStyle,
+          video_length: videoLength,
+          content_language: contentLanguage,
+          bgm_track_id: bgmTrackId,
+          bgm_volume: bgmVolume,
+          stock_footage_enabled: extraCreateOptions.stockFootageEnabled,
+          script_review_enabled: extraCreateOptions.scriptReviewEnabled,
+        });
+      } else {
+        // URL flow
+        res = await createProject(
+          url,
+          name,
+          voiceGender,
+          voiceAccent,
+          accentColor,
+          bgColor,
+          textColor,
+          animationInstructions,
+          logoPosition,
+          logoOpacity,
+          customVoiceId,
+          aspectRatio,
+          template,
+          videoStyle,
+          videoLength,
+          contentLanguage,
+          voiceEmotion,
+          bgmTrackId,
+          bgmVolume,
+          undefined,
+          undefined,
+          {
+            stock_footage_enabled: extraCreateOptions.stockFootageEnabled,
+            script_review_enabled: extraCreateOptions.scriptReviewEnabled,
+          },
+        );
+      }
+
+      // Upload logo if provided
+      if (logoFile) {
+        try {
+          await uploadLogo(res.data.id, logoFile);
+        } catch (err) {
+          showError(getErrorMessage(err, "Logo upload failed."));
+        }
+      }
+
+      await refreshUser();
+      setShowModal(false);
+      navigate(`/project/${res.data.id}`);
+    } catch (err: any) {
+      if (err?.response?.status === 403) {
+        const opened = user?.plan === "free" ? offer.open() : false;
+        if (!opened) {
+          showError(
+            getErrorMessage(err, "Video limit reached. Upgrade to Pro for more."),
+            { showUpgrade: true }
+          );
+        }
+      } else {
+        console.error("Failed to create project:", err);
+        showError(
+          getErrorMessage(err),
+          uploadFiles && uploadFiles.length > 0 ? { variant: "pipeline" } : undefined,
+        );
+      }
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleDeleteClick = (id: number, name: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDeleteTarget({ id, name });
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return;
+    await deleteProject(deleteTarget.id);
+    // Drop it immediately for feedback, then refetch so the page backfills from the
+    // next one and `total` stays right (loadProjects clamps if this page is now empty).
+    setProjects((prev) => prev.filter((p) => p.id !== deleteTarget.id));
+    setDeleteTarget(null);
+    await loadProjects(page);
+  };
+
+  const handleUpgrade = async () => {
+    try {
+      const res = await createCheckoutSession();
+      window.location.href = res.data.checkout_url;
+    } catch (err) {
+      console.error("Failed to create checkout:", err);
+    }
+  };
+
+  const formatDate = (iso: string) => {
+    return new Date(iso).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+    });
+  };
+
+  // ─── Onboarding (0 projects): show form on first load; hide when show_form=0 (e.g. logo click) ───
+  // Deep-linking to My Templates / Voices (?tab=) must use the normal tabbed layout even with 0 projects.
+  // A walled free user (out of videos) must NOT be shown the create form — they can't
+  // make a project. They fall through to the normal dashboard where the "+ New" button
+  // is disabled and the out-of-videos upgrade modal opens instead.
+  const isWalled = user?.plan === "free" && user?.can_create_video === false;
+  const emptyOnboarding =
+    loaded &&
+    !isWalled &&
+    total === 0 &&
+    searchParams.get("show_form") !== "0" &&
+    searchParams.get("tab") !== "templates" &&
+    searchParams.get("tab") !== "voices";
+
+  if (emptyOnboarding) {
+    return (
+      <div className="flex items-center justify-center min-h-[70vh]">
+        <div className="w-full max-w-xl">
+          {/* Welcome header */}
+          <div className="text-center mb-8">
+            <Link
+              to="/dashboard?show_form=0"
+              className="inline-flex items-center justify-center w-12 h-12 mx-auto mb-4 bg-purple-600 rounded-2xl text-white font-bold text-sm hover:opacity-90 transition-opacity"
+            >
+              D2V
+            </Link>
+            <h1 className="text-xl font-semibold text-gray-900 mb-2">
+              Turn your documents into video
+            </h1>
+            <p className="text-sm text-gray-400 max-w-sm mx-auto">
+              Upload a PDF, Word doc, PowerPoint, or spreadsheet and get a professional AI-generated video in minutes.
+            </p>
+          </div>
+
+          {/* Supported format pills */}
+          <div className="flex flex-wrap gap-1.5 justify-center mb-6">
+            {[
+              { label: "PDF", color: "bg-red-50 text-red-600 border-red-200" },
+              { label: "Word", color: "bg-blue-50 text-blue-600 border-blue-200" },
+              { label: "PowerPoint", color: "bg-orange-50 text-orange-600 border-orange-200" },
+              { label: "Excel", color: "bg-emerald-50 text-emerald-600 border-emerald-200" },
+              { label: "CSV", color: "bg-teal-50 text-teal-600 border-teal-200" },
+              { label: "Markdown", color: "bg-purple-50 text-purple-600 border-purple-200" },
+            ].map(({ label, color }) => (
+              <span
+                key={label}
+                className={`inline-flex items-center px-2.5 py-0.5 rounded-lg border text-[11px] font-medium ${color}`}
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+
+          {/* Inline form — default to Upload tab */}
+          <div className="glass-card p-7">
+            <BlogUrlForm
+              onSubmit={handleCreate}
+              onSubmitBulk={handleCreateBulk}
+              onExtraOptionsChange={setExtraCreateOptions}
+              loading={creating}
+              initialMode={blogFormMode ?? "upload"}
+            />
+          </div>
+
+          {/* Upgrade nudge */}
+          {!isPro && (
+            <div className="text-center mt-6">
+              <button
+                onClick={handleUpgrade}
+                className="text-xs text-gray-400 hover:text-purple-600 transition-colors"
+              >
+                Need more? Upgrade to Pro for 100 videos/month
+              </button>
+            </div>
+          )}
+
+          <UpgradePlanModal
+            open={showBulkUpgradeModal}
+            onClose={() => setShowBulkUpgradeModal(false)}
+            title="Upgrade to create multiple videos"
+            subtitle="Bulk upload of multiple videos requires a paid plan. Choose a plan below to unlock multi-link creation."
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Normal dashboard ──────────────────────────────────────
+
+  return (
+    <div className="space-y-8">
+      {/* Tab bar */}
+      <div className="flex flex-wrap gap-1 p-1 bg-gray-100/60 rounded-xl">
+        {(["projects", "templates", "voices", "styles"] as const).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => selectDashboardTab(tab)}
+            className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all ${
+              activeTab === tab
+                ? "bg-white text-purple-600 shadow-sm"
+                : "text-gray-400 hover:text-gray-600"
+            }`}
+          >
+            {tab === "projects" ? "Projects" : tab === "templates" ? "My Templates" : tab === "voices" ? "Voices" : "Video Styles"}
+          </button>
+        ))}
+      </div>
+
+      {/* ─── My Templates tab ────────────────────────────────── */}
+      {activeTab === "templates" ? (
+        <CustomTemplates />
+      ) : activeTab === "voices" ? (
+        <MyVoices />
+      ) : activeTab === "styles" ? (
+        <VideoStyles
+          pendingSaveName={pendingVideoStyleSaveName}
+          onPendingSaveNameChange={setPendingVideoStyleSaveName}
+          pendingDelete={pendingVideoStyleDelete}
+          onPendingDeleteChange={setPendingVideoStyleDelete}
+        />
+      ) : (
+      <>
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">Projects</h1>
+          <p className="text-xs text-gray-400 mt-0.5">
+            {user?.videos_used_this_period ?? 0} of {user?.video_limit ?? 1} videos used
+            {!isPro && " · upgrade for 100/month"}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Secondary: URL */}
+          <button
+            data-action="new-project-url"
+            onClick={() => {
+              setBlogFormMode("url");
+              setBlogFormMountKey((k) => k + 1);
+              setShowModal(true);
+            }}
+            disabled={!user?.can_create_video}
+            className="px-3 py-2 text-xs font-medium text-gray-500 hover:text-purple-600 disabled:opacity-40 transition-colors rounded-lg border border-gray-200 hover:border-purple-300 bg-white"
+          >
+            Paste URL
+          </button>
+          {/* Primary: Upload */}
+          <button
+            data-action="new-project-upload"
+            onClick={() => {
+              setBlogFormMode("upload");
+              setBlogFormMountKey((k) => k + 1);
+              setShowModal(true);
+            }}
+            disabled={!user?.can_create_video}
+            className="flex items-center gap-1.5 px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-100 disabled:text-gray-400 text-white text-sm font-medium rounded-lg transition-colors shadow-sm"
+          >
+            <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 flex-shrink-0">
+              <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
+            </svg>
+            Upload Document
+          </button>
+        </div>
+      </div>
+
+      {/* New project modal */}
+      {showModal && (
+        <BlogUrlForm
+          key={blogFormMountKey}
+          onSubmit={handleCreate}
+          onSubmitBulk={handleCreateBulk}
+          onExtraOptionsChange={setExtraCreateOptions}
+          loading={creating}
+          asModal
+          onClose={() => { setShowModal(false); setBlogFormInitialGenre(undefined); }}
+          onDismissFlow={() => { setShowModal(false); setBlogFormInitialGenre(undefined); }}
+          initialGenre={blogFormInitialGenre}
+          initialMode={blogFormMode}
+        />
+      )}
+
+      {/* Bulk upgrade modal: free user tried to create more than one video */}
+      <UpgradePlanModal
+        open={showBulkUpgradeModal}
+        onClose={() => setShowBulkUpgradeModal(false)}
+        title="Upgrade to create multiple videos"
+        subtitle="Bulk upload of multiple videos requires a paid plan. Choose a plan below to unlock multi-link creation."
+      />
+
+      {/* Out-of-videos limited-time discount offer */}
+      <OutOfVideosOfferModal
+        open={offer.isOpen}
+        onClose={offer.dismiss}
+        secondsRemaining={offer.secondsRemaining}
+        isWindowLive={offer.isWindowLive}
+        onExpand={offer.expand}
+      />
+
+      {/* Delete project confirmation */}
+      <DeleteProjectModal
+        open={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        projectName={deleteTarget?.name}
+        onConfirm={handleDeleteConfirm}
+      />
+
+      {/* Bulk progress */}
+      {bulkPendingIds.length > 0 && (
+        <div className="glass-card p-4 mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-gray-900">Bulk progress</h2>
+            <button
+              type="button"
+              onClick={() => {
+                localStorage.removeItem(BULK_PENDING_IDS_KEY);
+                setBulkPendingIds([]);
+                loadProjects();
+              }}
+              className="text-xs font-medium text-purple-600 hover:text-purple-700"
+            >
+              Dismiss
+            </button>
+          </div>
+          <ul className="space-y-2 max-h-48 overflow-y-auto">
+            {(() => {
+              const nameCount: Record<string, number> = {};
+              for (const pid of bulkPendingIds) {
+                const p = projects.find((pr) => pr.id === pid);
+                const n = (p?.name && p.name.trim()) || p?.blog_url || "Untitled project";
+                nameCount[n] = (nameCount[n] ?? 0) + 1;
+              }
+              return bulkPendingIds.map((id) => {
+              const s = bulkStatuses[id];
+              const project = projects.find((p) => p.id === id);
+              const name =
+                (project?.name && project.name.trim()) ||
+                project?.blog_url ||
+                "Untitled project";
+              const showUrl = (nameCount[name] ?? 0) > 1 && project?.blog_url;
+              const stepNumber =
+                s && s.step != null && !Number.isNaN(Number(s.step))
+                  ? Number(s.step)
+                  : 0;
+              const stepTargets: Record<number, number> = {
+                0: 3,
+                1: 20,
+                2: 48,
+                3: 72,
+                4: 100,
+              };
+              let rowPercent = 0;
+              if (s?.error) {
+                rowPercent = 100;
+              } else if (s && !s.running && s.status === "done") {
+                rowPercent = 100;
+              } else if (s) {
+                rowPercent = stepTargets[stepNumber] ?? 100;
+              }
+              return (
+                <li
+                  key={id}
+                  className="flex flex-col sm:flex-row items-center sm:justify-between text-sm py-1.5 border-b border-gray-100 last:border-0"
+                >
+                  <div className="truncate flex-1 min-w-0 cursor-pointer text-gray-700 hover:text-purple-600" onClick={() => navigate(`/project/${id}`)}>
+                    <span className="truncate block" title={name}>{name}</span>
+                    {showUrl && (
+                      <span className="text-[10px] text-gray-400 truncate block" title={project.blog_url || ""}>
+                        {project.blog_url}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-col items-end flex-shrink-0 ml-3 w-full md:w-64 min-w-0">
+                    <div className="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
+                      <div
+                        className={`h-1.5 transition-all ${
+                          s?.error
+                            ? "bg-red-500"
+                            : s && !s.running && s.status === "done"
+                              ? "bg-green-500"
+                              : "bg-purple-600"
+                        }`}
+                        style={{ width: `${rowPercent}%` }}
+                      />
+                    </div>
+                    <div className="mt-0.5 flex items-center justify-between gap-2 w-full">
+                      <span
+                        className={`text-[11px] ${
+                          s?.error
+                            ? "text-red-600"
+                            : s && !s.running && s.status === "done"
+                              ? "text-green-600"
+                              : "text-gray-500"
+                        } truncate`}
+                      >
+                        {s?.error
+                          ? s.error
+                          : s && !s.running && s.status === "done"
+                            ? "Done"
+                            : s?.status ?? "Running…"}
+                      </span>
+                      <span className="text-[11px] text-gray-500 tabular-nums">
+                        {rowPercent}%
+                      </span>
+                    </div>
+                    {s?.status === "awaiting_script_review" && (
+                      <button
+                        type="button"
+                        onClick={() => navigate(`/project/${id}`)}
+                        className="mt-1 rounded-lg bg-purple-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-purple-700"
+                      >
+                        Review script
+                      </button>
+                    )}
+                  </div>
+                </li>
+              );
+            });
+            })()}
+          </ul>
+        </div>
+      )}
+
+      {/* Project list */}
+      <div className="grid gap-3">
+        {!loaded || pageLoading ? (
+          // Skeleton loading — first load and every page switch. Once the total is
+          // known, match the row count to the incoming page so the list doesn't
+          // visibly jump between the placeholder and the real rows.
+          Array.from({
+            length: loaded
+              ? Math.max(1, Math.min(PAGE_SIZE, total - (page - 1) * PAGE_SIZE))
+              : 5,
+          }).map((_, i) => (
+            <div
+              key={i}
+              className="glass-card px-5 py-4 animate-pulse"
+              aria-hidden
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div className="flex-1 min-w-0 space-y-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-4 bg-gray-200 rounded w-3/4 max-w-[300px]" />
+                    <div className="h-4 w-16 bg-gray-200 rounded" />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="h-3 bg-gray-100 rounded w-32" />
+                    <div className="h-3 bg-gray-100 rounded w-16" />
+                    <div className="h-3 bg-gray-100 rounded w-12" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))
+        ) : projects.length === 0 ? (
+          // Empty state — oriented toward document upload
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            <div className="w-16 h-16 mb-5 bg-purple-50 rounded-2xl flex items-center justify-center border-2 border-dashed border-purple-200">
+              <svg className="w-8 h-8 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">No projects yet</h3>
+            <p className="text-sm text-gray-400 max-w-sm mb-6">
+              Upload a PDF, Word, PowerPoint, or any supported document to generate your first video automatically.
+            </p>
+            <button
+              onClick={() => {
+                setBlogFormMode("upload");
+                setBlogFormMountKey((k) => k + 1);
+                setShowModal(true);
+              }}
+              disabled={!user?.can_create_video}
+              className="flex items-center gap-2 px-5 py-2.5 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-100 disabled:text-gray-400 text-white text-sm font-medium rounded-xl transition-colors shadow-sm"
+            >
+              <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
+              </svg>
+              Upload your first document
+            </button>
+          </div>
+
+        ) : (
+          projects.map((project, idx) => (
+          <div
+            key={project.id}
+            onClick={() => navigate(`/project/${project.id}`)}
+            className="glass-card w-full px-5 py-4 hover:shadow-[0_4px_16px_rgba(0,0,0,0.06)] transition-all cursor-pointer group"
+            data-tour={idx === 0 ? "project-card-first" : undefined}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2.5 mb-1">
+                  <h3 className="text-sm font-medium text-gray-900 leading-tight break-words group-hover:text-purple-600 transition-colors">
+                    {project.name}
+                  </h3>
+                  <StatusBadge status={project.status} />
+                  {project.role === "editor" && (
+                    <span
+                      className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 whitespace-nowrap"
+                      title={project.owner_name ? `Shared by ${project.owner_name}` : "Shared with you"}
+                    >
+                      Shared
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-col gap-0.5 text-xs text-gray-400 sm:flex-row sm:items-center sm:gap-3">
+                  <span className="truncate max-w-[220px]">
+                    {project.blog_url?.startsWith("upload://") ? (
+                      <span className="inline-flex items-center gap-1 text-purple-500">
+                        <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 flex-shrink-0">
+                          <path fillRule="evenodd" d="M4 1a1 1 0 00-1 1v12a1 1 0 001 1h8a1 1 0 001-1V6.414a1 1 0 00-.293-.707l-3.414-3.414A1 1 0 009 2H4zm5 6H7v4h2V7zm0-4H7v2h2V3z" clipRule="evenodd" />
+                        </svg>
+                        Uploaded document
+                      </span>
+                    ) : (
+                      project.blog_url || "—"
+                    )}
+                  </span>
+                  <div className="flex items-center gap-3">
+                    <span>{project.scene_count} scenes</span>
+                    <span>{formatDate(project.created_at)}</span>
+                  </div>
+                </div>
+              </div>
+              {/* Only owners may delete a project — collaborators (role "editor") can't. */}
+              {project.role !== "editor" && (
+                <button
+                  onClick={(e) => handleDeleteClick(project.id, project.name, e)}
+                  className="text-gray-300 hover:text-red-500 transition-colors p-1 flex-shrink-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                  title="Delete"
+                >
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                    />
+                  </svg>
+                </button>
+              )}
+            </div>
+          </div>
+        ))
+        )}
+      </div>
+
+      {/* Pagination — only once there's more than one page to move between. */}
+      {loaded && total > PAGE_SIZE && (() => {
+        const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
+        // Window the numbers so a long history doesn't overflow the row on mobile:
+        // always first + last, plus a run of 3 around the current page ("…" for the
+        // gaps). The run slides inward at the edges so it stays 3 wide on page 1/last.
+        const runStart = Math.min(Math.max(1, page - 1), Math.max(1, lastPage - 2));
+        const shown = new Set<number>([
+          1,
+          lastPage,
+          runStart,
+          runStart + 1,
+          runStart + 2,
+        ]);
+        const pageNumbers: (number | "gap")[] = [];
+        for (let n = 1; n <= lastPage; n++) {
+          if (shown.has(n)) {
+            pageNumbers.push(n);
+          } else if (pageNumbers[pageNumbers.length - 1] !== "gap") {
+            pageNumbers.push("gap");
+          }
+        }
+        return (
+          <nav
+            className="flex items-center justify-center gap-1.5 mt-6"
+            aria-label="Project pages"
+          >
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page <= 1}
+              aria-label="Previous page"
+              title="Previous page"
+              className="inline-flex items-center justify-center min-w-[32px] px-2 py-1.5 text-gray-600 border border-gray-200 rounded-lg hover:border-gray-300 hover:text-gray-900 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+            {pageNumbers.map((n, i) =>
+              n === "gap" ? (
+                <span key={`gap-${i}`} className="px-1 text-xs text-gray-400" aria-hidden>
+                  …
+                </span>
+              ) : (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setPage(n)}
+                  aria-current={n === page ? "page" : undefined}
+                  className={`min-w-[32px] px-2 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                    n === page
+                      ? "bg-purple-600 border-purple-600 text-white"
+                      : "text-gray-600 border-gray-200 hover:border-gray-300 hover:text-gray-900"
+                  }`}
+                >
+                  {n}
+                </button>
+              )
+            )}
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.min(lastPage, p + 1))}
+              disabled={page >= lastPage}
+              aria-label="Next page"
+              title="Next page"
+              className="inline-flex items-center justify-center min-w-[32px] px-2 py-1.5 text-gray-600 border border-gray-200 rounded-lg hover:border-gray-300 hover:text-gray-900 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          </nav>
+        );
+      })()}
+      </>
+      )}
+    </div>
+  );
+}

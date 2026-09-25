@@ -1,0 +1,99 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+sqlalchemy>=2.0.0
+alembic>=1.14.0
+pydantic-settings>=2.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+exa-py>=1.0.0
+firecrawl-py>=4.0.0
+dspy==3.1.3
+litellm==1.82.3
+anthropic>=0.40.0
+openai>=1.0.0
+google-genai>=1.0.0
+elevenlabs>=1.0.0
+mutagen>=1.47.0
+python-multipart>=0.0.9
+python-dotenv>=1.0.0
+aiofiles>=24.0.0
+
+# Observability (OpenTelemetry)
+opentelemetry-api>=1.24.0
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp>=1.24.0
+opentelemetry-exporter-otlp-proto-http>=1.24.0
+opentelemetry-instrumentation-fastapi>=0.45b0
+opentelemetry-instrumentation-requests>=0.45b0
+opentelemetry-instrumentation-logging>=0.45b0
+
+# Auth & Billing
+PyJWT>=2.8.0
+# Kept as an explicit pin rather than an implicit transitive of google-auth /
+# requests. Our own tokens are HS256 and need no asymmetric crypto, so nothing
+# here depends on it directly since Apple sign-in was removed.
+cryptography>=42.0.0
+google-auth>=2.29.0
+# Password hashing for built-in email/password sign-in (services/password.py).
+# Argon2id rather than bcrypt: bcrypt silently truncates input at 72 bytes, so two
+# different long passwords can collide, and the SHA-256 pre-hash workaround is a
+# format decision you can never reverse. Ships prebuilt wheels — no compiler needed.
+argon2-cffi>=23.1.0
+stripe>=10.0.0
+
+# PostgreSQL driver
+psycopg2-binary>=2.9.0
+
+# Image processing (GIF capping)
+Pillow>=10.0.0
+
+# Cloudflare R2 (S3-compatible)
+boto3>=1.35.0
+
+# HTTP client. Arrived transitively (via the LLM SDKs) and was used as such, but
+# social publishing streams multi-hundred-MB uploads through it, so pin it
+# explicitly rather than depending on whatever another package happens to want.
+httpx>=0.27.0
+
+# Language detection (for content_language from scraped content)
+fast-langdetect>=1.0.0
+
+# Document extraction (PDF + Office + Sheets)
+PyMuPDF>=1.24.0
+pymupdf4llm>=0.0.17
+pdfplumber==0.11.9
+python-docx>=1.1.0
+python-pptx>=0.6.23
+openpyxl>=3.1.0
+
+# MCP server
+mcp==1.27.1
+# Rich in-chat UI rendering (template gallery, voice picker, etc.) for clients
+# that support the MCP-UI / MCP Apps extension (claude.ai, Claude Desktop,
+# VS Code Copilot, Goose, MCPJam).
+mcp-ui-server==1.0.0
+
+# Email notifications (Resend SDK + Unosend SDK — Unosend optional, commented out below)
+resend==2.29.0
+# unosend==1.0.0
+
+# Support bot retrieval
+rank-bm25>=0.2.2
+PyYAML>=6.0
+
+# Stock data (for /api/stock-data tool)
+yfinance>=1.5.1
+
+# Avatar background removal (services/avatar_matte.py). Pulls onnxruntime and
+# downloads ~170MB of u2net_human_seg weights on FIRST USE — pre-warm at image
+# build if cold-start latency matters. Imported lazily so the backend still boots
+# without it; matting is opt-in, so a missing install degrades to a clear error
+# rather than a failure to start.
+rembg[cpu]==2.0.77
+
+# ─── Test & lint tooling (Tier A QA suite) ───────────────────────────────
+# Pinned to exact versions so local + CI runs are reproducible.
+pytest==9.0.2
+pytest-asyncio==1.4.0
+ruff==0.15.17

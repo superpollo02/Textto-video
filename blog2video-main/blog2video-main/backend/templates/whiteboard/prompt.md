@@ -1,0 +1,190 @@
+# Design Philosophy
+
+Whiteboard Story is storytelling-first. Scenes should feel hand-crafted, like a marker is sketching ideas in real time. Use clean off-white background, dark marker strokes, and simple stick-figure metaphors to keep attention on narrative flow.
+
+Core rules:
+- Favor narrative progression over dense data.
+- **Never output `assignedVideo`, `videoUrl`, `videoMuted`, or `videoVolume`.** A scene's background clip is stock footage chosen by the user in the editor after generation; any value you invent breaks rendering.
+- Keep text readable and conversational.
+- Make each scene feel like a storyboard beat.
+- Use hand-drawn motion cues (line reveals, underlines, arrows).
+
+---
+
+# Layout Catalog
+
+## drawn_title
+**Visual:** Scene 0 opening title appears as if written by marker stroke. Subtitle fades in under a sketched underline. A small stick figure sits in the bottom-right, looking at the heading.
+
+**Best for:** Hero opening only.
+
+**Props:** none (uses `title`, `narration`).
+
+**When to Use:** scene 0 and chapter-open style moments.
+
+---
+
+## marker_story
+**Visual:** Main narrative panel with handwritten-style heading and body text blocks, plus doodle arrows or circles that animate in sequence.
+
+**Best for:** Story progression, explanation beats, narrative context.
+
+**Props:** none (uses `title`, `narration`, optional `imageUrl`).
+
+**When to Use:** majority of storytelling scenes.
+
+---
+
+## stick_figure_scene
+**Visual:** Stick figure + symbol scene (e.g., person, goal, obstacle, arrow). Text appears alongside to describe action or emotion.
+
+**Best for:** Turning abstract ideas into simple character-driven visuals.
+
+**Props:** none (uses `title`, `narration`).
+
+**When to Use:** challenge/solution beats, emotional pivot, transformation moments.
+
+---
+
+## stats_figures
+**Visual:** Key figures in hand-drawn style: 2–4 big numbers (e.g. "50%", "3x", "10K+") with labels in bordered cards. Animated underline under each value.
+
+**Best for:** Highlighting a few headline stats, outcomes, or proof points.
+
+**Props:** optional `stats` array: `[{ "label": "Growth", "value": "50%" }, ...]`. If omitted, placeholder figures are used.
+
+**When to Use:** data-led story beats, results, comparisons, or "key numbers" moments.
+
+---
+
+## stats_chart
+**Visual:** Simple horizontal bar chart with hand-drawn aesthetic. Each row has a label, an animated bar (length from 0–100 or numeric value), and the value text.
+
+**Best for:** Comparing a few options or metrics (e.g. A vs B vs C).
+
+**Props:** optional `stats` array: `[{ "label": "Option A", "value": "85" }, ...]`. Values can be numbers or strings like "85%"; numeric part is used for bar length. If omitted, placeholder bars are used.
+
+**When to Use:** comparisons, rankings, or breakdowns that benefit from a chart.
+
+---
+
+## comparison
+**Visual:** Two stick figures (left and right), each with a thought cloud above them. A "vs" sits between. Compare two options, ideas, or thoughts.
+
+**Best for:** Direct comparison of two choices, perspectives, or outcomes.
+
+**Props:** optional `leftThought`, `rightThought` (strings). Content of each thought cloud. If omitted, "Option A" / "Option B" are used.
+
+**When to Use:** pros/cons, before/after, option A vs B, or any two-sided comparison.
+
+---
+
+## countdown_timer
+**Visual:** Hand-drawn countdown with a circular progress ring that drains each second, tick marks, and a large center number that pops in. Optional label above and below (e.g. "until launch"). Ring can turn red in the final seconds.
+
+**Best for:** Launch countdowns, "in 3, 2, 1" moments, or building anticipation.
+
+**Props:** optional `stats`: use `stats[0].value` as the starting count (e.g. "5"). Must be a number string between 2 and 9. Uses `title` (above timer) and `narration` (below, e.g. "until launch").
+
+**When to Use:** product launches, chapter transitions, or any dramatic countdown beat.
+
+---
+
+## handwritten_equation
+**Visual:** Equation or formula revealed step by step with marker-style type-in. Each step has a label and a value line; the final step gets a hand-drawn highlight box. Ruled lines and ink-style filters.
+
+**Best for:** Teaching a formula, showing a calculation, or step-by-step logic.
+
+**Props:** optional `stats` array: each item `{ "label": "Step name", "value": "expression or result" }`. Used as equation steps (e.g. compound interest formula). If omitted, a sample formula is used. Uses `title` and `narration` for header context.
+
+**When to Use:** math/formula explanations, before/after calculations, or rule-based content.
+
+---
+
+## speech_bubble_dialogue
+**Visual:** Two stick figures in conversation with speech bubbles above them. Left and right bubble text reveals in sequence. Optional speaker names below each figure. Title/caption at bottom.
+
+**Best for:** Dialogue, Q&A, or "person A says / person B says" moments.
+
+**Props:** optional `leftThought`, `rightThought` (strings) — content of each speech bubble. Optional `stats[0].label`, `stats[1].label` for speaker names (e.g. "Person A", "Person B"). Uses `title` and `narration` for scene header and caption.
+
+**When to Use:** conversations, debates, or two-perspective storytelling.
+
+---
+
+## data_visualisation
+**Visual:** A real animated chart (line / bar / histogram) drawn on a taped paper panel with the hand-drawn marker aesthetic — dashed grid, inky strokes, marker-colored series. A short read sits beside the chart.
+
+**Best for:** Charting an ACTUAL data table from the source article (a trend over time, a comparison between categories, or a distribution) — distinct from simple stat bars.
+
+**Props (shared with the chart pipeline — usually filled automatically from the bound table):**
+- `chartTable`: `{ headers: [...], rows: [[...]] }` — col 1 = X labels; cols 2–4 = up to 3 numeric series
+- `chartType`: `"line" | "bar" | "histogram" | "auto"` (line = trend over time; bar = named categories; histogram = numeric bins/ranges)
+- `chartSummary`: one-to-two sentence read of the chart (emphasize key phrases with `__double underscores__`)
+- `subtitle`, `yAxisLabel`, `chartYAxisTicks` (optional axis captions/ticks)
+
+**When to Use:**
+- ONLY for a scene the pipeline bound to a real chartable table (`preferred_layout='data_visualisation'` + a `data_table_index`). Never fabricate chart figures — values come from the bound table.
+
+---
+
+## ticker_table
+**Visual:** A hand-drawn data table on the whiteboard paper background — title with a wavy chalk underline, rows stagger in with dashed separators, accent-colored column headers, numeric cells in the highlight column colored green (positive) or red (negative).
+
+**Best for:** Any scene with a real multi-row, multi-column dataset — rankings, comparison grids, schedules, financial tables.
+
+**Props:**
+- `tickerTable`: `{ headers: string[], rows: string[][] }` — col 1 = row labels; cols 2–6 = values. Max 20 rows, 6 columns. Never fabricate rows — use only data present in the source.
+- `tickerTitle` (string): optional subtitle line under the main title
+- `tickerHighlightCol` (number): 0-based column index to green/red-color by sign. Set `-1` to disable.
+- `tickerFootnote` (string): optional source/footnote line at the bottom
+
+**When to Use:**
+- The source contains a real table or multi-row dataset that cannot be captured well by a chart or stat cards.
+- Prefer `data_visualisation` for trend/distribution charts; use `ticker_table` for structured grids.
+
+---
+
+## ending_socials
+**Visual:** Hand-drawn whiteboard sign-off — marker-style title, stick figure waving in the corner, chalk-stroke social icons with labels, and an optional website CTA block on the paper background.
+
+**Best for:** Final scene only — follow-along, social handles, and website link.
+
+**Props:**
+- `socials` — array of `{ platform, enabled, label }` rows. Supported platforms: `facebook`, `instagram`, `youtube`, `medium`, `substack`, `linkedin`, `tiktok`.
+- `showWebsiteButton` — toggle website CTA visibility.
+- `websiteLink` — URL shown in the CTA block.
+- `ctaButtonText` — optional CTA label.
+- `narration` (global) — warm closing line.
+
+**When to Use:** Always the **last scene** when CTA or social data exists. Do not use mid-video.
+
+---
+
+# Scene Flow Rules
+
+- Scene 0 must use `drawn_title`.
+- Prefer `marker_story` as baseline.
+- Insert `stick_figure_scene` for key narrative pivots. Use `stats_figures` or `stats_chart` for data; use `comparison` for two-sided comparisons. Use `countdown_timer` for countdowns, `handwritten_equation` for formulas, `speech_bubble_dialogue` for dialogue.
+- Use `data_visualisation` when the pipeline binds a chartable table; use `ticker_table` for multi-row datasets.
+- Close with `ending_socials` when CTA or social data is available.
+- Keep transitions soft and hand-crafted; avoid harsh kinetic jumps.
+- Aim for setup -> development -> payoff structure.
+
+---
+
+# Content Extraction Rules
+
+- `title`: 3-8 words, story beat headline.
+- `narration`: concise spoken-style sentence, about 15 words (roughly 12–18 words per scene).
+- Emphasize characters, action, and transformation language.
+- Avoid jargon-heavy technical formatting in this template.
+
+---
+
+# Variety Rules
+
+- Do not repeat the same layout more than 3 consecutive scenes.
+- Alternate between text-led (`marker_story`), metaphor-led (`stick_figure_scene`), stats-led (`stats_figures`, `stats_chart`), comparison (`comparison`), countdown (`countdown_timer`), equation (`handwritten_equation`), and dialogue (`speech_bubble_dialogue`) beats when appropriate.
+- Use `data_visualisation` and `ticker_table` only when the pipeline binds a real table.
+- End with a clear payoff: `ending_socials` when CTA/social data exists; otherwise a conclusion scene that resolves the story arc.

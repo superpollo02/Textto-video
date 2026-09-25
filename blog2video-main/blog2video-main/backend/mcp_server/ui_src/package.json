@@ -1,0 +1,27 @@
+{
+  "name": "blog2video-mcp-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "B2V_VIEW=template_gallery vite build && B2V_VIEW=voice_gallery vite build && B2V_VIEW=settings_panel vite build",
+    "build:template_gallery": "B2V_VIEW=template_gallery vite build",
+    "build:voice_gallery": "B2V_VIEW=voice_gallery vite build",
+    "build:settings_panel": "B2V_VIEW=settings_panel vite build",
+    "build:setup_gallery": "B2V_VIEW=setup_gallery vite build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "puppeteer": "^25.1.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "vite-plugin-singlefile": "^2.0.0"
+  }
+}

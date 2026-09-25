@@ -1,0 +1,428 @@
+import React from "react";
+import { AbsoluteFill, interpolate, useCurrentFrame, useVideoConfig } from "remotion";
+import { useFitText } from "../components/useFitText";
+import type { NewscastLayoutProps } from "./types";
+import {
+  DEFAULT_NEWSCAST_ACCENT,
+  DEFAULT_NEWSCAST_TEXT,
+  getNewscastPortraitTypeScale,
+  newscastFont,
+  scaleNewscastPx,
+} from "../themeUtils";
+import {
+  HEADLINE_WEIGHT,
+  glassNarrativeHeadlinePop,
+  glassNarrativePanelTumble,
+  headlineTextShadow,
+  panelTumbleStyle,
+} from "../newscastLayoutMotion";
+import { ZoomCropImg } from "../components/ZoomCropImg";
+import { ZoomCropVideo } from "../components/ZoomCropVideo";
+
+const NAVY_PANEL = "rgba(10,42,110,0.28)";
+const BORDER = "rgba(200,220,255,0.25)";
+const GOLD = "#D4AA50";
+
+export const GlassNarrative: React.FC<NewscastLayoutProps> = ({
+  title,
+  narration,
+  category,imageUrl,
+  imageObjectPosition,
+  imageZoom,
+  videoUrl,
+  videoMuted,
+  videoVolume,
+  videoDurationInFrames,
+  videoStartInFrames,
+  tickerItems,
+  lowerThirdTag,
+  lowerThirdHeadline,
+  lowerThirdSub,
+  accentColor,
+  textColor,
+  titleFontSize,
+  descriptionFontSize,
+  titleFontSizeIsUserSet,
+  descriptionFontSizeIsUserSet,
+  fontFamily,
+}) => {
+  const frame = useCurrentFrame();
+  const { width, height } = useVideoConfig();
+  const portraitScale = getNewscastPortraitTypeScale(width, height);
+  const p = height > width;
+
+  const isNarrow = width < 900;
+
+  /* ── Auto-fit ──────────────────────────────────────────────
+     Title and narration are unbounded user input and share the left column
+     of a fixed-height, overflow:hidden panel; long copy was clipped. Measure
+     the real available height and shrink to fit. An explicitly chosen size
+     is honored exactly (minPx === targetPx no-ops the hook). */
+  const fitTitleRef = React.useRef<HTMLHeadingElement>(null);
+  const fitDescRef = React.useRef<HTMLDivElement>(null);
+  const fitTitleTarget = titleFontSize ?? (p ? 39 : 30);
+  const fitDescTarget = descriptionFontSize ?? (p ? 20 : 16);
+  const { px: fitTitlePx } = useFitText(
+    fitTitleRef,
+    fitTitleTarget,
+    titleFontSizeIsUserSet ? fitTitleTarget : Math.round(fitTitleTarget * 0.45),
+    [title, fitTitleTarget, titleFontSizeIsUserSet, p, height],
+    Math.round(height * (p ? 0.2 : 0.24)),
+  );
+  const { px: fitDescPx } = useFitText(
+    fitDescRef,
+    fitDescTarget,
+    descriptionFontSizeIsUserSet ? fitDescTarget : Math.round(fitDescTarget * 0.5),
+    [narration, fitDescTarget, descriptionFontSizeIsUserSet, fitTitlePx, p, height],
+    Math.round(height * (p ? 0.3 : 0.36)),
+  );
+
+  const opacity = interpolate(frame, [0, 20], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  const tumble = glassNarrativePanelTumble(frame);
+  const panelBlur = interpolate(frame, [0, 12], [6, 0], { extrapolateRight: "clamp" });
+  const titlePop = glassNarrativeHeadlinePop(frame, 6);
+
+  // Staggered article lead in (chip -> headline -> narration -> image)
+  const chipOpacity = interpolate(frame, [0, 12], [0, 1], { extrapolateRight: "clamp" });
+  const chipY = interpolate(frame, [0, 12], [40, 0], { extrapolateRight: "clamp" });
+  const chipScale = interpolate(frame, [0, 12], [0.82, 1], { extrapolateRight: "clamp" });
+  const chipBlur = interpolate(frame, [0, 12], [8, 0], { extrapolateRight: "clamp" });
+
+  const headlineOpacity = interpolate(frame, [6, 18], [0, 1], { extrapolateRight: "clamp" });
+  const headlineY = interpolate(frame, [6, 18], [28, 0], { extrapolateRight: "clamp" });
+  const headlineBlur = interpolate(frame, [6, 18], [6, 0], { extrapolateRight: "clamp" });
+
+  const narrationOpacity = interpolate(frame, [12, 24], [0, 1], { extrapolateRight: "clamp" });
+  const narrationY = interpolate(frame, [12, 24], [26, 0], { extrapolateRight: "clamp" });
+  const narrationScale = interpolate(frame, [12, 24], [0.94, 1], { extrapolateRight: "clamp" });
+
+  const imageOpacity = interpolate(frame, [14, 30], [0, 1], { extrapolateRight: "clamp" });
+  const imageY = interpolate(frame, [14, 30], [44, 0], { extrapolateRight: "clamp" });
+  const imageScale = interpolate(frame, [14, 22, 30], [0.94, 1.06, 1], { extrapolateRight: "clamp" });
+  const foldLeftX = interpolate(frame, [0, 14], [-180, 0], { extrapolateRight: "clamp" });
+  const foldRightX = interpolate(frame, [0, 14], [180, 0], { extrapolateRight: "clamp" });
+  const timelineOpacity = interpolate(frame, [6, 16], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+
+  const hasVisual = Boolean(imageUrl?.trim() || videoUrl?.trim());
+  const cat = category ?? "WORLD AFFAIRS";
+  const safeTickerItems = (tickerItems?.filter(Boolean) ?? []).slice(0, 4);
+  const safeLowerTag = lowerThirdTag ?? "LIVE COVERAGE";
+  const safeLowerHeadline = lowerThirdHeadline ?? "Correspondent Report";
+  const safeLowerSub = lowerThirdSub ?? "Reporting live from the broadcast desk";
+  const RED = accentColor || DEFAULT_NEWSCAST_ACCENT;
+  const STEEL = textColor || DEFAULT_NEWSCAST_TEXT;
+
+  return (
+    <AbsoluteFill style={{ zIndex: 60, overflow: "hidden" }}>
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          // Portrait stacks image OVER text: three side-by-side columns in a 720px
+          // frame leave the image a sliver, so portrait goes vertical instead.
+          flexDirection: p && hasVisual ? "column" : "row",
+          alignItems: "center",
+          justifyContent: p && hasVisual ? "flex-start" : "space-between",
+          // Portrait reserves the bottom band where NewsCastChrome draws its
+          // lower-third + ticker, so the stacked text panel is never covered.
+          padding: p && hasVisual
+            ? "5% 4% 190px 4%"
+            : isNarrow ? "7% 4% 6% 6%" : "7% 6% 6% 6%",
+          gap: p && hasVisual ? 16 : 18,
+          opacity,
+        }}
+      >
+        <div
+          style={{
+            position: "relative",
+            // With an image the frame is split roughly in half (landscape) or the
+            // panel spans full width under the image band (portrait).
+            width: hasVisual ? (p ? "100%" : "48%") : "62%",
+            maxWidth: hasVisual && !p ? 720 : 860,
+            ...panelTumbleStyle(tumble),
+            filter: `blur(${panelBlur}px)`,
+            opacity: tumble.opacity,
+          }}
+        >
+          <div
+            style={{
+              position: "relative",
+              width: "100%",
+              background: NAVY_PANEL,
+              border: `1px solid ${BORDER}`,
+              backdropFilter: "blur(8px)",
+              padding: 26,
+              paddingLeft: 28,
+              overflow: "hidden",
+            }}
+          >
+          {/* Red top accent + left accent */}
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 3,
+              background: RED,
+              opacity: 0.95,
+            }}
+          />
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              left: 0,
+              width: 4,
+              background: RED,
+              opacity: 0.95,
+            }}
+          />
+
+          {/* Gold corner tick marks */}
+          {(["tl", "tr", "bl", "br"] as const).map((pos) => (
+            <div
+              // eslint-disable-next-line react/no-array-index-key
+              key={pos}
+              aria-hidden
+              style={{
+                position: "absolute",
+                width: 18,
+                height: 18,
+                ...(pos === "tl" ? { top: 0, left: 0 } : null),
+                ...(pos === "tr" ? { top: 0, right: 0 } : null),
+                ...(pos === "bl" ? { bottom: 0, left: 0 } : null),
+                ...(pos === "br" ? { bottom: 0, right: 0 } : null),
+                borderTop: pos === "bl" || pos === "br" ? "none" : `2px solid ${GOLD}`,
+                borderLeft: pos === "tr" || pos === "br" ? "none" : `2px solid ${GOLD}`,
+                borderRight: pos === "tr" || pos === "br" ? `2px solid ${GOLD}` : "none",
+                borderBottom: pos === "bl" || pos === "br" ? `2px solid ${GOLD}` : "none",
+                opacity: 0.6,
+              }}
+            />
+          ))}
+
+          {/* Body layout — text only. The image used to live here at flex 40% of
+              this panel's inner width, which resolved to just ~23% of the frame
+              (297px on 1280) and vanished entirely in portrait. It is now a
+              full-height rail rendered as a sibling of this panel; see below. */}
+          <div style={{ display: "flex", gap: 0, alignItems: "stretch" }}>
+            <div style={{ flex: 1, minWidth: 0, transform: `translateX(${foldLeftX}px)` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, opacity: timelineOpacity }}>
+                <div style={{ width: 54, height: 2, background: `linear-gradient(90deg, ${GOLD}, transparent)` }} />
+                <div style={{ fontFamily: newscastFont(fontFamily, "label"), fontSize: scaleNewscastPx(11, portraitScale), color: STEEL, letterSpacing: 3, textTransform: "uppercase" }}>
+                  M1  M2  M3
+                </div>
+              </div>
+              <div
+                style={{
+                  display: "inline-block",
+                  background: RED,
+                  color: "white",
+                  fontFamily: newscastFont(fontFamily, "title"),
+                  fontSize: scaleNewscastPx(12, portraitScale),
+                  fontWeight: 800,
+                  letterSpacing: 3,
+                  textTransform: "uppercase",
+                  padding: "4px 12px",
+                  borderRadius: 2,
+                  marginBottom: 14,
+                  opacity: chipOpacity,
+                  transform: `translateY(${chipY}px) scale(${chipScale})`,
+                  filter: `blur(${chipBlur}px)`,
+                  boxShadow: "0 4px 24px rgba(232,32,32,0.45)",
+                }}
+              >
+                {cat}
+              </div>
+
+              <h2
+                ref={fitTitleRef}
+                style={{
+                  fontFamily: newscastFont(fontFamily, "title"),
+                  fontSize: fitTitlePx,
+                  fontWeight: HEADLINE_WEIGHT,
+                  color: "white",
+                  textTransform: "uppercase",
+                  lineHeight: 1.15,
+                  margin: 0,
+                  marginBottom: 10,
+                  opacity: headlineOpacity * titlePop.opacity,
+                  textShadow: headlineTextShadow.strong,
+                  transform: `translateY(${headlineY + titlePop.translateY}px) scale(${titlePop.scale}) rotateZ(${titlePop.rotateZ}deg)`,
+                  filter: `blur(${headlineBlur}px)`,
+                }}
+              >
+                {title}
+              </h2>
+
+              {narration ? (
+                <div
+                  ref={fitDescRef}
+                  style={{
+                    fontFamily: newscastFont(fontFamily, "body"),
+                    fontSize: fitDescPx,
+                    fontWeight: 500,
+                    color: "rgba(232,238,248,0.95)",
+                    lineHeight: 1.6,
+                    whiteSpace: "pre-wrap",
+                    transform: `translateY(${narrationY}px) scale(${narrationScale})`,
+                    opacity: narrationOpacity,
+                  }}
+                >
+                  {narration}
+                </div>
+              ) : null}
+            </div>
+
+          </div>
+          </div>
+        </div>
+
+        {/* Image panel — a substantial block, not a thin rail. Landscape: it takes
+            ~46% of the frame beside the text panel (the bulletin rail is dropped,
+            since three columns is what squeezed the image to a sliver). Portrait:
+            a full-width band ABOVE the text, ordered first via flex `order`. */}
+        {hasVisual ? (
+          <div
+            style={{
+              flex: p ? "0 0 42%" : "0 0 46%",
+              alignSelf: "stretch",
+              order: p ? -1 : 0,
+              width: p ? "100%" : undefined,
+              minWidth: 0,
+              minHeight: 0,
+              position: "relative",
+              borderRadius: 12,
+              overflow: "hidden",
+              border: `1px solid ${BORDER}`,
+              opacity: imageOpacity,
+              transform: `translateX(${foldRightX}px) translateY(${imageY}px) scale(${imageScale})`,
+            }}
+          >
+            {videoUrl ? (
+              <ZoomCropVideo
+                src={videoUrl}
+                imageObjectPosition={imageObjectPosition}
+                imageZoom={imageZoom}
+                muted={videoMuted ?? true}
+                volume={videoVolume ?? 0.35}
+                durationInFrames={videoDurationInFrames}
+                startInFrames={videoStartInFrames}
+              />
+            ) : (
+              <ZoomCropImg
+                src={imageUrl!}
+                imageObjectPosition={imageObjectPosition}
+                imageZoom={imageZoom}
+                alt=""
+              />
+            )}
+            {/* Light navy tint so the rail sits in the same world as the panels,
+                without the heavy 90% wash the old inset used. */}
+            <div
+              aria-hidden
+              style={{
+                position: "absolute",
+                inset: 0,
+                background:
+                  "linear-gradient(90deg, rgba(10,42,110,0.32) 0%, rgba(10,42,110,0.10) 45%, rgba(10,42,110,0.32) 100%)",
+              }}
+            />
+            <div
+              aria-hidden
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 3,
+                background: RED,
+                opacity: 0.95,
+              }}
+            />
+          </div>
+        ) : null}
+
+        {/* Right: bulletin rail — dropped entirely when an image is present. Three
+            columns is precisely what made the image a sliver; with the rail gone
+            the frame splits cleanly between text and a real image panel. Its
+            content is not lost: lowerThird* and tickerItems are already rendered
+            by the composition's NewsCastChrome on every non-hero scene. */}
+        {hasVisual ? null : (
+        <div style={{ flex: "0 0 28%", minWidth: isNarrow ? 190 : 250, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div
+            style={{
+              background: "rgba(10,42,110,0.25)",
+              border: "1px solid rgba(200,220,255,0.20)",
+              borderRadius: 12,
+              backdropFilter: "blur(8px)",
+              padding: "12px 14px 12px",
+              overflow: "hidden",
+              position: "relative",
+            }}
+          >
+            <div
+              aria-hidden
+              style={{
+                position: "absolute",
+                inset: 0,
+                background: "linear-gradient(90deg, rgba(255,255,255,0.04) 0%, transparent 100%)",
+                pointerEvents: "none",
+              }}
+            />
+            <div style={{ position: "relative" }}>
+              <div style={{ fontFamily: newscastFont(fontFamily, "label"), fontSize: scaleNewscastPx(10, portraitScale), letterSpacing: 4, fontWeight: 600, color: "#B8C8E0", textTransform: "uppercase" }}>
+                {safeLowerTag}
+              </div>
+              <div style={{ marginTop: 6, fontFamily: newscastFont(fontFamily, "title"), fontSize: scaleNewscastPx(22, portraitScale), fontWeight: 700, color: "white", textTransform: "uppercase", letterSpacing: 0.5, lineHeight: 1.05 }}>
+                {safeLowerHeadline}
+              </div>
+              <div style={{ marginTop: 6, fontFamily: newscastFont(fontFamily, "body"), fontSize: scaleNewscastPx(13, portraitScale), color: STEEL, lineHeight: 1.5 }}>
+                {safeLowerSub}
+              </div>
+            </div>
+          </div>
+
+          <div
+            style={{
+              background: "rgba(10,42,110,0.25)",
+              border: "1px solid rgba(200,220,255,0.20)",
+              borderRadius: 12,
+              backdropFilter: "blur(8px)",
+              padding: "12px 14px",
+              overflow: "hidden",
+              position: "relative",
+            }}
+          >
+            <div style={{ position: "relative" }}>
+              <div style={{ fontFamily: newscastFont(fontFamily, "label"), fontSize: scaleNewscastPx(10, portraitScale), letterSpacing: 4, fontWeight: 600, color: "#B8C8E0", textTransform: "uppercase" }}>
+                Latest
+              </div>
+              <div style={{ height: 1, marginTop: 8, background: `linear-gradient(90deg, transparent, ${RED}, ${GOLD})`, opacity: 0.8 }} />
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                {(safeTickerItems.length ? safeTickerItems : ["LIVE BREAKING FEED", "LATEST UPDATES", "OFFICIAL CONFIRMATIONS"]).slice(0, 3).map((t, i) => (
+                  <div key={`${t}-${i}`} style={{ display: "flex", alignItems: "center", gap: 10, fontFamily: newscastFont(fontFamily, "body"), color: STEEL, fontSize: scaleNewscastPx(13, portraitScale), lineHeight: 1.3 }}>
+                    <div style={{ width: 6, height: 6, borderRadius: 999, background: i === 0 ? RED : "#1E5FD4", boxShadow: i === 0 ? "0 0 14px rgba(232,32,32,0.35)" : "0 0 14px rgba(30,95,212,0.35)" }} />
+                    <div style={{ flex: 1 }}>{t}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+        )}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+

@@ -1,0 +1,607 @@
+import React, { useEffect, useState } from "react";
+import { AvatarOverlay, type AvatarOverlayProps } from "../../components/AvatarOverlay";
+import {
+  AbsoluteFill,
+  Audio,
+  Sequence,
+  staticFile,
+  CalculateMetadataFunction,
+  useCurrentFrame,
+  useVideoConfig,
+} from "remotion";
+import "../../fonts/newspaper-defaults";
+import { NEWSCAST_LAYOUT_REGISTRY } from "./layouts";
+import { resolveFontFamily } from "../../fonts/registry";
+import type { NewscastLayoutProps, NewscastLayoutType } from "./types";
+import { LogoOverlay } from "../../components/LogoOverlay";
+import { BackgroundMusic } from "../../components/BackgroundMusic";
+import { CaptionTrack } from "../../components/CaptionTrack";
+import { NewsCastBackground } from "./NewsCastBackground";
+import { NewsCastChrome } from "./NewsCastChrome";
+import { NewscastSceneZTransition } from "./NewscastSceneZTransition";
+import { NEWSCAST_BACKGROUND_VARIANT } from "./backgroundVariant";
+import { getPlaybackSpeed, getSceneDurationFrames } from "../playbackSpeed";
+import { SceneDurationInFramesContext } from "../SceneDurationContext";
+
+const LEGACY_TO_NEWCAST_LAYOUT_ID: Record<string, NewscastLayoutType> = {
+  opening: "opening",
+  anchor_narrative: "anchor_narrative",
+  live_metrics_board: "live_metrics_board",
+  data_visualization: "data_visualization",
+  briefing_code_panel: "briefing_code_panel",
+  headline_insight: "headline_insight",
+  story_stack: "story_stack",
+  side_by_side_brief: "side_by_side_brief",
+  segment_break: "segment_break",
+  field_image_focus: "field_image_focus",
+  // Visual variants are identity-mapped: they are real layout IDs, not legacy
+  // aliases. Without these the `?? "anchor_narrative"` fallback swallows them.
+  opening__v2: "opening__v2",
+  anchor_narrative__v2: "anchor_narrative__v2",
+  ending_socials__v2: "ending_socials__v2",
+  cinematic_title: "opening",
+  glass_narrative: "anchor_narrative",
+  glow_metric: "live_metrics_board",
+  glass_code: "briefing_code_panel",
+  kinetic_insight: "headline_insight",
+  kinetix_insight: "headline_insight",
+  glass_stack: "story_stack",
+  split_glass: "side_by_side_brief",
+  chapter_break: "segment_break",
+  glass_image: "field_image_focus",
+  newscast_cinematic_title: "opening",
+  newscast_glass_narrative: "anchor_narrative",
+  newscast_glow_metric: "live_metrics_board",
+  newscast_glass_code: "briefing_code_panel",
+  newscast_kinetic_insight: "headline_insight",
+  newscast_glass_stack: "story_stack",
+  newscast_split_glass: "side_by_side_brief",
+  newscast_chapter_break: "segment_break",
+  newscast_glass_image: "field_image_focus",
+  ending_socials: "ending_socials",
+};
+
+const normalizeNewscastLayoutId = (layout: string): NewscastLayoutType =>
+  LEGACY_TO_NEWCAST_LAYOUT_ID[layout] ?? "anchor_narrative";
+
+const NEWCAST_LAYOUT_TO_LEGACY_KEY: Record<NewscastLayoutType, string> = {
+  opening: "cinematic_title",
+  opening__v2: "cinematic_title",
+  anchor_narrative: "glass_narrative",
+  anchor_narrative__v2: "glass_narrative",
+  live_metrics_board: "glow_metric",
+  data_visualization: "data_visualization",
+  briefing_code_panel: "glass_code",
+  headline_insight: "kinetic_insight",
+  story_stack: "glass_stack",
+  side_by_side_brief: "split_glass",
+  segment_break: "chapter_break",
+  field_image_focus: "glass_image",
+  ending_socials: "ending_socials",
+  ending_socials__v2: "ending_socials",
+};
+
+const toLegacyNewscastLayoutId = (layout: NewscastLayoutType): string =>
+  NEWCAST_LAYOUT_TO_LEGACY_KEY[layout];
+
+const normalizeNewscastDataVizProps = (
+  lp: Partial<NewscastLayoutProps>,
+): Partial<NewscastLayoutProps> => {
+  const out: Record<string, unknown> = { ...lp };
+
+  if (typeof out.chartType === "string") {
+    out.chartType = String(out.chartType).trim().toLowerCase();
+  }
+
+  const lineChart = out.lineChart as
+    | {
+        labels?: unknown[];
+        datasets?: Array<{ label?: unknown; values?: unknown[] | string }>;
+      }
+    | undefined;
+  if (lineChart && typeof lineChart === "object") {
+    if (!out.lineChartLabels && Array.isArray(lineChart.labels)) {
+      out.lineChartLabels = lineChart.labels.map((v) => String(v ?? ""));
+    }
+    if (!out.lineChartDatasets && Array.isArray(lineChart.datasets)) {
+      out.lineChartDatasets = lineChart.datasets.map((dataset) => ({
+        label: String(dataset?.label ?? ""),
+        valuesStr: Array.isArray(dataset?.values)
+          ? dataset.values.map((v) => String(v ?? "")).join(",")
+          : String(dataset?.values ?? ""),
+      }));
+    }
+  }
+
+  const barChart = out.barChart as { labels?: unknown[]; values?: unknown[] } | undefined;
+  if (!out.barChartRows && barChart && typeof barChart === "object") {
+    const labels = Array.isArray(barChart.labels) ? barChart.labels : [];
+    const values = Array.isArray(barChart.values) ? barChart.values : [];
+    out.barChartRows = labels.map((label, index) => ({
+      label: String(label ?? ""),
+      value: String(values[index] ?? ""),
+    }));
+  }
+
+  const histogram = out.histogram as { labels?: unknown[]; values?: unknown[] } | undefined;
+  if (!out.histogramRows && histogram && typeof histogram === "object") {
+    const labels = Array.isArray(histogram.labels) ? histogram.labels : [];
+    const values = Array.isArray(histogram.values) ? histogram.values : [];
+    out.histogramRows = labels.map((label, index) => ({
+      label: String(label ?? ""),
+      value: String(values[index] ?? ""),
+    }));
+  }
+
+  const legacyChart = out.chart as
+    | {
+        type?: string;
+        labels?: unknown[];
+        datasets?: Array<{ label?: unknown; values?: unknown[] | string }>;
+        rows?: Array<{ label?: unknown; value?: unknown }>;
+      }
+    | undefined;
+  if (legacyChart && typeof legacyChart === "object") {
+    if (!out.chartType && legacyChart.type) out.chartType = String(legacyChart.type);
+    if (!out.lineChartLabels && Array.isArray(legacyChart.labels)) {
+      out.lineChartLabels = legacyChart.labels.map((v) => String(v ?? ""));
+    }
+    if (!out.lineChartDatasets && Array.isArray(legacyChart.datasets)) {
+      out.lineChartDatasets = legacyChart.datasets.map((dataset) => ({
+        label: String(dataset?.label ?? ""),
+        valuesStr: Array.isArray(dataset?.values)
+          ? dataset.values.map((v) => String(v ?? "")).join(",")
+          : String(dataset?.values ?? ""),
+      }));
+    }
+    if (!out.barChartRows && Array.isArray(legacyChart.rows)) {
+      out.barChartRows = legacyChart.rows.map((row) => ({
+        label: String(row?.label ?? ""),
+        value: String(row?.value ?? ""),
+      }));
+    }
+  }
+
+  const legacyTable = out.table as
+    | { headers?: unknown[]; rows?: unknown[][] }
+    | undefined;
+  if (!out.chartTable && legacyTable && typeof legacyTable === "object") {
+    out.chartTable = {
+      headers: Array.isArray(legacyTable.headers)
+        ? legacyTable.headers.map((h) => String(h ?? ""))
+        : [],
+      rows: Array.isArray(legacyTable.rows)
+        ? legacyTable.rows.map((row) =>
+            Array.isArray(row) ? row.map((cell) => (cell == null ? "" : (cell as string | number))) : [],
+          )
+        : [],
+    };
+  }
+
+  return out as Partial<NewscastLayoutProps>;
+};
+
+const NewscastSequenceInner: React.FC<{
+  startFrame: number;
+  durationInFrames: number;
+  sceneIndex: number;
+  sceneCount: number;
+  isHero: boolean;
+  showLowerThird: boolean;
+  layoutType: string;
+  layoutProps: NewscastLayoutProps;
+  LayoutComponent: React.ComponentType<NewscastLayoutProps>;
+  voiceoverSrc?: string;
+  avatarSrc?: string;
+  /** Avatar presentation, forwarded whole so this drilled prop list stays short. */
+  avatarSettings?: Partial<AvatarOverlayProps>;
+  playbackSpeed: number;
+  captionsEnabled?: boolean;
+  captionText?: string;
+  captionPosition?: string;
+  captionFontFamily?: string;
+  captionFontSize?: string;
+  captionOffset?: number;
+  aspectRatio?: string;
+  fontFamily?: string;
+  speechDurationFrames?: number;
+}> = ({
+  startFrame,
+  durationInFrames,
+  sceneIndex,
+  sceneCount,
+  isHero,
+  showLowerThird,
+  layoutType,
+  layoutProps,
+  LayoutComponent,
+  voiceoverSrc,
+  avatarSrc,
+  avatarSettings,
+  playbackSpeed,
+  captionsEnabled,
+  captionText,
+  captionPosition,
+  captionFontFamily,
+  captionFontSize,
+  captionOffset,
+  aspectRatio,
+  fontFamily,
+  speechDurationFrames,
+}) => {
+  const localFrame = useCurrentFrame();
+  const { width, height } = useVideoConfig();
+  const portraitScale = 1;
+  const portraitTranslateY = height > width ? -((portraitScale - 1) * height * 0.5) : 0;
+  const rotationFrame = startFrame + localFrame;
+
+  return (
+    <AbsoluteFill>
+      <NewscastSceneZTransition
+        durationInFrames={durationInFrames}
+        sceneIndex={sceneIndex}
+        sceneCount={sceneCount}
+        layoutType={layoutType}
+      >
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            transform: `translateY(${portraitTranslateY}px)`,
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              transform: `scale(${portraitScale})`,
+              transformOrigin: "50% 50%",
+            }}
+          >
+            <div>
+              <NewsCastBackground
+                variant={NEWSCAST_BACKGROUND_VARIANT}
+                globeOpacity={0.44}
+                rotationFrame={rotationFrame}
+                sceneFrame={localFrame}
+                sceneDurationInFrames={durationInFrames}
+                sceneLayoutType={layoutType}
+                solidBackground
+              />
+            </div>
+            {!isHero ? (
+              <NewsCastChrome
+                tickerItems={layoutProps.tickerItems}
+                lowerThirdTag={layoutProps.lowerThirdTag}
+                lowerThirdHeadline={layoutProps.lowerThirdHeadline}
+                lowerThirdSub={layoutProps.lowerThirdSub}
+                showLowerThird={showLowerThird}
+                accentColor={layoutProps.accentColor}
+                textColor={layoutProps.textColor}
+                descriptionFontSize={layoutProps.descriptionFontSize}
+                fontFamily={layoutProps.fontFamily}
+              />
+            ) : null}
+            <SceneDurationInFramesContext.Provider value={durationInFrames}>
+              <LayoutComponent {...layoutProps} />
+            </SceneDurationInFramesContext.Provider>
+          </div>
+        </div>
+      </NewscastSceneZTransition>
+      {voiceoverSrc ? <Audio src={voiceoverSrc} playbackRate={playbackSpeed} /> : null}
+      {avatarSrc ? <AvatarOverlay src={avatarSrc} aspectRatio={aspectRatio || "landscape"} {...avatarSettings} /> : null}
+      {captionsEnabled && captionText && (
+        <CaptionTrack
+          text={captionText}
+          position={captionPosition || "bottom_center"}
+          aspectRatio={aspectRatio || "landscape"}
+          fontFamily={captionFontFamily ? (resolveFontFamily(captionFontFamily) || captionFontFamily) : (fontFamily || undefined)}
+          fontSize={captionFontSize ? Number(captionFontSize) : undefined}
+          offset={captionOffset ?? 0}
+          speechDurationFrames={speechDurationFrames}
+        />
+      )}
+    </AbsoluteFill>
+  );
+};
+
+interface SceneData {
+  id: number;
+  order: number;
+  title: string;
+  narration: string;
+  /** Spoken narration text — used for captions (may differ from on-screen `narration`/displayText). */
+  narrationText?: string;
+  layout: string;
+  layoutProps: Record<string, unknown>;
+  layoutConfig?: { titleFontSize?: number; descriptionFontSize?: number };
+  durationSeconds: number;
+  /** Spoken-audio length in seconds (scene duration minus trailing pad) — for caption timing. */
+  speechDurationSeconds?: number;
+  voiceoverFile: string | null;
+  avatarVideoFile?: string | null;
+  /** Per-scene avatar presentation, already resolved by the backend
+   *  (scene override ?? project ?? default). See services/remotion.py. */
+  avatarShape?: "circle" | "rounded" | "square";
+  avatarSize?: number;
+  avatarPosition?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
+  avatarBg?: string | null;
+  avatarOpacity?: number;
+  avatarShadow?: number;
+  avatarFocusX?: number;
+  avatarFocusY?: number;
+  avatarZoom?: number;
+  images: string[];
+  imageUrl?: string;
+  /** Stock-footage filename in public/. Mutually exclusive with `images`. */
+  video?: string;
+  videoMuted?: boolean;
+  videoVolume?: number;
+  /** Normalised clip length; converted to frames for <Loop>. */
+  videoDurationSeconds?: number;
+  /** Start offset into the clip, in seconds (the adjust-modal trim). */
+  videoStartSeconds?: number;
+}
+
+interface VideoData {
+  projectName: string;
+  heroImage?: string | null;
+  accentColor: string;
+  bgColor: string;
+  textColor: string;
+  logo?: string | null;
+  logoPosition?: string;
+  logoOpacity?: number;
+  logoSize?: number | string;
+  aspectRatio?: string;
+  playbackSpeed?: number;
+  fontFamily?: string | null;
+  bgmFile?: string | null;
+  bgmVolume?: number;
+  captionsEnabled?: boolean;
+  captionPosition?: string;
+  captionFontFamily?: string;
+  captionFontSize?: string;
+  captionOffset?: number;
+  /** Avatar overlay presentation (see components/AvatarOverlay.tsx). */
+  avatarShape?: "circle" | "rounded" | "square";
+  avatarSize?: number;
+  avatarPosition?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
+  avatarBg?: string | null;
+  avatarOpacity?: number;
+  avatarShadow?: number;
+  avatarFocusX?: number;
+  avatarFocusY?: number;
+  avatarZoom?: number;
+  scenes: SceneData[];
+}
+
+interface VideoProps extends Record<string, unknown> {
+  dataUrl: string;
+}
+
+export const calculateNewscastMetadata: CalculateMetadataFunction<VideoProps> =
+  async ({ props }) => {
+    const FPS = 30;
+    try {
+      const url = staticFile(props.dataUrl.replace(/^\//, ""));
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+      const data: VideoData = await res.json();
+
+      const playbackSpeed = getPlaybackSpeed(data.playbackSpeed);
+      const sceneFrames = data.scenes.map((s) =>
+        getSceneDurationFrames(s.durationSeconds, FPS, playbackSpeed),
+      );
+      const totalFrames = sceneFrames.reduce((sum, f) => sum + f, 0);
+      const isPortrait = data.aspectRatio === "portrait";
+
+      // Newscast base resolution: 1280×720 in landscape, 720×1280 in portrait
+      return {
+        durationInFrames: Math.max(totalFrames, FPS * 5),
+        fps: FPS,
+        width: isPortrait ? 720 : 1280,
+        height: isPortrait ? 1280 : 720,
+      };
+    } catch {
+      return {
+        durationInFrames: FPS * 300,
+        fps: FPS,
+        width: 1280,
+        height: 720,
+      };
+    }
+  };
+
+export const NewscastVideo: React.FC<VideoProps> = ({ dataUrl }) => {
+  const [data, setData] = useState<VideoData | null>(null);
+
+  useEffect(() => {
+    fetch(staticFile(dataUrl.replace(/^\//, "")))
+      .then((res) => res.json())
+      .then(setData)
+      .catch(() => {
+        setData({
+          projectName: "Newscast Preview",
+          accentColor: "#E82020",
+          bgColor: "#060614",
+          textColor: "#B8C8E0",
+          aspectRatio: "landscape",
+          scenes: [
+            {
+              id: 1,
+              order: 1,
+              title: "NEWS BULLETIN",
+              narration: "A clear, editorial opening for live broadcast updates.",
+              layout: "opening",
+              layoutProps: {
+                tickerItems: [
+                  "LIVE BREAKING FEED",
+                  "TOP DEVELOPMENTS UPDATE",
+                  "NEW DETAILS SURFACE",
+                  "OFFICIAL CONFIRMATIONS",
+                ],
+                lowerThirdTag: "LIVE COVERAGE",
+                lowerThirdHeadline: "Correspondent Report",
+                lowerThirdSub: "Reporting live from the broadcast desk",
+              },
+              durationSeconds: 5,
+              voiceoverFile: null,
+              avatarVideoFile: null,
+              images: [],
+            },
+          ],
+        });
+      });
+  }, [dataUrl]);
+
+  if (!data) return <AbsoluteFill style={{ backgroundColor: "#FAFAF8" }} />;
+
+  const FPS = 30;
+  const playbackSpeed = getPlaybackSpeed(data.playbackSpeed);
+  let currentFrame = 0;
+  const resolvedFontFamily = resolveFontFamily(data.fontFamily ?? null);
+
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundColor: data.bgColor || "#FAFAF8",
+        fontFamily: resolvedFontFamily || undefined,
+      }}
+    >
+      {data.scenes.map((scene, sceneIndex) => {
+        const normalizedLayout = normalizeNewscastLayoutId(scene.layout);
+        const legacyLayout = toLegacyNewscastLayoutId(normalizedLayout);
+        const durationFrames = getSceneDurationFrames(
+          scene.durationSeconds,
+          FPS,
+          playbackSpeed,
+        );
+        const startFrame = currentFrame;
+        currentFrame += durationFrames;
+
+        const LayoutComponent =
+          NEWSCAST_LAYOUT_REGISTRY[normalizedLayout as NewscastLayoutType] ||
+          NEWSCAST_LAYOUT_REGISTRY.anchor_narrative;
+
+        const imageUrlFromAssets = scene.images.length > 0 ? staticFile(scene.images[0]) : undefined;
+        const videoUrlFromAssets = scene.video ? staticFile(scene.video) : undefined;
+        // Clip length in frames for <Loop>. Left undefined when the backend
+        // could not probe a duration, in which case the clip plays once rather
+        // than looping at a guessed point.
+        const videoDurationInFrames = scene.videoDurationSeconds
+          ? Math.max(1, Math.round(scene.videoDurationSeconds * FPS))
+          : undefined;
+        const videoStartInFrames = scene.videoStartSeconds
+          ? Math.max(0, Math.round(scene.videoStartSeconds * FPS))
+          : undefined;
+        const lp = (scene.layoutProps ?? {}) as Record<string, unknown>;
+        const base = lp as Partial<NewscastLayoutProps>;
+        const normalizedBase =
+          normalizedLayout === "data_visualization"
+            ? normalizeNewscastDataVizProps(base)
+            : base;
+        const lc = scene.layoutConfig;
+        const focusX = Number((lp.imageFocusX as number | undefined) ?? 50);
+        const focusY = Number((lp.imageFocusY as number | undefined) ?? 50);
+        const imageZoom = Math.max(0.1, Number((lp.imageZoom as number | undefined) ?? 1));
+        const imageObjectPosition = `${Math.max(0, Math.min(100, focusX))}% ${Math.max(0, Math.min(100, focusY))}%`;
+
+        const layoutProps: NewscastLayoutProps = {
+          ...normalizedBase,
+          titleFontSize: normalizedBase.titleFontSize ?? lc?.titleFontSize,
+          descriptionFontSize: normalizedBase.descriptionFontSize ?? lc?.descriptionFontSize,
+          title: scene.title,
+          narration: scene.narration,
+          accentColor: data.accentColor || "#FF3B30",
+          bgColor: data.bgColor || "#FAFAF8",
+          textColor: data.textColor || "#111111",
+          aspectRatio: (data.aspectRatio as "landscape" | "portrait") || "landscape",
+          // Never fall back to lp.imageUrl here: it's an LLM-authored field with no
+          // real source image to draw from, so it's either absent or a hallucinated
+          // placeholder (e.g. https://example.com/...). Only assignedImage / the
+          // resolved asset pipeline can produce a real, fetchable URL.
+          imageUrl: imageUrlFromAssets ?? scene.imageUrl,
+          videoUrl: videoUrlFromAssets,
+          videoMuted: scene.videoMuted ?? true,
+          videoVolume: scene.videoVolume ?? 0.35,
+          videoDurationInFrames,
+          videoStartInFrames,
+          imageObjectPosition,
+  imageZoom,
+          fontFamily: resolvedFontFamily || undefined,
+          globeRotationFrameOffset: startFrame,
+        };
+
+        const layoutType = legacyLayout;
+        // Compare on the BASE id so visual variants (`opening__v2`) count as the
+        // hero too — otherwise the variant gets the composition chrome AND its
+        // own, drawing the ticker/top bar twice.
+        const isHero = normalizedLayout.split("__")[0] === "opening";
+        // data_visualization renders its own lower-third-equivalent cards;
+        // anchor_narrative__v2 ("Studio Desk") renders its own on-air slate
+        // top-right AND its own band with the same lowerThird* copy — the
+        // composition's chrome lower-third would just duplicate both, so
+        // it's suppressed for either.
+        const showLowerThird =
+          layoutType !== "data_visualization" &&
+          normalizedLayout !== "anchor_narrative__v2";
+
+        return (
+          <Sequence key={scene.id} from={startFrame} durationInFrames={durationFrames} name={scene.title}>
+            <NewscastSequenceInner
+              startFrame={startFrame}
+              durationInFrames={durationFrames}
+              sceneIndex={sceneIndex}
+              sceneCount={data.scenes.length}
+              isHero={isHero}
+              showLowerThird={showLowerThird}
+              layoutType={layoutType}
+              layoutProps={layoutProps}
+              LayoutComponent={LayoutComponent}
+              voiceoverSrc={scene.voiceoverFile ? staticFile(scene.voiceoverFile) : undefined}
+              avatarSrc={scene.avatarVideoFile ? staticFile(scene.avatarVideoFile) : undefined}
+              avatarSettings={{
+                shape: scene.avatarShape ?? data.avatarShape,
+                size: scene.avatarSize ?? data.avatarSize,
+                position: scene.avatarPosition ?? data.avatarPosition,
+                bg: scene.avatarBg ?? data.avatarBg,
+                opacity: scene.avatarOpacity ?? data.avatarOpacity,
+                shadow: scene.avatarShadow ?? data.avatarShadow,
+              }}
+              playbackSpeed={playbackSpeed}
+              captionsEnabled={data.captionsEnabled}
+              captionText={scene.narrationText || scene.narration}
+              captionPosition={data.captionPosition}
+              captionFontFamily={data.captionFontFamily}
+              captionFontSize={data.captionFontSize}
+              captionOffset={data.captionOffset}
+              aspectRatio={data.aspectRatio}
+              fontFamily={resolvedFontFamily || undefined}
+              speechDurationFrames={
+                scene.speechDurationSeconds
+                  ? getSceneDurationFrames(scene.speechDurationSeconds, FPS, playbackSpeed)
+                  : undefined
+              }
+            />
+          </Sequence>
+        );
+      })}
+
+      {data.logo && (
+        <LogoOverlay
+          src={staticFile(data.logo)}
+          position={data.logoPosition || "bottom_right"}
+          maxOpacity={data.logoOpacity ?? 0.9}
+          size={data.logoSize || "default"}
+          aspectRatio={data.aspectRatio || "landscape"}
+        />
+      )}
+
+      {data.bgmFile && (
+        <BackgroundMusic src={staticFile(data.bgmFile)} volume={data.bgmVolume ?? 0.10} scenes={data.scenes} />
+      )}
+    </AbsoluteFill>
+  );
+};
+

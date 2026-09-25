@@ -1,0 +1,424 @@
+import React, { useEffect, useState } from "react";
+import { AvatarOverlay } from "../../components/AvatarOverlay";
+import {
+  AbsoluteFill,
+  Audio,
+  Sequence,
+  staticFile,
+  CalculateMetadataFunction,
+} from "remotion";
+import { TransitionSeries, linearTiming } from "@remotion/transitions";
+import "../../fonts/chronicle-defaults";
+import { CHRONICLE_BODY_FONT } from "../../fonts/chronicle-defaults";
+import { CHRONICLE_LAYOUT_REGISTRY } from "./layouts";
+import { resolveFontFamily } from "../../fonts/registry";
+import type { ChronicleLayoutType, ChronicleLayoutProps } from "./types";
+import { LogoOverlay } from "../../components/LogoOverlay";
+import { BackgroundMusic } from "../../components/BackgroundMusic";
+import { CaptionTrack } from "../../components/CaptionTrack";
+import { getPlaybackSpeed, getSceneDurationFrames } from "../playbackSpeed";
+import { SceneDurationInFramesContext } from "../SceneDurationContext";
+import { ChronicleChrome } from "./components/ChronicleChrome";
+import { pickChronicleTransition } from "./transitions";
+
+interface SceneData {
+  id: number;
+  order: number;
+  title: string;
+  narration: string;
+  /** Spoken narration text — used for captions (may differ from on-screen `narration`/displayText). */
+  narrationText?: string;
+  layout: string;
+  layoutProps: Record<string, unknown>;
+  durationSeconds: number;
+  /** Spoken-audio length in seconds (scene duration minus trailing pad) — for caption timing. */
+  speechDurationSeconds?: number;
+  voiceoverFile: string | null;
+  avatarVideoFile?: string | null;
+  /** Per-scene avatar presentation, already resolved by the backend
+   *  (scene override ?? project ?? default). See services/remotion.py. */
+  avatarShape?: "circle" | "rounded" | "square";
+  avatarSize?: number;
+  avatarPosition?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
+  avatarBg?: string | null;
+  avatarOpacity?: number;
+  avatarShadow?: number;
+  avatarFocusX?: number;
+  avatarFocusY?: number;
+  avatarZoom?: number;
+  images: string[];
+  video?: string;
+  videoMuted?: boolean;
+  videoVolume?: number;
+  videoDurationSeconds?: number;
+  videoStartSeconds?: number;
+}
+
+interface VideoData {
+  projectName: string;
+  heroImage?: string | null;
+  accentColor: string;
+  bgColor: string;
+  textColor: string;
+  logo?: string | null;
+  logoPosition?: string;
+  logoOpacity?: number;
+  logoSize?: number | string;
+  aspectRatio?: string;
+  playbackSpeed?: number;
+  fontFamily?: string | null;
+  bgmFile?: string | null;
+  bgmVolume?: number;
+  captionsEnabled?: boolean;
+  captionPosition?: string;
+  captionFontFamily?: string;
+  captionFontSize?: string;
+  captionOffset?: number;
+  /** Avatar overlay presentation (see components/AvatarOverlay.tsx). */
+  avatarShape?: "circle" | "rounded" | "square";
+  avatarSize?: number;
+  avatarPosition?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
+  avatarBg?: string | null;
+  avatarOpacity?: number;
+  avatarShadow?: number;
+  avatarFocusX?: number;
+  avatarFocusY?: number;
+  avatarZoom?: number;
+  scenes: SceneData[];
+}
+
+interface VideoProps extends Record<string, unknown> {
+  dataUrl: string;
+}
+
+const LAYOUTS_WITHOUT_CHROME_FADE = new Set<ChronicleLayoutType>(["book_open"]);
+
+const SCRIPTURE_LAYOUTS = new Set<ChronicleLayoutType>([
+  "book_open",
+  "illuminated_quote",
+  "illuminated_quote__v2",
+  "parchment_scroll",
+  "decree_seal",
+]);
+
+// Per-layout minimum scene durations (in frames @ 30fps).
+//
+// Each chronicle layout has hardcoded animation timings. BookOpen has 5 acts
+// (book settle 0-30, seal crack 32-54, cover open 60-100, title push-in
+// 100-134, then a title burn-in + hold) plus an 18-frame outroFade. If
+// `scene.durationSeconds` is shorter than the layout's natural arc, the
+// content gets cut off mid-reveal and the next scene starts before the eye
+// can read anything — which is exactly what feels "rushed."
+//
+// These floors guarantee every layout has enough room to (1) play its
+// intro, (2) hold the content visibly, and (3) complete its outroFade —
+// without rushing.
+// Timeline of book_open's animation (frames @ 30fps, after my 1.55× slowdown):
+//   0-30    book settles in (closed tome)
+//   32-54   wax seal cracks
+//   60-100  cover swings open (slow spring)
+//   100-134 title page pushes in
+//   112-172 title letters burn in (LOTR-style fiery glow ramp)
+//   142     ink divider draws
+//   155-245 subtitle/narration types out word-by-word (up to 90 frames)
+//   180-200 small wax seal signature fades in
+//   then    needs ~30 frames of comfortable hold before outroFade
+//   final   18-frame outroFade
+// Total: ~245 + 30 + 18 = ~293 → round up to 300 (10s) for safety. Anything
+// shorter cuts off the subtitle mid-typing and the title barely holds.
+const LAYOUT_MIN_FRAMES: Record<ChronicleLayoutType, number> = {
+  book_open: 300,
+  book_open__v2: 300, // same Act 4 timing constants as book_open
+  ending_socials: 200, // 6.7s — staggered title/narration/socials reveals + hold
+  ending_socials__v2: 200, // same reveal cadence as ending_socials
+  chronicle_timeline: 200, // staggered timeline items
+  ledger_stats: 200, // staggered stat cells
+  versus_folio: 200, // two staggered halves
+  chronicle_data: 200, // chart draw-in + summary reveal
+  chronicle_table: 200, // staggered ledger rows
+  chapter_plate: 170,
+  illuminated_quote: 170,
+  illuminated_quote__v2: 190, // illuminated initial + quote + signed attribution
+  parchment_scroll: 170,
+  parchment_scroll__v2: 170, // same reveal cadence as parchment_scroll
+  decree_seal: 170,
+  map_reveal: 170,
+};
+
+const enforceLayoutMinimum = (frames: number, layout: ChronicleLayoutType) =>
+  Math.max(frames, LAYOUT_MIN_FRAMES[layout] ?? 150);
+
+// On the LAST scene, layouts run their fadeOut to opacity 0 with nothing
+// after to overlap. Trim a small tail off the last scene's contributed
+// duration so the video ends close to where content actually finishes.
+// Only applied when there are MULTIPLE scenes — single-scene compositions
+// (Template Studio previews) need their full window.
+// Skip trimming when the last scene has voiceover: audio shares this duration
+// and trimming clips narration before it finishes.
+const LAST_SCENE_TAIL_TRIM_FRAMES = 60;
+const trimLastScene = (frames: number) =>
+  Math.max(Math.floor(frames * 0.65), frames - LAST_SCENE_TAIL_TRIM_FRAMES);
+// Keep a tiny silent buffer before each non-last page transition.
+const EXTRA_HOLD_FRAMES = 10;
+
+const resolveLayoutKey = (raw: string): ChronicleLayoutType =>
+  (raw as ChronicleLayoutType) in CHRONICLE_LAYOUT_REGISTRY
+    ? (raw as ChronicleLayoutType)
+    : ("parchment_scroll" as ChronicleLayoutType);
+
+const computeSceneFrames = (
+  scenes: SceneData[],
+  fps: number,
+  playbackSpeed: number,
+): number[] =>
+  scenes.map((s, idx, arr) => {
+    const layout = resolveLayoutKey(s.layout);
+    const raw = getSceneDurationFrames(s.durationSeconds, fps, playbackSpeed);
+    const withMin = enforceLayoutMinimum(raw, layout);
+    const isLastInMulti = idx === arr.length - 1 && arr.length > 1;
+    const hasVoiceover = Boolean(s.voiceoverFile?.trim());
+    return isLastInMulti && !hasVoiceover ? trimLastScene(withMin) : withMin;
+  });
+
+const computeSequenceFrames = (sceneFrames: number[]): number[] =>
+  sceneFrames.map((frames, idx, arr) => (idx === arr.length - 1 ? frames : frames + EXTRA_HOLD_FRAMES));
+
+export const calculateChronicleMetadata: CalculateMetadataFunction<VideoProps> = async ({
+  props,
+}) => {
+  const FPS = 30;
+  try {
+    const url = staticFile(props.dataUrl.replace(/^\//, ""));
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+    const data: VideoData = await res.json();
+
+    const playbackSpeed = getPlaybackSpeed(data.playbackSpeed);
+    const sceneFrames = computeSceneFrames(data.scenes, FPS, playbackSpeed);
+    const sequenceFrames = computeSequenceFrames(sceneFrames);
+    let totalFrames = sequenceFrames.reduce((sum, f) => sum + f, 0);
+    for (let i = 0; i < data.scenes.length - 1; i++) {
+      const fromLayout = resolveLayoutKey(data.scenes[i].layout);
+      const toLayout = resolveLayoutKey(data.scenes[i + 1].layout);
+      totalFrames -= pickChronicleTransition(i, fromLayout, toLayout).frames;
+    }
+    const isPortrait = data.aspectRatio === "portrait";
+
+    return {
+      durationInFrames: Math.max(totalFrames, FPS * 5),
+      fps: FPS,
+      width: isPortrait ? 1080 : 1920,
+      height: isPortrait ? 1920 : 1080,
+    };
+  } catch {
+    return {
+      durationInFrames: FPS * 300,
+      fps: FPS,
+      width: 1920,
+      height: 1080,
+    };
+  }
+};
+
+export const ChronicleVideo: React.FC<VideoProps> = ({ dataUrl }) => {
+  const [data, setData] = useState<VideoData | null>(null);
+
+  useEffect(() => {
+    fetch(staticFile(dataUrl.replace(/^\//, "")))
+      .then((res) => res.json())
+      .then(setData)
+      .catch(() => {
+        setData({
+          projectName: "Chronicle Preview",
+          accentColor: "#B8860B",
+          bgColor: "#F1E4C9",
+          textColor: "#2A1810",
+          scenes: [
+            {
+              id: 1,
+              order: 1,
+              title: "The Chronicle Begins",
+              narration: "Turn the page and let the record speak.",
+              layout: "book_open",
+              layoutProps: {},
+              durationSeconds: 6,
+              voiceoverFile: null,
+              avatarVideoFile: null,
+              images: [],
+            },
+          ],
+        });
+      });
+  }, [dataUrl]);
+
+  if (!data) return <AbsoluteFill style={{ backgroundColor: "#F1E4C9" }} />;
+
+  const FPS = 30;
+  const playbackSpeed = getPlaybackSpeed(data.playbackSpeed);
+  const resolvedFontFamily = resolveFontFamily(data.fontFamily ?? null);
+  const fallbackFontFamily = resolvedFontFamily || CHRONICLE_BODY_FONT;
+
+  const sceneFrames = computeSceneFrames(data.scenes, FPS, playbackSpeed);
+  const sequenceFrames = computeSequenceFrames(sceneFrames);
+  const resolvedScenes = data.scenes.map((scene, idx) => ({
+    scene,
+    layoutKey: resolveLayoutKey(scene.layout),
+    durationFrames: sceneFrames[idx],
+    sequenceFrames: sequenceFrames[idx],
+  }));
+
+  // Compute scene start frames accounting for transition overlap (for audio sync).
+  let runningFrame = 0;
+  const sceneStartFrames: number[] = [];
+  resolvedScenes.forEach((s, i) => {
+    sceneStartFrames[i] = runningFrame;
+    runningFrame += s.sequenceFrames;
+    if (i < resolvedScenes.length - 1) {
+      const nextLayout = resolvedScenes[i + 1].layoutKey;
+      runningFrame -= pickChronicleTransition(i, s.layoutKey, nextLayout).frames;
+    }
+  });
+
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundColor: data.bgColor || "#F1E4C9",
+        fontFamily: fallbackFontFamily,
+      }}
+    >
+      <TransitionSeries>
+        {resolvedScenes.map((s, index) => {
+          const { scene, layoutKey, sequenceFrames, durationFrames } = s;
+          const LayoutComponent = CHRONICLE_LAYOUT_REGISTRY[layoutKey];
+          const imageUrl =
+            scene.images.length > 0 ? staticFile(scene.images[0]) : undefined;
+          const videoUrl = scene.video ? staticFile(scene.video) : undefined;
+          const videoDurationInFrames = scene.videoDurationSeconds
+            ? Math.max(1, Math.round(scene.videoDurationSeconds * FPS))
+            : undefined;
+          const videoStartInFrames = scene.videoStartSeconds
+            ? Math.max(0, Math.round(scene.videoStartSeconds * FPS))
+            : undefined;
+
+          const rawProps = (scene.layoutProps ?? {}) as Record<string, unknown>;
+          const focusX = Math.max(0, Math.min(100, Number(rawProps.imageFocusX ?? 50)));
+          const focusY = Math.max(0, Math.min(100, Number(rawProps.imageFocusY ?? 50)));
+
+          const layoutProps: ChronicleLayoutProps = {
+            ...(rawProps as Partial<ChronicleLayoutProps>),
+            title: scene.title,
+            narration: scene.narration,
+            accentColor: data.accentColor || "#B8860B",
+            bgColor: data.bgColor || "#F1E4C9",
+            textColor: data.textColor || "#2A1810",
+            aspectRatio: (data.aspectRatio as "landscape" | "portrait") || "landscape",
+            imageUrl,
+            videoUrl,
+            videoMuted: scene.videoMuted ?? true,
+            videoVolume: scene.videoVolume ?? 0.35,
+            videoDurationInFrames,
+            videoStartInFrames,
+            imageObjectPosition: `${focusX}% ${focusY}%`,
+            imageZoom: Math.max(0.1, Number(rawProps.imageZoom ?? 1)),
+            fontFamily: resolvedFontFamily || undefined,
+          };
+
+          const skipFade = LAYOUTS_WITHOUT_CHROME_FADE.has(layoutKey);
+          const showScripture = SCRIPTURE_LAYOUTS.has(layoutKey);
+
+          const sequence = (
+            <TransitionSeries.Sequence
+              key={`seq-${scene.id}-${index}`}
+              durationInFrames={sequenceFrames}
+            >
+              <ChronicleChrome
+                bgColor={data.bgColor || "#F1E4C9"}
+                accentColor={data.accentColor || "#B8860B"}
+                textColor={data.textColor || "#2A1810"}
+                disablePageTurn={skipFade}
+                showScripture={showScripture}
+              >
+                <SceneDurationInFramesContext.Provider value={durationFrames}>
+                  <LayoutComponent {...layoutProps} />
+                </SceneDurationInFramesContext.Provider>
+              </ChronicleChrome>
+            </TransitionSeries.Sequence>
+          );
+
+          if (index === resolvedScenes.length - 1) {
+            return sequence;
+          }
+
+          const nextLayout = resolvedScenes[index + 1].layoutKey;
+          const choice = pickChronicleTransition(index, layoutKey, nextLayout);
+
+          return (
+            <React.Fragment key={`scene-${scene.id}-${index}`}>
+              {sequence}
+              <TransitionSeries.Transition
+                presentation={choice.presentation}
+                timing={linearTiming({ durationInFrames: choice.frames })}
+              />
+            </React.Fragment>
+          );
+        })}
+      </TransitionSeries>
+
+      {/* EXTRA_HOLD_FRAMES (10) is smaller than every transition length (30-44,
+          see chronicle/transitions), so sceneStartFrames[index + 1] can land
+          BEFORE this scene's natural durationFrames would end. Clamp the audio
+          window to that next start (when there is one) so scene N+1's
+          voiceover never starts while scene N's is still playing. Must stay
+          in sync with the same clamp in frontend/.../ChronicleVideoComposition.tsx. */}
+      {resolvedScenes.map((s, index) => {
+        if (!s.scene.voiceoverFile) return null;
+        const nextStart = sceneStartFrames[index + 1];
+        const audioDurationFrames =
+          nextStart !== undefined
+            ? Math.max(1, Math.min(s.durationFrames, nextStart - sceneStartFrames[index]))
+            : s.durationFrames;
+        return (
+          <Sequence
+            key={`audio-${s.scene.id}-${index}`}
+            from={sceneStartFrames[index]}
+            durationInFrames={audioDurationFrames}
+          >
+            <Audio src={staticFile(s.scene.voiceoverFile)} playbackRate={playbackSpeed} />
+            {s.scene.avatarVideoFile && (
+              <AvatarOverlay src={staticFile(s.scene.avatarVideoFile)} aspectRatio={data.aspectRatio || "landscape"} shape={s.scene.avatarShape ?? data.avatarShape} size={s.scene.avatarSize ?? data.avatarSize} position={s.scene.avatarPosition ?? data.avatarPosition} bg={s.scene.avatarBg ?? data.avatarBg} opacity={s.scene.avatarOpacity ?? data.avatarOpacity} shadow={s.scene.avatarShadow ?? data.avatarShadow} focusX={s.scene.avatarFocusX} focusY={s.scene.avatarFocusY} zoom={s.scene.avatarZoom} />
+            )}
+            {data.captionsEnabled && (s.scene.narrationText || s.scene.narration) && (
+              <CaptionTrack
+                text={s.scene.narrationText || s.scene.narration}
+                position={data.captionPosition || "bottom_center"}
+                aspectRatio={data.aspectRatio || "landscape"}
+                fontFamily={data.captionFontFamily ? (resolveFontFamily(data.captionFontFamily) || data.captionFontFamily) : (resolvedFontFamily || undefined)}
+                fontSize={data.captionFontSize ? Number(data.captionFontSize) : undefined}
+                offset={data.captionOffset ?? 0}
+                speechDurationFrames={
+                  s.scene.speechDurationSeconds
+                    ? getSceneDurationFrames(s.scene.speechDurationSeconds, FPS, playbackSpeed)
+                    : undefined
+                }
+              />
+            )}
+          </Sequence>
+        );
+      })}
+
+      {data.logo && (
+        <LogoOverlay
+          src={staticFile(data.logo)}
+          position={data.logoPosition || "bottom_right"}
+          maxOpacity={data.logoOpacity ?? 0.9}
+          size={data.logoSize || "default"}
+          aspectRatio={data.aspectRatio || "landscape"}
+        />
+      )}
+
+      {data.bgmFile && (
+        <BackgroundMusic src={staticFile(data.bgmFile)} volume={data.bgmVolume ?? 0.10} scenes={data.scenes} />
+      )}
+    </AbsoluteFill>
+  );
+};

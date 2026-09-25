@@ -1,0 +1,1022 @@
+{
+  "id": "newspaper",
+  "name": "Newspaper",
+  "new_template": false,
+  "popular_template": false,
+  "description": "Editorial news-style template with headline cards, article lead, pull quotes, data snapshots, fact-check panels, and timelines.",
+  "genres": [
+    "Politics",
+    "Business",
+    "History"
+  ],
+  "preview_colors": {
+    "accent": "#FFE34D",
+    "bg": "#FAFAF8",
+    "text": "#111111"
+  },
+  "composition_id": "NewspaperVideo",
+  "hero_layout": "news_headline",
+  "fallback_layout": "article_lead",
+  "valid_layouts": [
+    "news_headline",
+    "article_lead",
+    "pull_quote",
+    "data_snapshot",
+    "fact_check",
+    "news_timeline",
+    "data_visualisation",
+    "expert_profile",
+    "perspective_split",
+    "ticker_table",
+    "ending_socials"
+  ],
+  "layout_prop_schema": {
+    "news_headline": {
+      "label": "News Headline",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 68,
+          "landscape": 62
+        },
+        "descriptionFontSize": {
+          "portrait": 37,
+          "landscape": 28
+        },
+        "category": "News",
+        "leftThought": "breakthrough, launch",
+        "stats": [
+          {
+            "value": "By Staff Reporter",
+            "label": ""
+          },
+          {
+            "value": "March 2026",
+            "label": ""
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Headline Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subhead Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "category",
+          "label": "Category",
+          "type": "string"
+        },
+        {
+          "key": "leftThought",
+          "label": "Highlight Words (comma-separated)",
+          "type": "string"
+        },
+        {
+          "key": "stats",
+          "label": "Byline Rows",
+          "type": "object_array",
+          "maxItems": 2,
+          "subFields": [
+            {
+              "key": "value",
+              "label": "Value"
+            },
+            {
+              "key": "label",
+              "label": "Label (optional)"
+            }
+          ]
+        }
+      ]
+    },
+    "news_headline__v2": {
+      "label": "News Headline — Broadsheet",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 65,
+          "landscape": 54
+        },
+        "descriptionFontSize": {
+          "portrait": 32,
+          "landscape": 27
+        }
+      }
+    },
+    "news_headline__v3": {
+      "label": "News Headline — Stacked Deck",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 66,
+          "landscape": 50
+        },
+        "descriptionFontSize": {
+          "portrait": 33,
+          "landscape": 26
+        }
+      }
+    },
+    "article_lead": {
+      "label": "Article Lead",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 60,
+          "landscape": 60
+        },
+        "descriptionFontSize": {
+          "portrait": 35,
+          "landscape": 30
+        },
+        "stats": [
+          {
+            "value": "72",
+            "label": "Key stat"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Meta Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Lead Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 160,
+          "step": 1
+        },
+        {
+          "key": "stats",
+          "label": "Pull Stat",
+          "type": "object_array",
+          "maxItems": 2,
+          "subFields": [
+            {
+              "key": "value",
+              "label": "Value"
+            },
+            {
+              "key": "label",
+              "label": "Caption"
+            }
+          ]
+        }
+      ]
+    },
+    "article_lead__v2": {
+      "label": "Article Lead — Two Column",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 65,
+          "landscape": 61
+        },
+        "descriptionFontSize": {
+          "portrait": 37,
+          "landscape": 29
+        }
+      }
+    },
+    "article_lead__v3": {
+      "label": "Article Lead — Sidebar Stat",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 65,
+          "landscape": 50
+        },
+        "descriptionFontSize": {
+          "portrait": 38,
+          "landscape": 29
+        }
+      }
+    },
+    "pull_quote": {
+      "label": "Pull Quote",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 90,
+          "landscape": 71
+        },
+        "descriptionFontSize": {
+          "portrait": 27,
+          "landscape": 23
+        },
+        "stats": [
+          {
+            "label": "The Editorial Desk",
+            "value": ""
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Quote Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 200,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Source Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "stats",
+          "label": "Source Row",
+          "type": "object_array",
+          "maxItems": 1,
+          "subFields": [
+            {
+              "key": "label",
+              "label": "Source"
+            },
+            {
+              "key": "value",
+              "label": "Value (optional)"
+            }
+          ]
+        }
+      ]
+    },
+    "pull_quote__v2": {
+      "label": "Pull Quote — Torn Page",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 79,
+          "landscape": 71
+        },
+        "descriptionFontSize": {
+          "portrait": 27,
+          "landscape": 23
+        }
+      }
+    },
+    "data_snapshot": {
+      "label": "Data Snapshot",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 56,
+          "landscape": 60
+        },
+        "descriptionFontSize": {
+          "portrait": 25,
+          "landscape": 22
+        },
+        "stats": [
+          {
+            "value": "48%",
+            "label": "Increase"
+          },
+          {
+            "value": "2.1M",
+            "label": "Readers"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Card Label Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "stats",
+          "label": "Key Figures",
+          "type": "object_array",
+          "maxItems": 6,
+          "subFields": [
+            {
+              "key": "value",
+              "label": "Value"
+            },
+            {
+              "key": "label",
+              "label": "Label"
+            }
+          ]
+        }
+      ]
+    },
+    "fact_check": {
+      "label": "Fact Check",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 70,
+          "landscape": 64
+        },
+        "descriptionFontSize": {
+          "portrait": 30,
+          "landscape": 25
+        },
+        "leftThought": "Claim being made",
+        "rightThought": "Evidence-based correction",
+        "stats": [
+          {
+            "label": "Claimed",
+            "value": ""
+          },
+          {
+            "label": "Facts",
+            "value": ""
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Panel Text Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "leftThought",
+          "label": "Claimed",
+          "type": "text"
+        },
+        {
+          "key": "rightThought",
+          "label": "Facts",
+          "type": "text"
+        },
+        {
+          "key": "stats",
+          "label": "Column Labels",
+          "type": "object_array",
+          "maxItems": 2,
+          "subFields": [
+            {
+              "key": "label",
+              "label": "Label"
+            },
+            {
+              "key": "value",
+              "label": "Value (optional)"
+            }
+          ]
+        }
+      ]
+    },
+    "news_timeline": {
+      "label": "News Timeline",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 76,
+          "landscape": 62
+        },
+        "descriptionFontSize": {
+          "portrait": 26,
+          "landscape": 23
+        },
+        "stats": [
+          {
+            "value": "Jan 2025",
+            "label": "Event begins"
+          },
+          {
+            "value": "Jul 2025",
+            "label": "Milestone reached"
+          },
+          {
+            "value": "Jan 2026",
+            "label": "Outcome announced"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 220,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Timeline Text Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 140,
+          "step": 1
+        },
+        {
+          "key": "stats",
+          "label": "Timeline Events",
+          "type": "object_array",
+          "maxItems": 8,
+          "subFields": [
+            {
+              "key": "value",
+              "label": "Date"
+            },
+            {
+              "key": "label",
+              "label": "Description"
+            }
+          ]
+        }
+      ]
+    },
+    "data_visualisation": {
+      "label": "Data Visualisation",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 67,
+          "landscape": 52
+        },
+        "descriptionFontSize": {
+          "portrait": 29,
+          "landscape": 21
+        },
+        "chartType": "line",
+        "chartSummary": "Readings rise through the period before settling back from the peak.",
+        "chartTable": {
+          "headers": [
+            "Period",
+            "Index",
+            "Prior"
+          ],
+          "rows": [
+            [
+              "Q1",
+              "298",
+              "272"
+            ],
+            [
+              "Q2",
+              "308",
+              "268"
+            ],
+            [
+              "Q3",
+              "315",
+              "261"
+            ],
+            [
+              "Q4",
+              "324",
+              "255"
+            ]
+          ]
+        },
+        "chartYAxisTicks": [],
+        "subtitle": "Period",
+        "yAxisLabel": "Index",
+        "barPrimaryColor": "#111111",
+        "barSecondaryColor": "#B23B3B",
+        "barTertiaryColor": "#2F5C8A"
+      },
+      "scene_defaults": {
+        "title": "The numbers behind the story",
+        "narration": "The figures tell their own story.",
+        "durationSeconds": 6
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "chartType",
+          "label": "Chart Type",
+          "type": "select",
+          "options": [
+            {
+              "label": "Auto (infer from data)",
+              "value": "auto"
+            },
+            {
+              "label": "Line",
+              "value": "line"
+            },
+            {
+              "label": "Bar",
+              "value": "bar"
+            },
+            {
+              "label": "Histogram",
+              "value": "histogram"
+            }
+          ]
+        },
+        {
+          "key": "chartTable",
+          "label": "Chart data — col 1: X labels; cols 2–4: up to 3 numeric series (max 20 data rows). Use bar for named categories; histogram for bins/ranges (0–10, <5, 50+).",
+          "type": "chart_table"
+        },
+        {
+          "key": "yAxisLabel",
+          "label": "Y-axis label (overrides chart header)",
+          "type": "string"
+        },
+        {
+          "key": "subtitle",
+          "label": "X-axis / category caption (overrides first column header)",
+          "type": "string"
+        },
+        {
+          "key": "chartYAxisTicks",
+          "label": "Y-axis tick labels (top → bottom; 2–4 values)",
+          "type": "string_array"
+        },
+        {
+          "key": "chartSummary",
+          "label": "Chart summary (short read beside the graphic)",
+          "type": "string"
+        },
+        {
+          "key": "barPrimaryColor",
+          "label": "Series color 1",
+          "type": "color"
+        },
+        {
+          "key": "barSecondaryColor",
+          "label": "Series color 2",
+          "type": "color"
+        },
+        {
+          "key": "barTertiaryColor",
+          "label": "Series color 3",
+          "type": "color"
+        }
+      ]
+    },
+    "ending_socials": {
+      "label": "Ending / Follow along",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 70,
+          "landscape": 55
+        },
+        "descriptionFontSize": {
+          "portrait": 38,
+          "landscape": 25
+        },
+        "hideImage": true,
+        "socials": [
+          {
+            "platform": "facebook",
+            "enabled": "true",
+            "label": "Facebook"
+          },
+          {
+            "platform": "instagram",
+            "enabled": "true",
+            "label": "Instagram"
+          },
+          {
+            "platform": "youtube",
+            "enabled": "true",
+            "label": "YouTube"
+          },
+          {
+            "platform": "medium",
+            "enabled": "false",
+            "label": "Medium"
+          },
+          {
+            "platform": "substack",
+            "enabled": "false",
+            "label": "Substack"
+          },
+          {
+            "platform": "linkedin",
+            "enabled": "false",
+            "label": "LinkedIn"
+          },
+          {
+            "platform": "tiktok",
+            "enabled": "false",
+            "label": "TikTok"
+          }
+        ],
+        "showWebsiteButton": true,
+        "websiteLink": "https://yourwebsite.com"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subtext Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "socials",
+          "label": "Social Platforms",
+          "type": "object_array",
+          "maxItems": 7,
+          "subFields": [
+            {
+              "key": "platform",
+              "label": "Platform (facebook, instagram, youtube, medium, substack, linkedin, tiktok)"
+            },
+            {
+              "key": "enabled",
+              "label": "Enabled (true/false)"
+            },
+            {
+              "key": "label",
+              "label": "Label / handle / URL text"
+            }
+          ]
+        },
+        {
+          "key": "showWebsiteButton",
+          "label": "Show Website CTA Button",
+          "type": "select",
+          "options": [
+            {
+              "label": "Enabled",
+              "value": "true"
+            },
+            {
+              "label": "Disabled",
+              "value": "false"
+            }
+          ]
+        },
+        {
+          "key": "websiteLink",
+          "label": "Website Link",
+          "type": "string",
+          "placeholder": "https://yourwebsite.com"
+        }
+      ]
+    },
+    "ending_socials__v2": {
+      "label": "Ending / Follow along — Back Page",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 63,
+          "landscape": 50
+        },
+        "descriptionFontSize": {
+          "portrait": 33,
+          "landscape": 25
+        }
+      }
+    },
+    "expert_profile": {
+      "label": "Expert Profile",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 55,
+          "landscape": 58
+        },
+        "descriptionFontSize": {
+          "portrait": 32,
+          "landscape": 26
+        },
+        "category": "Expert Voices",
+        "leftThought": "Dr. Jane Smith",
+        "rightThought": "Senior Policy Analyst",
+        "stats": [
+          {
+            "value": "20yr",
+            "label": "in Federal Policy"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "category",
+          "label": "Section Badge",
+          "type": "string"
+        },
+        {
+          "key": "leftThought",
+          "label": "Expert Name",
+          "type": "string"
+        },
+        {
+          "key": "rightThought",
+          "label": "Expert Role / Organisation",
+          "type": "string"
+        },
+        {
+          "key": "stats",
+          "label": "Key Credential",
+          "type": "object_array",
+          "maxItems": 1,
+          "subFields": [
+            {
+              "key": "value",
+              "label": "Value (e.g. 20yr)"
+            },
+            {
+              "key": "label",
+              "label": "Caption (e.g. in Federal Policy)"
+            }
+          ]
+        }
+      ]
+    },
+    "perspective_split": {
+      "label": "Perspective Split",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 58,
+          "landscape": 38
+        },
+        "descriptionFontSize": {
+          "portrait": 25,
+          "landscape": 17
+        },
+        "leftThought": "This policy creates opportunity and drives long-term economic growth for everyone.",
+        "rightThought": "The costs are too high and the benefits too uncertain to justify moving forward now.",
+        "stats": [
+          {
+            "label": "SUPPORTERS SAY",
+            "value": "+14%"
+          },
+          {
+            "label": "CRITICS SAY",
+            "value": "$1.2T"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Panel Text Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "leftThought",
+          "label": "Left Perspective",
+          "type": "text"
+        },
+        {
+          "key": "rightThought",
+          "label": "Right Perspective",
+          "type": "text"
+        },
+        {
+          "key": "stats",
+          "label": "Panel Labels & Stats",
+          "type": "object_array",
+          "maxItems": 2,
+          "subFields": [
+            {
+              "key": "label",
+              "label": "Panel heading (e.g. SUPPORTERS SAY)"
+            },
+            {
+              "key": "value",
+              "label": "Key stat (e.g. +14%)"
+            }
+          ]
+        }
+      ]
+    },
+    "ticker_table": {
+      "label": "Data Table",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 64,
+          "landscape": 51
+        },
+        "descriptionFontSize": {
+          "portrait": 33,
+          "landscape": 27
+        },
+        "tickerTitle": "Key Figures",
+        "tickerFootnote": "Source: editorial research",
+        "tickerHighlightCol": 2,
+        "tickerTable": {
+          "headers": [
+            "Category",
+            "Value",
+            "Change"
+          ],
+          "rows": [
+            [
+              "Item A",
+              "1,240",
+              "+4.2%"
+            ],
+            [
+              "Item B",
+              "980",
+              "-1.8%"
+            ],
+            [
+              "Item C",
+              "2,100",
+              "+7.1%"
+            ]
+          ]
+        }
+      },
+      "scene_defaults": {
+        "title": "The numbers at a glance",
+        "narration": "Key figures from the story.",
+        "durationSeconds": 6
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "tickerTitle",
+          "label": "Table subtitle",
+          "type": "string"
+        },
+        {
+          "key": "tickerTable",
+          "label": "Table data — col 1: row labels; cols 2–6: values (max 20 rows, 6 cols)",
+          "type": "ticker_table"
+        },
+        {
+          "key": "tickerHighlightCol",
+          "label": "Highlight column index (0-based, -1 to disable)",
+          "type": "number",
+          "min": -1,
+          "max": 5,
+          "step": 1
+        },
+        {
+          "key": "tickerFootnote",
+          "label": "Source / Footnote",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "layout_variants": {
+    "news_headline": [
+      "news_headline",
+      "news_headline__v2",
+      "news_headline__v3"
+    ],
+    "article_lead": [
+      "article_lead",
+      "article_lead__v2",
+      "article_lead__v3"
+    ],
+    "pull_quote": [
+      "pull_quote",
+      "pull_quote__v2"
+    ],
+    "ending_socials": [
+      "ending_socials",
+      "ending_socials__v2"
+    ]
+  },
+  "layout_variant_labels": {
+    "news_headline": "Classic",
+    "news_headline__v2": "Broadsheet",
+    "news_headline__v3": "Stacked Deck",
+    "article_lead": "Drop Cap",
+    "article_lead__v2": "Two Column",
+    "article_lead__v3": "Sidebar Stat",
+    "pull_quote": "Classic",
+    "pull_quote__v2": "Torn Page",
+    "ending_socials": "Classic",
+    "ending_socials__v2": "Back Page"
+  },
+  "layouts_without_image": [
+    "pull_quote",
+    "data_snapshot",
+    "data_visualisation",
+    "ending_socials",
+    "perspective_split",
+    "ticker_table"
+  ],
+  "features": [
+    "News headline hero with category and byline",
+    "Article lead with drop cap and pull stat",
+    "Pull quote with attribution",
+    "Data snapshot cards with key figures",
+    "Fact-check claim vs facts layout",
+    "News timeline with spine and dates",
+    "Expert profile with image, name, role and credential",
+    "Perspective split for balanced two-sides comparison",
+    "Portrait and landscape responsive layout"
+  ]
+}

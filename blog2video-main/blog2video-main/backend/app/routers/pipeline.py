@@ -1,0 +1,4388 @@
+import os
+import json
+import asyncio
+import hashlib
+import logging
+import traceback
+import re
+import time
+import requests
+from datetime import timedelta
+
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from opentelemetry.metrics import get_meter_provider
+
+from app.observability.logging import get_logger
+
+logger = get_logger(__name__)
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse, RedirectResponse
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
+
+from app.database import get_db, SessionLocal
+from app.auth import get_current_user
+from app.models.user import User, PlanTier
+from app.models.project import Project, ProjectStatus
+from app.models.scene import Scene
+from app.schemas.schemas import (
+    ProjectOut,
+    StudioResponse,
+    RenderResponse,
+)
+from app.config import settings
+from app.services.scraper import scrape_blog
+from app.services.table_extraction import build_table_context_hint, build_chartable_tables_payload, extract_tables_from_content, classify_chart_tables_for_template, append_tables_to_content
+from app.services.chart_planner import (
+    get_chartable_tables_from_visual_hint,
+    get_line_chartable_tables_from_visual_hint,
+    _build_chart_props_from_table,
+    build_dataviz_chart_caption,
+    build_dataviz_scene_copy,
+    is_candlestick_table,
+    is_ticker_snapshot_table,
+    is_laduc_ticker_table,
+    extract_ticker_items_from_blog,
+    sanitize_chart_descriptor,
+)
+from app.services.scraper import scrape_blog, BlogScrapeFailed
+from app.services.project_cleanup import (
+    remove_failed_generation_project,
+    PUBLIC_MSG_PIPELINE_FAILED,
+    format_scrape_failed_public_message,
+)
+from app.services.language_detection import get_content_language_for_project
+from app.services.voiceover import generate_all_voiceovers
+from app.services.remotion import (
+    write_remotion_data,
+    rebuild_workspace,
+    launch_studio,
+    create_studio_zip,
+    render_video,
+    start_render_async,
+    get_render_progress,
+    get_render_progress_from_r2,
+    seed_render_progress,
+    set_render_phase_message,
+    fail_render_start,
+    cancel_running_render,
+    get_workspace_dir,
+    safe_remove_workspace,
+)
+from app.services import r2_storage
+from app.scene_cta import prepend_b2v_cta_to_visual, strip_b2v_cta_from_visual
+from app.services.social_content_signals import detect_social_platforms_in_text
+from app.services.scene_content_schema import SAMPLE_CHART_TABLE
+from app.dspy_modules.script_gen import ScriptGenerator
+from app.dspy_modules.template_scene_gen import TemplateSceneGenerator
+from app.dspy_modules.display_text_gen import DisplayTextGenerator
+from app.services.template_service import (
+    validate_template_id,
+    get_layout_prompt,
+    get_valid_layouts,
+    get_layout_variants,
+    resolve_base_layout,
+    get_hero_layout,
+    get_fallback_layout,
+    get_script_style_hint,
+    is_custom_template,
+    is_crafted_template,
+    _load_custom_template_data,
+    CHART_TICKER_TEMPLATE_LAYOUTS,
+    is_builtin_chart_layout,
+    is_builtin_ticker_layout,
+)
+from app.services.crafted_template_service import validate_crafted_template_access
+from app.services.email import email_service, EmailServiceError
+
+router = APIRouter(prefix="/api/projects/{project_id}", tags=["pipeline"])
+
+# In-memory pipeline progress tracker: project_id -> { step, error }
+_pipeline_progress: dict[int, dict] = {}
+
+# Hard cap per scene: search (12s) + download (120s) + ffmpeg (300s) + R2 upload.
+# Without this, a stuck R2 upload blocks the stock gate indefinitely.
+STOCK_CLIP_ASSIGN_TIMEOUT_SECONDS = 300
+
+_tracer = trace.get_tracer("app.pipeline")
+_meter = get_meter_provider().get_meter("app.pipeline")
+
+_pipelines_started = _meter.create_counter(
+    "pipelines_started",
+    unit="1",
+    description="Number of pipelines started",
+)
+_pipelines_succeeded = _meter.create_counter(
+    "pipelines_succeeded",
+    unit="1",
+    description="Number of pipelines completed successfully",
+)
+_pipelines_failed = _meter.create_counter(
+    "pipelines_failed",
+    unit="1",
+    description="Number of pipelines that failed",
+)
+
+# Wealth Your Way ending scene is fully frozen — every video closes with the
+# same title, narration, and two CTA pills (Substack + Amazon).
+# Matches both the local-template id ("wealth_your_way") and the crafted/R2
+# bundle's public_template_id ("crafted_wealth_your_way_bundle").
+WEALTH_TEMPLATE_IDS = frozenset({
+    "wealth_your_way",
+    "crafted_wealth_your_way_bundle",
+})
+WEALTH_ENDING_TITLE = "Go Deeper. Start Now."
+WEALTH_ENDING_NARRATION = (
+    "Subscribe for monthly guidance on financial independence — "
+    "or dive straight into Wealth Your Way, the book behind these insights."
+)
+WEALTH_ENDING_CTA_TEXT = "Subscribe on Substack"
+WEALTH_SUBSTACK_URL = "https://www.cosmodestefano.com"
+WEALTH_ENDING_SECONDARY_CTA_TEXT = "Buy the Book on Amazon"
+WEALTH_AMAZON_URL = "https://geni.us/wealthyourwaypb"
+
+# FJ Market Brief shares LaDuc's chart contract (market_annotation + ticker
+# layouts, chartTable/tickerTable schemas). Matches the local built-in id AND
+# the crafted/R2 bundle's public id.
+FJ_TEMPLATE_IDS = frozenset({"fj_market_brief", "crafted_fj_market_brief_bundle"})
+
+
+def _is_laduc_or_fj(template_id: str) -> bool:
+    """True for LaDuc (any id variant), FJ Market Brief, or fj_research — the
+    templates that share the market_annotation/ticker chart-binding pipeline."""
+    tid = template_id or ""
+    return ("laduc" in tid) or ("fj_research" in tid) or (tid in FJ_TEMPLATE_IDS)
+
+
+# Custom templates always get a dedicated, editable data-viz CHART scene, EXTRA
+# to the content scenes — parity with the built-in templates. A TABLE scene is
+# added alongside it only when the article actually has tabular data.
+#
+# Seed used when the article has no chartable table, so the chart scene still
+# renders and is editable (mirrors the built-in editor's example tables). Shared
+# with the template sample-copy path so the editor preview and a seeded project
+# scene plot the same placeholder — see scene_content_schema.SAMPLE_CHART_TABLE.
+_CUSTOM_DATAVIZ_SEED: dict = SAMPLE_CHART_TABLE
+
+
+def _chartable_props_from_blog(blog_content: str) -> list[dict]:
+    """Return deterministic chart props for every chartable blog table."""
+    try:
+        tables = extract_tables_from_content(blog_content or "")
+    except Exception as e:  # noqa: BLE001 — never break the pipeline on table parsing
+        print(f"[F7-DEBUG] [CUSTOM-DATAVIZ] table extraction failed: {e}")
+        return []
+    out: list[dict] = []
+    for t in tables:
+        props = _build_chart_props_from_table(t) or {}
+        ct = props.get("chartTable")
+        if isinstance(ct, dict) and ct.get("rows"):
+            out.append(props)
+    return out
+
+
+# ── Old Documentary Reel: system-owned countdown leader ──────────────────────
+# The 3-2-1 academy leader that opens every documentary video. It is NOT in the
+# template's valid_layouts, so the LLM can neither write nor skip it; the
+# pipeline prepends it after layout sanitization. Its narration is fixed so TTS
+# always speaks the countdown exactly as written.
+
+DOCREEL_TEMPLATE_ID = "old-documentary-reel"
+DOCREEL_COUNTDOWN_LAYOUT = "docreel_countdown"
+DOCREEL_COUNTDOWN_NARRATION = "3, 2, 1"
+DOCREEL_COUNTDOWN_SECONDS = 3
+
+
+def _scenes_need_countdown_leader(template_id: str) -> bool:
+    """True when this template opens with the system-injected countdown scene."""
+    return (template_id or "").strip().lower() == DOCREEL_TEMPLATE_ID
+
+
+def _build_docreel_countdown_scene() -> dict:
+    """The voiced 3-2-1 leader scene_raw dict, prepended as scene 0."""
+    return {
+        "title": "",
+        "narration": DOCREEL_COUNTDOWN_NARRATION,
+        "visual_description": "",
+        "duration_seconds": DOCREEL_COUNTDOWN_SECONDS,
+        "preferred_layout": DOCREEL_COUNTDOWN_LAYOUT,
+    }
+
+
+def ensure_docreel_countdown_scene(db, project_id: int, template_id: str) -> bool:
+    """Guarantee the documentary countdown leader exists as scene 1 of a project.
+
+    `_generate_script` prepends the leader into `scenes_raw` before any Scene
+    rows exist, which covers first generation and script regeneration. Paths
+    that mutate an EXISTING scene list instead — notably switching a project's
+    template to old-documentary-reel — never go through that, so they call this
+    to add the leader after the fact.
+
+    Idempotent: returns False and does nothing when the template doesn't use a
+    leader or the project already has one, so it is safe to call repeatedly.
+    """
+    from app.models.scene import Scene
+
+    if not _scenes_need_countdown_leader(template_id):
+        return False
+
+    scenes = db.query(Scene).filter(Scene.project_id == project_id).order_by(Scene.order).all()
+    if any((s.preferred_layout or "") == DOCREEL_COUNTDOWN_LAYOUT for s in scenes):
+        return False
+
+    # Push every existing scene back one slot, then take order=1. Renumber from
+    # the end so a UNIQUE(project_id, order) constraint can't trip mid-loop.
+    for s in reversed(scenes):
+        s.order = s.order + 1
+    db.flush()
+
+    spec = _build_docreel_countdown_scene()
+    db.add(
+        Scene(
+            project_id=project_id,
+            order=1,
+            title=spec["title"],
+            narration_text=spec["narration"],
+            visual_description=spec["visual_description"],
+            duration_seconds=spec["duration_seconds"],
+            preferred_layout=spec["preferred_layout"],
+            # Template switches do not run the normal descriptor generator for
+            # this newly inserted row. Pin its renderer explicitly so an empty
+            # descriptor cannot fall back to the documentary hero layout.
+            remotion_code=json.dumps(
+                {"layout": DOCREEL_COUNTDOWN_LAYOUT, "layoutProps": {}}
+            ),
+        )
+    )
+    db.commit()
+    return True
+
+
+def _build_custom_dataviz_scenes(blog_content: str) -> list[dict]:
+    """Build the dedicated data-viz scene_raw dicts for custom templates.
+
+    THE CHART SCENE IS ALWAYS BUILT. Every custom template now designs and
+    generates its own chart layout (a required design-doc role), so the scene
+    must exist for that layout to render — a template carrying a chart scene it
+    never shows is the defect this guarantees away. When the article has no
+    chartable table the chart is seeded from _CUSTOM_DATAVIZ_SEED, exactly as a
+    manual layout switch to `custom_chart` already does, so it renders and stays
+    editable.
+
+    THE TABLE SCENE IS STILL DATA-ONLY. It is a transcription of real figures,
+    so a seeded one would show the placeholder as though it were the article's
+    data. No table, no table scene.
+
+    The bound table is embedded in visual_description so it round-trips into
+    layoutProps.
+    """
+    chartable = _chartable_props_from_blog(blog_content)
+    # Seeded chart props when the article has no chartable table. "line" matches
+    # the seed's time-like labels, which is also what "auto" would infer.
+    chart_props = (
+        chartable[0]
+        if chartable
+        else {"chartTable": _CUSTOM_DATAVIZ_SEED, "chartType": "line"}
+    )
+    table_props = chartable[1] if len(chartable) > 1 else (chartable[0] if chartable else None)
+
+    def _mk(stype: str, layout: str, props: dict, narration: str) -> dict:
+        table = props.get("chartTable") or {}
+        vd = append_tables_to_content(narration, [table])
+        # TITLE AND DISPLAY TEXT ARE BUILT FROM THE TABLE, and must differ.
+        #
+        # These scenes are injected AFTER DisplayTextGenerator has run, so they
+        # never reach it — and the title used to be reused as the display text,
+        # leaving both fields holding one string. The renderer then correctly
+        # blanks the duplicate (eyebrowRepeatsHeadline), so the scene showed one
+        # generic line where every other scene shows two. See
+        # chart_planner.build_dataviz_scene_copy, which falls back to the old
+        # fixed strings whenever the table offers nothing better.
+        title, display_text = build_dataviz_scene_copy(
+            props, is_table=(stype == "dataviz_table")
+        )
+        return {
+            "title": title,
+            "display_text": display_text,
+            "narration": narration,
+            "visual_description": vd,
+            "duration_seconds": 8,
+            "preferred_layout": layout,
+            "_scene_type": stype,
+        }
+
+    chart_summary = (chart_props.get("chartSummary") or "").strip()
+    chart_narr = chart_summary or "Here's what the numbers reveal at a glance."
+    scenes = [
+        _mk("dataviz_chart", "custom_chart", chart_props, chart_narr),
+    ]
+    if table_props:
+        scenes.append(
+            _mk("dataviz_table", "custom_table", table_props,
+                "And here are the underlying figures in full.")
+        )
+    return scenes
+
+
+def _bind_dataviz_layout_props(scene, descriptor: dict) -> bool:
+    """For a dedicated data-viz scene, recover the table embedded in its
+    visual_description and write chartTable/chartType/chartSummary into the
+    descriptor's layoutProps (the editable location read by GeneratedVideo and
+    SceneEditModal). Returns True if bound."""
+    stype = getattr(scene, "scene_type", None)
+    if stype not in ("dataviz_chart", "dataviz_table"):
+        return False
+    try:
+        tables = extract_tables_from_content(getattr(scene, "visual_description", "") or "")
+    except Exception:  # noqa: BLE001
+        tables = []
+    props = _build_chart_props_from_table(tables[0]) if tables else None
+    if not props or not (props.get("chartTable") or {}).get("rows"):
+        props = {"chartTable": _CUSTOM_DATAVIZ_SEED, "chartType": "line"}
+    lp = dict(descriptor.get("layoutProps") or {})
+    lp["chartTable"] = props["chartTable"]
+    lp["chartType"] = props.get("chartType", "auto")
+    summary = props.get("chartSummary")
+    if not summary and stype == "dataviz_chart":
+        # GIVE THE CAPTION SLOT REAL CONTENT, or the scene prints one line twice.
+        #
+        # Generated chart scenes commonly write
+        #     const caption = props.chartSummary ?? props.displayText;
+        # and render BOTH the display text and that caption. Nothing on the
+        # custom path ever populated chartSummary (only the built-ins do, via an
+        # LLM caption), so the fallback fired every time and the same sentence
+        # appeared twice on screen. This states a DIFFERENT fact from the display
+        # text — what is plotted and how, rather than the range — so the two
+        # lines complement each other.
+        summary = build_dataviz_chart_caption(props)
+    if summary:
+        lp["chartSummary"] = summary
+    descriptor["layoutProps"] = lp
+    return True
+
+
+# Built-in templates that opt into the chartTable/tickerTable data-viz pipeline,
+# mapped to their (chart_layout, ticker_layout) names. Single source of truth now
+# lives in template_service (imported above) so the pipeline (table classification)
+# AND TemplateSceneGenerator (deterministic table->chart binding) stay in sync.
+# Extension point for FUTURE templates: add one line to that map AND add those two
+# layouts to its meta.json valid_layouts (plus a frontend renderer for each).
+#
+# NOTE: LaDuc / FJ are intentionally NOT here — they keep their own dedicated
+# branch (_is_laduc_or_fj) and code path above. Do not fold them into this map.
+
+
+def _descriptor_layout_name(template_id: str, descriptor: dict) -> str | None:
+    """Extract effective layout from descriptor payload."""
+    if is_custom_template(template_id):
+        if not isinstance(descriptor, dict):
+            return None
+        # A GENERATED custom template's real layouts are intro / content_N / outro,
+        # and that is what the renderer dispatches on (sceneType +
+        # contentVariantIndex) and what SceneEditModal's dropdown lists. Prefer
+        # them over layoutConfig.arrangement, which is a legacy arrangement name
+        # ("full-center", "split-left") that nothing downstream consumes — using
+        # it here re-stamped preferred_layout with a name outside the template's
+        # own valid_layouts, which is why project scene lists showed arrangement
+        # names and why the outro was never recognised as image-free.
+        scene_type = descriptor.get("sceneTypeOverride") or descriptor.get("sceneType")
+        if isinstance(scene_type, str) and scene_type in ("intro", "outro"):
+            return scene_type
+        if scene_type == "content":
+            idx = descriptor.get("contentVariantIndex")
+            if isinstance(idx, int) and idx >= 0:
+                return f"content_{idx}"
+        cfg = descriptor.get("layoutConfig")
+        if isinstance(cfg, dict):
+            name = cfg.get("arrangement")
+            return name if isinstance(name, str) else None
+        return None
+    name = descriptor.get("layout") if isinstance(descriptor, dict) else None
+    return name if isinstance(name, str) else None
+
+
+def _normalize_layout_id(value: str | None) -> str:
+    return (value or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _seeded_variant(
+    *,
+    template_id: str,
+    project_id: int,
+    scene_order: int,
+    base_layout: str,
+) -> str:
+    """Pick a stable visual variant of ``base_layout`` for this (project, scene).
+
+    Templates can declare several renderings of one layout (see meta.json
+    ``layout_variants``). The layout planner only ever picks base IDs, so the
+    concrete style is chosen here — pseudo-randomly, so two projects on the same
+    template don't produce visually identical videos, but *deterministically*, so
+    re-rendering a project reproduces exactly the video the user approved.
+
+    sha256 rather than ``random.Random(seed)``: Mersenne output is not guaranteed
+    stable across Python versions, and a render months from now must still match.
+    ``base_layout`` is part of the seed so a scene whose layout changes doesn't
+    keep the style slot it happened to land on.
+
+    Layouts with no declared variants pass through unchanged.
+    """
+    variants = get_layout_variants(template_id).get(base_layout)
+    if not variants or len(variants) < 2:
+        return base_layout
+    digest = hashlib.sha256(
+        f"{template_id}:{project_id}:{scene_order}:{base_layout}".encode()
+    ).digest()
+    return variants[int.from_bytes(digest[:8], "big") % len(variants)]
+
+
+def _sanitize_script_layouts(
+    template_id: str,
+    scenes_raw: list[dict],
+    *,
+    include_ending_socials: bool,
+) -> list[dict]:
+    """Ensure script-stage preferred_layout is valid + diverse for template.
+
+    - Keeps only template-valid layout IDs.
+    - Forces hero layout on first scene and ending_socials only on last scene (when enabled).
+    - Replaces invalid/random picks with diverse valid alternatives.
+    """
+    if not scenes_raw:
+        return scenes_raw
+
+    # Custom templates used to return here unsanitised, so whatever the script LLM
+    # produced was stored verbatim — including names outside ANY vocabulary (a
+    # hallucinated "comparison" was observed in production). They now go through
+    # the same clamp as everything else; `valid` for a generated custom template
+    # is intro / content_0..N / outro, and `supports_ending` below is naturally
+    # False for them since they have no `ending_socials` layout.
+    valid = {x for x in get_valid_layouts(template_id) if isinstance(x, str) and x.strip()}
+    if not valid:
+        return scenes_raw
+
+    hero_layout = _normalize_layout_id(get_hero_layout(template_id))
+    fallback_layout = _normalize_layout_id(get_fallback_layout(template_id))
+    if fallback_layout not in valid:
+        fallback_layout = next(iter(valid))
+
+    # The closing layout. Built-ins call it `ending_socials`; a generated custom
+    # template calls it `outro`. Without this the custom closing scene fell
+    # through to the generic diverse-pick and became a content layout, so the
+    # video ended on an ordinary scene instead of the CTA/socials treatment.
+    ending_layout = (
+        "ending_socials"
+        if "ending_socials" in valid
+        else ("outro" if "outro" in valid else "")
+    )
+    supports_ending = bool(ending_layout) and include_ending_socials
+    last_idx = len(scenes_raw) - 1
+    usage: dict[str, int] = {}
+    prev_layout: str | None = None
+
+    def _pick_diverse(exclude: set[str] | None = None) -> str:
+        banned = set(exclude or set())
+        candidates = [l for l in valid if l not in banned]
+        if not candidates:
+            candidates = list(valid)
+        # least-used first, deterministic tie-breaker by name
+        candidates.sort(key=lambda l: (usage.get(l, 0), l))
+        return candidates[0] if candidates else fallback_layout
+
+    for i, scene in enumerate(scenes_raw):
+        # A stored preferred_layout can carry a visual variant (`news_headline__v2`)
+        # from an older write; collapse to the base so it's recognized as valid
+        # (and as the hero) instead of being discarded as an unknown layout.
+        desired = resolve_base_layout(
+            template_id, _normalize_layout_id(scene.get("preferred_layout"))
+        )
+        if i == 0 and hero_layout in valid:
+            desired = hero_layout
+        elif supports_ending and i == last_idx:
+            desired = ending_layout
+        elif desired not in valid:
+            desired = ""
+        elif desired == ending_layout:
+            # ending_socials is reserved for final scene only.
+            desired = ""
+        elif hero_layout and desired == hero_layout:
+            # The hero/cover layout (e.g. magazine's `magazine_cover`) is the opener
+            # only — it must NEVER repeat on a later scene. Strip it here so the
+            # _pick_diverse fallback below assigns a non-hero layout instead.
+            # Mirrors template_layout_planner._enforce_hero_rule.
+            desired = ""
+
+        if not desired:
+            excludes = set()
+            if prev_layout:
+                excludes.add(prev_layout)
+            if supports_ending:
+                excludes.add(ending_layout)
+            # Hero/cover layout is scene-0-only — never let the fallback re-pick it.
+            if i != 0 and hero_layout:
+                excludes.add(hero_layout)
+            desired = _pick_diverse(excludes)
+
+        # Try to avoid consecutive duplicates even when valid was provided.
+        # Data-bound scenes (data_table_index set) must keep their assigned layout — two
+        # chartable tables legitimately produce two consecutive market_annotation scenes.
+        #
+        # A GENERATED CUSTOM TEMPLATE IS EXEMPT, and that exemption is the point
+        # of the layout catalog carrying `best_for`.
+        #
+        # For those templates the LLM is now told what each layout is designed to
+        # hold and picks the one matching the scene's content. Overriding that
+        # here with `_pick_diverse` — least-used-first, content-blind — threw the
+        # match away whenever two neighbouring scenes were both lists, which is
+        # the normal case for an article of lists. The scene then received props
+        # its layout was not built for, and rendered a fallback branch.
+        #
+        # Variety is still preferred, but it is expressed in the catalog as a
+        # soft preference the model weighs against the match. It is no longer
+        # imposed after the fact on a choice that was made for a reason.
+        is_data_bound = isinstance(scene.get("data_table_index"), int)
+        _content_routed = is_custom_template(template_id) and desired.startswith("content_")
+        if (
+            prev_layout
+            and desired == prev_layout
+            and i != 0
+            and not (supports_ending and i == last_idx)
+            and not is_data_bound
+            and not _content_routed
+        ):
+            alt = _pick_diverse({prev_layout, ending_layout} if supports_ending else {prev_layout})
+            desired = alt or desired
+
+        scene["preferred_layout"] = desired
+        usage[desired] = usage.get(desired, 0) + 1
+        prev_layout = desired
+
+    return scenes_raw
+
+
+# ─── Single async generate endpoint ──────────────────────────
+
+@router.post("/generate")
+async def generate_video(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Kick off the full pipeline (scrape -> script -> scenes -> done).
+    Returns immediately. Poll /status for progress.
+    """
+    project = _get_project(project_id, user.id, db)
+
+    # Don't restart if already running
+    if project_id in _pipeline_progress and _pipeline_progress[project_id].get("running"):
+        return {"detail": "Pipeline already running", "step": _pipeline_progress[project_id].get("step", 0)}
+
+    # Don't restart if already complete
+    if project.status in (ProjectStatus.GENERATED, ProjectStatus.DONE):
+        return {"detail": "Already generated", "status": project.status.value}
+
+    if project.status == ProjectStatus.AWAITING_SCRIPT_REVIEW:
+        return {
+            "detail": "Awaiting script review",
+            "step": 2,
+            "running": False,
+        }
+
+    # Generation finished; parked for post-generation clip review — client
+    # should poll /status or open the review modal.
+    if project.status == ProjectStatus.AWAITING_STOCK_FOOTAGE_REVIEW:
+        return {
+            "detail": "Awaiting stock footage review",
+            "step": 4,
+            "running": False,
+        }
+
+    # Legacy: a project still parked at the OLD (pre-scene-gen) gate when this
+    # shipped. Resume it the old way rather than leaving it stuck forever.
+    # TODO(cleanup): remove once no rows remain at AWAITING_FOOTAGE.
+    if project.status == ProjectStatus.AWAITING_FOOTAGE:
+        return {
+            "detail": "Awaiting stock footage review",
+            "step": 3,
+            "running": False,
+        }
+
+    # Initialize progress
+    _pipeline_progress[project_id] = {"step": 0, "running": True, "error": None, "notice": None}
+
+    # Run pipeline in a thread pool so the event loop is not blocked (scrape, voiceover, write_remotion_data are sync).
+    # Other API requests remain responsive while generation runs.
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _run_pipeline_sync, project_id, user.id)
+
+    return {"detail": "Pipeline started", "step": 0}
+
+
+@router.get("/stock-footage/pending")
+def get_pending_stock_footage(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Scenes awaiting stock-footage review, with their auto-picked clip.
+
+    Only meaningful while the project sits at AWAITING_STOCK_FOOTAGE_REVIEW
+    (or, for a project still parked at the legacy pre-scene-gen
+    AWAITING_FOOTAGE gate, that status too); returns the same shape
+    regardless so the client can render a stable list.
+    """
+    from app.models.asset import Asset
+
+    project = _get_project(project_id, user.id, db)
+
+    videos = {
+        a.filename: a
+        for a in db.query(Asset)
+        .filter(Asset.project_id == project_id, Asset.asset_type == "VIDEO")
+        .all()
+    }
+    images = {
+        a.filename: a
+        for a in db.query(Asset)
+        .filter(Asset.project_id == project_id, Asset.asset_type == "IMAGE")
+        .all()
+    }
+
+    # The exact scene set the auto-pick targets, so the review list can't drift
+    # from what actually got a clip: a free user sees only their one scene.
+    scenes = _stock_footage_target_scenes(project, db)
+
+    items = []
+    for s in scenes:
+        layout = (s.preferred_layout or "").strip()
+        try:
+            lp = (json.loads(s.remotion_code) or {}).get("layoutProps", {}) if s.remotion_code else {}
+        except (json.JSONDecodeError, TypeError):
+            lp = {}
+        fn = lp.get("assignedVideo")
+        asset = videos.get(fn) if fn else None
+        fallback_fn = (
+            lp.get("assignedImage")
+            if lp.get("stockFootageImageFallback") and lp.get("assignedImage")
+            else None
+        )
+        fallback_asset = images.get(fallback_fn) if fallback_fn else None
+        items.append(
+            {
+                "scene_id": s.id,
+                "order": s.order,
+                "title": s.title,
+                "scene_type": getattr(s, "scene_type", None),
+                "layout": layout or None,
+                # Scene length + saved framing, so the review gate's "Edit" can
+                # seed the adjust stage (and size the clip trim window) without a
+                # second round-trip for the full scene.
+                "duration_seconds": s.duration_seconds,
+                "image_focus_x": lp.get("imageFocusX"),
+                "image_focus_y": lp.get("imageFocusY"),
+                "image_zoom": lp.get("imageZoom"),
+                "video_start_seconds": lp.get("videoStartSeconds"),
+                # Custom templates carry their resolved image-box ratio on the
+                # descriptor (written during render); builtin/crafted layouts are
+                # looked up client-side from the layout id.
+                "image_box_aspect_ratio": lp.get("imageBoxAspectRatio"),
+                "clip": (
+                    {
+                        "filename": asset.filename,
+                        "url": asset.r2_url
+                        or f"/media/projects/{project_id}/videos/{asset.filename}",
+                        "duration_seconds": asset.duration_seconds,
+                        "author": asset.source_author,
+                        "provider": asset.source_provider,
+                    }
+                    if asset
+                    else None
+                ),
+                "fallback_image": (
+                    {
+                        "filename": fallback_asset.filename,
+                        "url": fallback_asset.r2_url
+                        or f"/media/projects/{project_id}/images/{fallback_asset.filename}",
+                    }
+                    if fallback_asset
+                    else None
+                ),
+            }
+        )
+
+    return {
+        "status": project.status.value,
+        "awaiting": project.status
+        in (ProjectStatus.AWAITING_STOCK_FOOTAGE_REVIEW, ProjectStatus.AWAITING_FOOTAGE),
+        "scenes": items,
+    }
+
+
+class LinkStockFootageRequest(BaseModel):
+    scene_id: int
+    filename: str
+
+
+@router.post("/stock-footage/link")
+def link_stock_footage(
+    project_id: int,
+    body: LinkStockFootageRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Point a scene at an already-uploaded clip ("change clip" during review).
+
+    The upload endpoint deliberately does not touch the scene descriptor (the
+    scene editor stages the choice and commits it on Save). The review gate has
+    no Save step, so it calls this straight after uploading a replacement —
+    without it the new clip is created but orphaned and the scene keeps showing
+    the old one.
+    """
+    from app.models.asset import Asset
+
+    project = _get_project(project_id, user.id, db)
+
+    scene = (
+        db.query(Scene)
+        .filter(Scene.id == body.scene_id, Scene.project_id == project_id)
+        .first()
+    )
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found")
+
+    asset = (
+        db.query(Asset)
+        .filter(
+            Asset.project_id == project_id,
+            Asset.filename == body.filename,
+            Asset.asset_type == "VIDEO",
+        )
+        .first()
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Clip not found in this project.")
+
+    try:
+        descriptor = json.loads(scene.remotion_code) if scene.remotion_code else {}
+    except (json.JSONDecodeError, TypeError):
+        descriptor = {}
+    lp = dict(descriptor.get("layoutProps") or {})
+    # A clip fills the visual slot: clear any still and un-hide it.
+    lp.pop("assignedImage", None)
+    lp.pop("stockFootageImageFallback", None)
+    lp["assignedVideo"] = asset.filename
+    lp["hideImage"] = False
+    lp.setdefault("videoMuted", True)
+    lp.setdefault("videoVolume", 0.35)
+    lp.setdefault("imageFocusX", 50)
+    lp.setdefault("imageFocusY", 50)
+    descriptor["layoutProps"] = lp
+    scene.remotion_code = json.dumps(descriptor)
+    db.commit()
+
+    from app.routers.collab_ws import broadcast_project_reload
+    broadcast_project_reload(project_id, exclude_user_id=user.id)
+
+    return {"detail": "Clip linked", "scene_id": scene.id, "filename": asset.filename}
+
+
+@router.post("/stock-footage/approve")
+async def approve_stock_footage(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Accept the auto-picked clips as-is and finalize the video."""
+    project = _get_project(project_id, user.id, db)
+
+    if project.status == ProjectStatus.AWAITING_FOOTAGE:
+        # Legacy: a project parked here before this shipped (old pre-scene-gen
+        # gate). Resume the pipeline exactly as before — it now runs straight
+        # through to scene generation (no gate left to re-park it) and lands
+        # on the new review status if still applicable.
+        # TODO(cleanup): remove once no rows remain at AWAITING_FOOTAGE.
+        if project_id in _pipeline_progress and _pipeline_progress[project_id].get("running"):
+            return {"detail": "Pipeline already running", "step": _pipeline_progress[project_id].get("step", 0)}
+
+        from datetime import datetime as _dt
+
+        project.stock_footage_approved_at = _dt.utcnow()
+        project.status = ProjectStatus.SCRIPTED
+        db.commit()
+
+        _pipeline_progress[project_id] = {"step": 3, "running": True, "error": None, "notice": None}
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, _run_pipeline_sync, project_id, user.id)
+
+        return {"detail": "Generation resumed", "step": 3}
+
+    if project.status != ProjectStatus.AWAITING_STOCK_FOOTAGE_REVIEW:
+        raise HTTPException(
+            status_code=400,
+            detail="This project is not waiting for stock footage review.",
+        )
+
+    # Generation already finished — just stamp approval and finalize.
+    from datetime import datetime as _dt
+
+    project.stock_footage_approved_at = _dt.utcnow()
+    project.status = ProjectStatus.GENERATED
+    db.commit()
+
+    from app.routers.collab_ws import broadcast_project_reload
+    broadcast_project_reload(project_id, exclude_user_id=user.id)
+
+    return {"detail": "Approved", "status": project.status.value}
+
+
+@router.post("/stock-footage/reject")
+async def reject_stock_footage(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Discard every auto-picked clip: fall back to an existing image per
+    scene, else hide the image slot entirely. Then finalize the video."""
+    project = _get_project(project_id, user.id, db)
+
+    if project.status != ProjectStatus.AWAITING_STOCK_FOOTAGE_REVIEW:
+        raise HTTPException(
+            status_code=400,
+            detail="This project is not waiting for stock footage review.",
+        )
+
+    scenes = _stock_footage_target_scenes(project, db)
+
+    used_generics: set[str] = set()
+    for scene in scenes:
+        try:
+            descriptor = json.loads(scene.remotion_code) if scene.remotion_code else {}
+        except (json.JSONDecodeError, TypeError):
+            descriptor = {}
+        lp = descriptor.get("layoutProps") or {}
+        if not (lp.get("assignedVideo") or lp.get("stockFootageImageFallback")):
+            # Nothing auto-picked for this scene — leave whatever it already has.
+            continue
+
+        query = (scene.title or scene.visual_description or "").strip()
+        used_fallback = await _fallback_scene_to_image(
+            project, scene, db, query=query, used_generics=used_generics
+        )
+        if not used_fallback:
+            # No image exists either — hide the visual slot outright, clearing
+            # any stale video/image assignment. Re-query since
+            # _fallback_scene_to_image may have released/reconnected `db`.
+            fresh = (
+                db.query(Scene)
+                .filter(Scene.id == scene.id, Scene.project_id == project_id)
+                .first()
+            )
+            if fresh is None:
+                continue
+            try:
+                fd = json.loads(fresh.remotion_code) if fresh.remotion_code else {}
+            except (json.JSONDecodeError, TypeError):
+                fd = {}
+            flp = dict(fd.get("layoutProps") or {})
+            flp.pop("assignedVideo", None)
+            flp.pop("assignedImage", None)
+            flp.pop("stockFootageImageFallback", None)
+            flp.pop("videoMuted", None)
+            flp.pop("videoVolume", None)
+            flp.pop("videoStartSeconds", None)
+            flp["hideImage"] = True
+            fd["layoutProps"] = flp
+            fresh.remotion_code = json.dumps(fd)
+            db.commit()
+
+    project = _reload_project(db, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from datetime import datetime as _dt
+
+    project.stock_footage_approved_at = _dt.utcnow()
+    project.status = ProjectStatus.GENERATED
+    db.commit()
+
+    from app.routers.collab_ws import broadcast_project_reload
+    broadcast_project_reload(project_id, exclude_user_id=user.id)
+
+    return {"detail": "Rejected — reverted to images", "status": project.status.value}
+
+
+@router.get("/status")
+def get_pipeline_status(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Poll this endpoint to get pipeline progress."""
+    from app.services.access import get_member
+    progress = _pipeline_progress.get(project_id, {})
+    # Owner or accepted collaborator may poll progress. (Note: this endpoint has
+    # a legacy branch that surfaces a removed-project error only to the initiating
+    # user, handled below, so we resolve access manually rather than 404-ing here.)
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if project is not None and project.user_id != user.id and get_member(project_id, user.id, db) is None:
+        project = None
+
+    if not project:
+        # Generation failed and DB row was removed; show last error once for this user.
+        if progress.get("project_removed") and progress.get("user_id") == user.id:
+            return {
+                "status": "failed",
+                "step": progress.get("step", 0),
+                "running": False,
+                "error": progress.get("error"),
+                "error_code": progress.get("error_code"),
+                "notice": progress.get("notice"),
+                "studio_port": None,
+                "project_removed": True,
+            }
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    running = progress.get("running", False)
+    step = progress.get("step", 0)
+
+    if project.status == ProjectStatus.AWAITING_SCRIPT_REVIEW:
+        running = False
+        step = max(step, 2)
+
+    # Parked at the footage gate: DB status is authoritative even if in-memory
+    # ``running`` is stale (e.g. lost progress dict on another worker).
+    if project.status == ProjectStatus.AWAITING_STOCK_FOOTAGE_REVIEW:
+        running = False
+        step = max(step, 4)
+    # Legacy pre-scene-gen gate. TODO(cleanup): remove once no rows remain.
+    if project.status == ProjectStatus.AWAITING_FOOTAGE:
+        running = False
+        step = max(step, 3)
+
+    # The DB is authoritative about whether generation FINISHED.
+    #
+    # ``running`` comes from ``_pipeline_progress``, a module-level in-memory
+    # dict that is best-effort by construction: nothing ever pops from it, and a
+    # worker that dies between "set running=True" and "set running=False"
+    # strands the flag for the life of the process. The frontend's poll only
+    # exits on ``running: false``, so a stranded flag means the editor polls
+    # /status + /projects + /layouts every 2s forever on a project that has been
+    # finished for hours — observed on project 1212, DB status GENERATED.
+    #
+    # Same reasoning as the two gate branches above, which already let DB status
+    # overrule a stale in-memory value; this extends it to the terminal states.
+    if project.status in (
+        ProjectStatus.GENERATED,
+        ProjectStatus.DONE,
+        ProjectStatus.ERROR,
+    ):
+        running = False
+
+    # If in-memory progress is lost (e.g. Cloud Run cold start / new container)
+    # but the project is still mid-generation, infer the step from project status
+    # so the frontend keeps showing the loading screen.
+    if not running and project.status in (
+        ProjectStatus.CREATED,
+        ProjectStatus.SCRAPED,
+        ProjectStatus.SCRIPTED,
+    ):
+        _STATUS_TO_STEP = {
+            ProjectStatus.CREATED: 1,   # about to scrape or scraping
+            ProjectStatus.SCRAPED: 2,   # about to generate script
+            ProjectStatus.SCRIPTED: 3,  # about to generate scenes
+        }
+        step = max(step, _STATUS_TO_STEP.get(project.status, 0))
+
+    return {
+        "status": project.status.value,
+        "step": step,
+        "running": running,
+        "error": progress.get("error"),
+        "error_code": progress.get("error_code"),
+        "notice": progress.get("notice"),
+        "stock_footage": progress.get("stock_footage"),
+        "studio_port": project.studio_port,
+        "project_removed": progress.get("project_removed", False),
+    }
+
+
+def _run_pipeline_sync(project_id: int, user_id: int) -> None:
+    """Run the async pipeline in a dedicated event loop (called from thread pool).
+    Keeps the main server event loop free so other API requests are served."""
+    asyncio.run(_run_pipeline(project_id, user_id))
+
+
+async def _run_pipeline(project_id: int, user_id: int):
+    """Full async pipeline running in background."""
+    db = SessionLocal()
+    attributes = {
+        "pipeline.project_id": project_id,
+        "pipeline.user_id": user_id,
+    }
+    _pipelines_started.add(1, attributes=attributes)
+
+    with _tracer.start_as_current_span("pipeline.run", attributes=attributes) as span:
+        try:
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if not project:
+                logger.warning("[PIPELINE] Project %s not found", project_id)
+                span.set_status(Status(StatusCode.ERROR, "Project not found"))
+                return
+            if project.user_id != user_id:
+                logger.warning(
+                    "[PIPELINE] Project %s user mismatch (expected %s, got %s)",
+                    project_id,
+                    user_id,
+                    project.user_id,
+                )
+                span.set_status(Status(StatusCode.ERROR, "User mismatch"))
+                return
+
+            logger.info("[PIPELINE] Starting pipeline for project %s (user %s)", project_id, user_id)
+
+            # Step 1: Scrape (skip for upload-based projects)
+            if project.status in (ProjectStatus.CREATED,):
+                if project.blog_url and project.blog_url.startswith("upload://"):
+                    # Upload project without pending files — wait for documents
+                    _set_error(project_id, project, db, "Documents not yet uploaded. Please upload files first.")
+                    span.set_status(Status(StatusCode.ERROR, "Documents not uploaded"))
+                    return
+                _pipeline_progress[project_id]["step"] = 1
+                with _tracer.start_as_current_span(
+                    "pipeline.scrape_blog",
+                    attributes={**attributes, "pipeline.stage": "scrape"},
+                ):
+                    try:
+                        scrape_blog(project, db)
+                    except BlogScrapeFailed as e:
+                        span.record_exception(e)
+                        span.set_status(Status(StatusCode.ERROR, "Scraping failed"))
+                        _abort_generation_pipeline(
+                            db,
+                            project_id,
+                            user_id,
+                            public_message=format_scrape_failed_public_message(project.blog_url),
+                            error_code="scrape_failed",
+                            exc=e,
+                        )
+                        return
+                    except Exception as e:
+                        span.record_exception(e)
+                        span.set_status(Status(StatusCode.ERROR, "Scraping failed"))
+                        _abort_generation_pipeline(
+                            db,
+                            project_id,
+                            user_id,
+                            public_message=format_scrape_failed_public_message(project.blog_url),
+                            error_code="scrape_failed",
+                            exc=e,
+                        )
+                        return
+
+            # Step 1.5: Resolve "auto" video_style now that we have scraped content.
+            # The user picked "Auto" in the form → pick concrete style based on the article.
+            if project.status in (ProjectStatus.CREATED, ProjectStatus.SCRAPED) \
+                    and (project.video_style or "").strip().lower() == "auto":
+                from app.dspy_modules.video_style_picker import resolve_auto_video_style
+                from app.services.script_style import snapshot_style_for_project
+                resolved = await resolve_auto_video_style(project.blog_content or "")
+                project.video_style = resolved
+                owner = db.get(User, project.user_id)
+                if owner is None:
+                    raise RuntimeError(f"Project owner {project.user_id} no longer exists")
+                snapshot_style_for_project(project, owner, db)
+                db.commit()
+                logger.info(
+                    "[PIPELINE] Project %s: auto video_style resolved to %s",
+                    project_id, resolved,
+                )
+
+            # Step 2: Generate script (async DSPy)
+            if project.status in (ProjectStatus.CREATED, ProjectStatus.SCRAPED):
+                _pipeline_progress[project_id]["step"] = 2
+                with _tracer.start_as_current_span(
+                    "pipeline.generate_script",
+                    attributes={**attributes, "pipeline.stage": "generate_script"},
+                ):
+                    try:
+                        await _generate_script(project, db)
+                        logger.info("[PIPELINE] Project %s: script generation completed", project_id)
+                    except Exception as e:
+                        span.record_exception(e)
+                        span.set_status(Status(StatusCode.ERROR, "Script generation failed"))
+                        _abort_generation_pipeline(
+                            db,
+                            project_id,
+                            user_id,
+                            public_message=PUBLIC_MSG_PIPELINE_FAILED,
+                            error_code="pipeline_failed",
+                            exc=e,
+                        )
+                        return
+
+                project = _reload_project(db, project_id)
+                if (
+                    project is not None
+                    and project.script_review_enabled
+                    and project.script_review_approved_at is None
+                ):
+                    # Hard pipeline boundary: no call to _generate_scenes means no
+                    # voiceovers, stock footage, or final descriptors exist yet.
+                    project.status = ProjectStatus.AWAITING_SCRIPT_REVIEW
+                    db.commit()
+                    _pipeline_progress[project_id]["running"] = False
+                    logger.info("[PIPELINE] Project %s: awaiting initial script review", project_id)
+                    return
+
+            # Re-check at the stage boundary, not only immediately after the
+            # script call. _generate_script commits SCRIPTED itself; if the
+            # process dies between that commit and the pause above, a restarted
+            # pipeline must still stop before producing any audio.
+            project = _reload_project(db, project_id)
+            if (
+                project is not None
+                and project.status == ProjectStatus.SCRIPTED
+                and project.script_review_enabled
+                and project.script_review_approved_at is None
+            ):
+                project.status = ProjectStatus.AWAITING_SCRIPT_REVIEW
+                db.commit()
+                _pipeline_progress[project_id]["running"] = False
+                logger.info("[PIPELINE] Project %s: recovered at initial script review gate", project_id)
+                return
+
+            # Step 3: Generate scene descriptors + voiceovers. Stock-footage
+            # clip fetching (when enabled) now runs in parallel with this step
+            # (see _generate_scenes's _stock_footage_task) rather than pausing
+            # the pipeline beforehand — the review gate, if any, is entered
+            # AFTER this step finishes (see _generate_scenes's status branch).
+            if project.status in (
+                ProjectStatus.CREATED,
+                ProjectStatus.SCRAPED,
+                ProjectStatus.SCRIPTED,
+            ):
+                _pipeline_progress[project_id]["step"] = 3
+                with _tracer.start_as_current_span(
+                    "pipeline.generate_scenes",
+                    attributes={**attributes, "pipeline.stage": "generate_scenes"},
+                ):
+                    try:
+                        # Scenes the user just approved in script review carry their
+                        # exact edited wording — speak it verbatim instead of letting
+                        # the normal expansion phase silently rephrase it.
+                        await _generate_scenes(
+                            project,
+                            db,
+                            verbatim_narration=project.script_review_approved_at is not None,
+                        )
+                    except Exception as e:
+                        span.record_exception(e)
+                        span.set_status(Status(StatusCode.ERROR, "Scene generation failed"))
+                        _abort_generation_pipeline(
+                            db,
+                            project_id,
+                            user_id,
+                            public_message=PUBLIC_MSG_PIPELINE_FAILED,
+                            error_code="pipeline_failed",
+                            exc=e,
+                        )
+                        return
+
+            # Done (no more studio launch — frontend handles preview).
+            _pipeline_progress[project_id]["step"] = 4
+            _pipeline_progress[project_id]["running"] = False
+            _pipelines_succeeded.add(1, attributes=attributes)
+            span.set_status(Status(StatusCode.OK))
+            logger.info("[PIPELINE] Project %s: pipeline completed successfully", project_id)
+
+        except Exception as e:
+            logger.exception("[PIPELINE] Pipeline error for project %s: %s", project_id, e)
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, "Pipeline run error"))
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            proj = (
+                db.query(Project)
+                .filter(Project.id == project_id, Project.user_id == user_id)
+                .first()
+            )
+            if proj:
+                _abort_generation_pipeline(
+                    db,
+                    project_id,
+                    user_id,
+                    public_message=PUBLIC_MSG_PIPELINE_FAILED,
+                    error_code="pipeline_failed",
+                    exc=e,
+                )
+            else:
+                _pipelines_failed.add(1, attributes=attributes)
+                step = (_pipeline_progress.get(project_id) or {}).get("step", 0)
+                _pipeline_progress[project_id] = {
+                    "step": step,
+                    "running": False,
+                    "error": PUBLIC_MSG_PIPELINE_FAILED,
+                    "error_code": "pipeline_failed",
+                    "notice": None,
+                    "project_removed": True,
+                    "user_id": user_id,
+                }
+        finally:
+            db.close()
+
+
+def _rollback_project_after_endpoint_failure(db: Session, project_id: int, user_id: int) -> None:
+    """Used by legacy /scrape, /generate-script, /generate-scenes when they fail."""
+    try:
+        db.rollback()
+    except Exception:
+        pass
+    proj = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.user_id == user_id)
+        .first()
+    )
+    if not proj:
+        return
+    try:
+        remove_failed_generation_project(db, proj, decrement_user_video_quota=True)
+    except Exception as e:
+        logger.exception(
+            "[PIPELINE] Endpoint rollback failed for project %s: %s",
+            project_id,
+            e,
+            extra={"project_id": project_id, "user_id": user_id},
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _abort_generation_pipeline(
+    db: Session,
+    project_id: int,
+    user_id: int,
+    *,
+    public_message: str,
+    error_code: str,
+    exc: BaseException | None = None,
+) -> None:
+    """Remove project + storage, decrement quota, expose a user-safe error on /status."""
+    if exc is not None:
+        logger.error(
+            "[PIPELINE] Aborting generation for project %s (%s): %s",
+            project_id,
+            error_code,
+            exc,
+            exc_info=exc,
+            extra={"project_id": project_id, "user_id": user_id},
+        )
+    else:
+        logger.error(
+            "[PIPELINE] Aborting generation for project %s (%s)",
+            project_id,
+            error_code,
+            extra={"project_id": project_id, "user_id": user_id},
+        )
+
+    step = (_pipeline_progress.get(project_id) or {}).get("step", 0)
+
+    try:
+        db.rollback()
+    except Exception:
+        pass
+
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.user_id == user_id)
+        .first()
+    )
+    if project:
+        try:
+            remove_failed_generation_project(
+                db,
+                project,
+                decrement_user_video_quota=True,
+            )
+        except Exception as cleanup_err:
+            logger.exception(
+                "[PIPELINE] Failed to remove project %s after error: %s",
+                project_id,
+                cleanup_err,
+                extra={"project_id": project_id, "user_id": user_id},
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    _pipelines_failed.add(
+        1,
+        attributes={
+            "pipeline.project_id": project_id,
+            "pipeline.error_code": error_code,
+        },
+    )
+
+    _pipeline_progress[project_id] = {
+        "step": step,
+        "running": False,
+        "error": public_message,
+        "error_code": error_code,
+        "notice": None,
+        "user_id": user_id,
+        "project_removed": True,
+    }
+
+
+def _set_error(project_id: int, project, db: Session, msg: str):
+    """Set pipeline error state."""
+    attributes = {"pipeline.project_id": project_id}
+    _pipelines_failed.add(1, attributes=attributes)
+
+    logger.error(
+        "[PIPELINE] Error for project %s: %s",
+        project_id,
+        msg,
+    )
+    _pipeline_progress[project_id]["error"] = msg
+    _pipeline_progress[project_id]["running"] = False
+    if project:
+        try:
+            db.rollback()  # clear any broken transaction state first
+            project.status = ProjectStatus.ERROR
+            db.commit()
+        except Exception as e:
+            logger.error(
+                "[PIPELINE] Failed to persist error status for project %s: %s",
+                project_id,
+                e,
+            )
+
+
+def _image_capable_scenes(project: Project, db: Session) -> list[Scene]:
+    """Scenes that can carry a background clip, in order.
+
+    Called at the SCRIPTED stage, where scenes exist with a ``preferred_layout``
+    but no ``remotion_code`` yet (final layouts are resolved in step 3). So the
+    image-capability test keys off preferred_layout, not the descriptor.
+
+    A scene is treated as image-capable only when its layout is KNOWN and not in
+    ``layouts_without_image``. An unresolved/blank layout is excluded rather than
+    included: on script regeneration the layouts are re-planned from scratch, and
+    for custom templates ``_sanitize_script_layouts`` returns early (no fill-in),
+    so a slot can legitimately still be blank here. Treating blank as capable is
+    what made regeneration fetch a clip for every scene, image-capable or not —
+    the descriptor-stage fill (``_fill_missing_stock_clips_after_scene_gen``)
+    picks up any scene that resolves to a real image-capable layout later.
+    """
+    from app.services.template_service import (
+        get_layouts_without_image,
+        validate_template_id,
+    )
+
+    template = validate_template_id(
+        (getattr(project, "template", "") or "").strip() or "default",
+        db=db,
+        user_id=project.user_id,
+    )
+    no_image = get_layouts_without_image(template)
+    scenes = (
+        db.query(Scene)
+        .filter(Scene.project_id == project.id, Scene.is_active.is_(True))
+        .order_by(Scene.order)
+        .all()
+    )
+    out = []
+    for s in scenes:
+        # preferred_layout is always a BASE layout id (step 3 writes it through
+        # resolve_base_layout); the variant lives in remotion_code. So a plain
+        # membership test against layouts_without_image is correct here.
+        layout = _normalize_layout_id(s.preferred_layout)
+        if not layout or layout in no_image:
+            continue
+        out.append(s)
+    return out
+
+
+def _outro_scene_ids(project: Project, db: Session) -> set[int]:
+    """Scenes whose visual slot ``write_remotion_data`` forces to ``hideImage``.
+
+    Mirrors Step 3 of that function's image cascade: an explicit
+    ``scene_type == "outro"``, plus — when ``scene_type`` is NULL — the LAST
+    scene of a multi-scene project, which Step 3 treats as an implicit outro.
+
+    An outro neither consumes an image nor can display a clip, so both the
+    coverage prediction and the stock fetch must exclude it. This holds for
+    EVERY template kind, custom included.
+
+    A v2 custom outro was briefly exempted here, on the reasoning that it renders
+    its own designed layout rather than being replaced by the CTA overlay and so
+    could carry a visual. That made custom videos diverge from built-in ones in
+    two visible ways: one extra clip was fetched and paid for in every
+    under-covered case, and when images outnumbered scenes the guaranteed clip
+    landed on the ENDING rather than on the last content scene. An ending is a
+    call to action; the outro is now image-free by construction (see
+    build_custom_meta), so the blanket exclusion is correct again.
+    """
+    all_scenes = (
+        db.query(Scene)
+        .filter(Scene.project_id == project.id, Scene.is_active.is_(True))
+        .order_by(Scene.order)
+        .all()
+    )
+    if not all_scenes:
+        return set()
+
+    out = {
+        s.id for s in all_scenes if getattr(s, "scene_type", None) == "outro"
+    }
+    last = all_scenes[-1]
+    if len(all_scenes) > 1 and getattr(last, "scene_type", None) is None:
+        out.add(last.id)
+    return out
+
+
+def _image_coverage_count(project: Project, db: Session, scenes: list[Scene]) -> int:
+    """How many of ``scenes`` the project's images are expected to cover.
+
+    Images are the primary visual; stock footage is only fetched for the
+    image-capable scenes no image can fill. This runs at the SCRIPTED stage,
+    concurrently with descriptor generation and BEFORE ``write_remotion_data``
+    actually assigns anything — so it is a PREDICTION of that function's image
+    cascade, and it must stay in sync with it:
+
+    * scene-specific ``scene_<id>_*`` files bind to their own scene (Step 2)
+    * every other image is a generic, handed out one per scene (Steps 3-4)
+    * an outro never consumes an image — see :func:`_outro_scene_ids`, which also
+      covers the implicit (NULL ``scene_type``) last-scene case
+
+    Drift is not fatal in either direction: predicting too much coverage leaves a
+    scene without a clip, which ``_fill_missing_stock_clips_after_scene_gen``
+    repairs; predicting too little fetches a clip that the placement pass then
+    finds no empty slot for, so it is simply held for a later edit.
+    """
+    from app.models.asset import Asset, AssetType
+
+    if not scenes:
+        return 0
+
+    images = (
+        db.query(Asset)
+        .filter(
+            Asset.project_id == project.id,
+            Asset.asset_type == AssetType.IMAGE,
+            Asset.excluded.is_(False),
+        )
+        .all()
+    )
+    if not images:
+        return 0
+
+    # An outro is forced to hideImage, so it neither takes an image nor needs a
+    # clip. Excluding it from both sides keeps the arithmetic honest.
+    outro_ids = _outro_scene_ids(project, db)
+    eligible_ids = {s.id for s in scenes if s.id not in outro_ids}
+    if not eligible_ids:
+        return 0
+
+    scene_specific: set[int] = set()
+    generic_count = 0
+    for asset in images:
+        m = re.match(r"^scene_(\d+)_", asset.filename)
+        if m and int(m.group(1)) in eligible_ids:
+            scene_specific.add(int(m.group(1)))
+        elif not m:
+            generic_count += 1
+        # A scene_<id>_ file whose scene is gone behaves as a generic in
+        # write_remotion_data only under redistribution; counting it as coverage
+        # here would over-predict, so it is deliberately ignored.
+
+    remaining = len(eligible_ids) - len(scene_specific)
+    return len(scene_specific) + min(generic_count, max(0, remaining))
+
+
+def _stock_footage_target_scenes(project: Project, db: Session) -> list[Scene]:
+    """The scenes the stock-footage feature owns, in scene order.
+
+    ONE definition of "which scenes get a clip", shared by the auto-pick pass
+    and the review endpoints — they drifted when the free plan's single clip
+    moved from the head to the tail.
+
+    * Eligible = image-capable scenes minus outros. An outro's visual slot is
+      forced to hideImage by ``write_remotion_data`` Step 3, so a clip there can
+      never render.
+    * Images come first: the cascade hands stills out in scene order, so the
+      LEADING ``covered`` scenes are reserved and only the tail is fetched for.
+    * GUARANTEE: enabling the feature always buys at least one clip. When images
+      cover every eligible scene that reservation empties the list, so give the
+      last image slot back — the clip lands on the scene DIRECTLY AFTER the
+      images, not at the end of the video. That scene's image is displaced: a
+      pre-existing ``assignedVideo`` wins over every image-cascade step
+      (remotion.py:862-883 collects ``video_scene_indices``; :919/:968/:991/
+      :1048/:1072 all skip them) and the freed still cascades elsewhere.
+    * The per-plan cap is applied LAST and to the HEAD of what survives, so a
+      capped user's clip sits immediately after the images rather than being
+      pushed to the tail.
+    """
+    eligible = _image_capable_scenes(project, db)
+    outro_ids = _outro_scene_ids(project, db)
+    if outro_ids:
+        eligible = [s for s in eligible if s.id not in outro_ids]
+    if not eligible:
+        return []
+
+    covered = _image_coverage_count(project, db, eligible)
+    # Honour the guarantee by reserving one fewer scene for images, so the clip
+    # follows them immediately instead of jumping to the end of the video.
+    if covered >= len(eligible):
+        covered = len(eligible) - 1
+    scenes = eligible[covered:]
+
+    # Free plans get exactly one clip, paid plans every remaining scene. Sliced
+    # from the HEAD so the single clip is the first scene images did not cover.
+    cap = _stock_footage_scene_cap(project, db)
+    if cap is not None:
+        scenes = scenes[:cap]
+    return scenes
+
+
+def _unreferenced_clip_count(
+    project: Project, db: Session, scenes: list[Scene]
+) -> int:
+    """Clips the project owns that no scene currently references.
+
+    A released clip is not a lost clip: ``write_remotion_data`` re-places spare
+    clips into the scenes its image cascade left empty. Callers use this to avoid
+    buying a second clip for a slot one of these will fill — re-using an
+    already-paid-for, already-transcoded clip always beats another provider call.
+    """
+    from app.models.asset import Asset, AssetType
+
+    owned = (
+        db.query(Asset)
+        .filter(
+            Asset.project_id == project.id,
+            Asset.asset_type == AssetType.VIDEO,
+            Asset.excluded.is_(False),
+        )
+        .count()
+    )
+    if not owned:
+        return 0
+
+    referenced: set[str] = set()
+    for scene in scenes:
+        if not scene.remotion_code:
+            continue
+        try:
+            lp = (json.loads(scene.remotion_code) or {}).get("layoutProps") or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        fn = lp.get("assignedVideo")
+        if fn:
+            referenced.add(fn)
+
+    return max(0, owned - len(referenced))
+
+
+def _scene_has_assigned_stock_clip(scene: Scene) -> bool:
+    """True when remotion_code already carries an auto- or user-picked stock clip."""
+    if not scene.remotion_code:
+        return False
+    try:
+        lp = (json.loads(scene.remotion_code) or {}).get("layoutProps") or {}
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return bool(lp.get("assignedVideo"))
+
+
+def _scene_stock_footage_prep_done(scene: Scene) -> bool:
+    """True when the stock gate already resolved this scene (clip or image fallback)."""
+    if not scene.remotion_code:
+        return False
+    try:
+        lp = (json.loads(scene.remotion_code) or {}).get("layoutProps") or {}
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if lp.get("assignedVideo"):
+        return True
+    return bool(lp.get("stockFootageImageFallback") and lp.get("assignedImage"))
+
+
+def _pick_fallback_image_for_scene(
+    project: Project,
+    scene: Scene,
+    db: Session,
+    used_generics: set[str],
+) -> str | None:
+    """Pick a scraped/uploaded still when stock search finds no clip."""
+    from app.models.asset import Asset, AssetType
+
+    images = (
+        db.query(Asset)
+        .filter(
+            Asset.project_id == project.id,
+            Asset.asset_type == AssetType.IMAGE,
+            Asset.excluded.is_(False),
+        )
+        .order_by(Asset.id)
+        .all()
+    )
+    if not images:
+        return None
+
+    scene_prefix = re.compile(rf"^scene_{scene.id}_")
+    scene_specific: str | None = None
+    generics: list[str] = []
+    for asset in images:
+        fn = asset.filename
+        if scene_prefix.match(fn):
+            scene_specific = fn
+            break
+
+    if scene_specific:
+        return scene_specific
+
+    other_scene_pattern = re.compile(r"^scene_\d+_")
+    for asset in images:
+        fn = asset.filename
+        if other_scene_pattern.match(fn):
+            continue
+        generics.append(fn)
+
+    if not generics:
+        return images[0].filename
+
+    is_intro = getattr(scene, "scene_type", None) == "intro" or scene.order == 1
+    if is_intro:
+        hero = generics[0]
+        if hero not in used_generics:
+            used_generics.add(hero)
+            return hero
+
+    for fn in generics:
+        if fn not in used_generics:
+            used_generics.add(fn)
+            return fn
+
+    return generics[0]
+
+
+def _persist_scene_image_fallback(
+    scene: Scene,
+    db: Session,
+    image_filename: str,
+    *,
+    project_id: int,
+    query: str,
+) -> bool:
+    try:
+        descriptor = json.loads(scene.remotion_code) if scene.remotion_code else {}
+    except (json.JSONDecodeError, TypeError):
+        descriptor = {}
+    lp = dict(descriptor.get("layoutProps") or {})
+    lp.pop("assignedVideo", None)
+    lp.pop("videoMuted", None)
+    lp.pop("videoVolume", None)
+    lp.pop("videoStartSeconds", None)
+    lp["assignedImage"] = image_filename
+    lp["hideImage"] = False
+    lp["stockFootageImageFallback"] = True
+    lp.setdefault("imageFocusX", 50)
+    lp.setdefault("imageFocusY", 50)
+    descriptor["layoutProps"] = lp
+    scene.remotion_code = json.dumps(descriptor)
+
+    try:
+        db.commit()
+    except Exception:
+        logger.warning(
+            "[PIPELINE] project=%s scene=%s: failed to persist image fallback",
+            project_id,
+            scene.id,
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+
+    logger.info(
+        "[PIPELINE] project=%s scene=%s: no stock clip for %r — using image %s",
+        project_id,
+        scene.id,
+        query,
+        image_filename,
+    )
+    return True
+
+
+async def _fallback_scene_to_image(
+    project: Project,
+    scene: Scene,
+    db: Session,
+    *,
+    query: str,
+    used_generics: set[str],
+) -> bool:
+    """Assign a scraped still when auto stock search fails for this scene."""
+    scene_id = scene.id
+    project_id = project.id
+    _release_db_connection(db, project_id=project_id)
+
+    filename = _pick_fallback_image_for_scene(project, scene, db, used_generics)
+    if not filename:
+        logger.info(
+            "[PIPELINE] project=%s scene=%s: no stock clip for %r and no images available",
+            project_id,
+            scene_id,
+            query,
+        )
+        return False
+
+    scene = (
+        db.query(Scene)
+        .filter(Scene.id == scene_id, Scene.project_id == project_id)
+        .first()
+    )
+    if scene is None:
+        return False
+
+    return _persist_scene_image_fallback(
+        scene, db, filename, project_id=project_id, query=query
+    )
+
+
+def _stock_footage_scene_cap(project: Project, db: Session) -> int | None:
+    """How many image-capable scenes may receive an auto-picked clip.
+
+    Keyed off the project OWNER's plan (consistent with how clip credits are
+    charged): paid plans get every image-capable scene (``None`` = no cap),
+    everyone else is limited to a single scene. This is the one place the free /
+    paid split for the generation-time feature lives.
+
+    A cap of 1 is a floor as well as a ceiling: see
+    :func:`_stock_footage_target_scenes`, which gives a free user exactly one
+    clip on the LAST eligible scene regardless of how many images the project
+    holds. Callers must apply this cap to the TAIL of their candidate list.
+    """
+    from app.models.user import PAID_TIERS
+    from app.services.access import project_owner
+
+    owner = project_owner(project, db)
+    if owner.plan in PAID_TIERS:
+        return None
+    return 1
+
+
+def _release_db_connection(db: Session, *, project_id: int | None = None) -> None:
+    """Return the session's connection to the pool after long non-DB work.
+
+    Neon/serverless Postgres closes idle SSL connections; pool_pre_ping only
+    verifies liveness on checkout — a session already holding a connection
+    through a multi-minute stock-footage ingest cannot be re-pinged, so the
+    next flush/commit fails with "SSL connection has been closed unexpectedly".
+    """
+    try:
+        db.close()
+    except OperationalError as err:
+        if project_id is not None:
+            logger.warning(
+                "[PIPELINE] project=%s: transient DB disconnect on db.close(); invalidating session: %s",
+                project_id,
+                err,
+            )
+        try:
+            db.invalidate()
+        except Exception:
+            pass
+
+
+def _reload_project(db: Session, project_id: int) -> Project | None:
+    """Re-query project after long I/O that called :func:`_release_db_connection`.
+
+    ``db.close()`` expunges ORM instances; mutating a detached ``Project`` (e.g.
+    setting ``status``) silently fails to persist and breaks lazy loads like
+    ``project.assets``.
+    """
+    return db.query(Project).filter(Project.id == project_id).first()
+
+
+async def _try_assign_stock_clip_to_scene(
+    project: Project,
+    scene: Scene,
+    db: Session,
+    *,
+    orientation: str,
+    loop: asyncio.AbstractEventLoop,
+    used_generics: set[str] | None = None,
+    used_clip_ids: set[str] | None = None,
+    llm_query: str | None = None,
+) -> bool:
+    """Search, ingest, upload, and link one stock clip to a scene."""
+    from app.services.stock_relevance import build_scene_query
+
+    # Keyword extraction always runs: it is pure CPU over already-loaded fields,
+    # and its token list is what the local relevance ranker scores clips against.
+    # The LLM only replaces the *search* string.
+    keyword_query, scene_tokens = build_scene_query(scene)
+    query = (llm_query or "").strip() or keyword_query.strip()
+    logger.info(
+        "[STOCK_QUERY] project=%s scene=%s: title=%r -> query=%r (%s) tokens=%s",
+        project.id, scene.id, (scene.title or "")[:80], query,
+        "llm" if (llm_query or "").strip() else "keyword-fallback", scene_tokens[:8],
+    )
+    if not query:
+        logger.info(
+            "[PIPELINE] project=%s scene=%s: no title/visual for stock search — skipping",
+            project.id,
+            scene.id,
+        )
+        if used_generics is not None:
+            await _fallback_scene_to_image(
+                project, scene, db, query=query or scene.title or "", used_generics=used_generics
+            )
+        return False
+
+    try:
+        return await asyncio.wait_for(
+            _try_assign_stock_clip_to_scene_impl(
+                project,
+                scene,
+                db,
+                orientation=orientation,
+                loop=loop,
+                query=query,
+                scene_tokens=scene_tokens,
+                used_generics=used_generics,
+                used_clip_ids=used_clip_ids,
+            ),
+            timeout=STOCK_CLIP_ASSIGN_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[PIPELINE] project=%s scene=%s: stock clip assign timed out after %ss (query=%r)",
+            project.id,
+            scene.id,
+            STOCK_CLIP_ASSIGN_TIMEOUT_SECONDS,
+            query,
+        )
+        if used_generics is not None:
+            await _fallback_scene_to_image(
+                project, scene, db, query=query, used_generics=used_generics
+            )
+        return False
+
+
+async def _try_assign_stock_clip_to_scene_impl(
+    project: Project,
+    scene: Scene,
+    db: Session,
+    *,
+    orientation: str,
+    loop: asyncio.AbstractEventLoop,
+    query: str,
+    scene_tokens: list[str] | None = None,
+    used_generics: set[str] | None = None,
+    used_clip_ids: set[str] | None = None,
+) -> bool:
+    """Inner implementation for :func:`_try_assign_stock_clip_to_scene`."""
+    from concurrent.futures import ThreadPoolExecutor
+    from app.models.asset import Asset, AssetType
+    from app.services import stock_footage, r2_storage
+
+    scene_id = scene.id
+    project_id = project.id
+    user_id = project.user_id
+
+    # Drop the connection before search/ingest/R2 — each can take tens of seconds
+    # and Neon will kill an idle held connection mid-flight.
+    _release_db_connection(db, project_id=project_id)
+
+    try:
+        clip = await loop.run_in_executor(
+            None,
+            lambda q=query: stock_footage.pick_best_for_scene(
+                q,
+                scene_tokens=scene_tokens,
+                orientation=orientation,
+                exclude_ids=used_clip_ids or set(),
+            ),
+        )
+        if clip is not None and used_clip_ids is not None:
+            # Claim at selection, not after commit: a retry following a failed
+            # ingest must not re-pick the clip that just failed to download.
+            used_clip_ids.add(f"{clip.provider}:{clip.id}")
+        if clip is None:
+            logger.info(
+                "[PIPELINE] project=%s scene=%s: no stock result for %r",
+                project.id, scene.id, query,
+            )
+            if used_generics is not None:
+                await _fallback_scene_to_image(
+                    project, scene, db, query=query, used_generics=used_generics
+                )
+            return False
+
+        ts = int(time.time())
+        video_dir = os.path.join(settings.MEDIA_DIR, f"projects/{project.id}/videos")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            ingested = await loop.run_in_executor(
+                pool,
+                stock_footage.ingest_clip,
+                clip.download_url,
+                video_dir,
+                f"scene_{scene.id}_{ts}",
+            )
+    except Exception:
+        logger.warning(
+            "[PIPELINE] project=%s scene=%s: stock footage auto-pick failed",
+            project.id, scene.id, exc_info=True,
+        )
+        if used_generics is not None:
+            await _fallback_scene_to_image(
+                project, scene, db, query=query, used_generics=used_generics
+            )
+        return False
+
+    r2_key_val = None
+    r2_url_val = None
+    audio_uploaded = False
+    if r2_storage.is_r2_configured():
+        try:
+
+            def _upload_stock_to_r2() -> tuple[str | None, str | None, bool]:
+                key = r2_storage.stock_video_key(
+                    user_id, project_id, ingested.filename
+                )
+                url = r2_storage.upload_file(
+                    ingested.local_path, key, content_type="video/mp4"
+                )
+                audio_ok = False
+                if ingested.audio_filename and ingested.audio_local_path:
+                    r2_storage.upload_file(
+                        ingested.audio_local_path,
+                        r2_storage.stock_video_key(
+                            user_id, project_id, ingested.audio_filename
+                        ),
+                        content_type="video/mp4",
+                    )
+                    audio_ok = True
+                return key, url, audio_ok
+
+            r2_key_val, r2_url_val, audio_uploaded = await loop.run_in_executor(
+                None, _upload_stock_to_r2
+            )
+        except Exception as e:
+            logger.warning("[PIPELINE] R2 upload failed for %s: %s", ingested.filename, e)
+
+    has_audio = bool(
+        ingested.audio_filename
+        and (audio_uploaded or not r2_storage.is_r2_configured())
+    )
+
+    scene = (
+        db.query(Scene)
+        .filter(Scene.id == scene_id, Scene.project_id == project_id)
+        .first()
+    )
+    if scene is None:
+        return False
+
+    db.add(
+        Asset(
+            project_id=project_id,
+            asset_type=AssetType.VIDEO,
+            original_url=clip.page_url or clip.download_url,
+            local_path=ingested.local_path,
+            filename=ingested.filename,
+            r2_key=r2_key_val,
+            r2_url=r2_url_val,
+            excluded=False,
+            duration_seconds=ingested.duration_seconds,
+            width=ingested.width,
+            height=ingested.height,
+            source_provider=clip.provider,
+            source_id=clip.id,
+            source_author=clip.author,
+            source_page_url=clip.page_url,
+            audio_variant_filename=ingested.audio_filename if has_audio else None,
+        )
+    )
+
+    try:
+        descriptor = json.loads(scene.remotion_code) if scene.remotion_code else {}
+    except (json.JSONDecodeError, TypeError):
+        descriptor = {}
+    lp = dict(descriptor.get("layoutProps") or {})
+    lp.pop("assignedImage", None)
+    lp.pop("stockFootageImageFallback", None)
+    lp["assignedVideo"] = ingested.filename
+    lp["hideImage"] = False
+    lp.setdefault("videoMuted", True)
+    lp.setdefault("videoVolume", 0.35)
+    lp.setdefault("imageFocusX", 50)
+    lp.setdefault("imageFocusY", 50)
+    descriptor["layoutProps"] = lp
+    scene.remotion_code = json.dumps(descriptor)
+
+    try:
+        db.commit()
+    except Exception:
+        logger.warning(
+            "[PIPELINE] project=%s scene=%s: failed to persist stock clip assignment",
+            project_id,
+            scene_id,
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+    return True
+
+
+async def _fill_missing_stock_clips_after_scene_gen(
+    project: Project,
+    scenes: list,
+    db: Session,
+    template_id: str,
+) -> int:
+    """Reconcile clips against the FINAL layouts resolved during scene generation.
+
+    This is a RECONCILER, not the primary assigner. The main pass is
+    :func:`_prepare_stock_footage_candidates`, which runs concurrently with
+    descriptor generation and walks image-capable scenes one at a time; the
+    descriptor rebuild then carries its ``assignedVideo`` values across. On a
+    healthy run this function therefore assigns ZERO clips — a non-zero count
+    means the rebuild dropped clips and they are being paid for twice.
+
+    It still earns its place for the genuine edge cases: a scene the main pass
+    skipped (search miss / timeout), and layout churn — the script-stage gate
+    (:func:`_image_capable_scenes`) keys off the *scripted* ``preferred_layout``,
+    but scene generation can resolve a scene to a different layout and then
+    overwrite ``preferred_layout`` with it. So the fetch decision is made against
+    a layout that may no longer be the one being rendered. Both directions have
+    to be repaired here:
+
+    * no-image → image-capable: economist may script ``chart_line`` (skipped by the
+      gate) and resolve to ``leader_article`` — that scene needs a clip now.
+    * image-capable → no-image: a scene scripted as ``leader_article`` that resolves
+      to ``key_indicators`` is carrying a clip its layout cannot display. Left in
+      place the clip is dead weight — paid for, invisible, and still occupying a
+      slot against the free-plan cap. Drop it.
+    """
+    from app.routers.projects import _clear_video_assignment
+    from app.services.template_service import (
+        get_layouts_without_image,
+        resolve_base_layout,
+    )
+
+    if not getattr(project, "stock_footage_enabled", False):
+        return 0
+
+    no_image = get_layouts_without_image(template_id)
+
+    def _is_no_image(descriptor: dict) -> bool | None:
+        """True/False for a known layout, None when the layout can't be resolved."""
+        layout = _normalize_layout_id(_descriptor_layout_name(template_id, descriptor))
+        if not layout:
+            return None
+        # Descriptors carry the resolved VARIANT id (`ending_socials__v2`);
+        # no_image is keyed by base layout, so collapse before testing.
+        return resolve_base_layout(template_id, layout) in no_image or layout in no_image
+
+    needing: list[Scene] = []
+    existing_clips = 0
+    dropped = 0
+    for scene in scenes:
+        if not scene.remotion_code:
+            continue
+        try:
+            descriptor = json.loads(scene.remotion_code)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        lp = descriptor.get("layoutProps") or {}
+        if lp.get("hideImage"):
+            continue
+        if lp.get("assignedVideo"):
+            # Only keep the clip if the FINAL layout can actually show it. An
+            # unresolvable layout (None) is left alone — never destroy an
+            # assignment on a guess.
+            if _is_no_image(descriptor) is True:
+                _clear_video_assignment(lp)
+                descriptor["layoutProps"] = lp
+                scene.remotion_code = json.dumps(descriptor)
+                dropped += 1
+                continue
+            existing_clips += 1
+            continue
+        if lp.get("assignedImage"):
+            # Images own the visual slot. A scene that already carries a still
+            # (including a stockFootageImageFallback one) needs no clip.
+            continue
+        if _is_no_image(descriptor) is not False:
+            continue
+        needing.append(scene)
+
+    if dropped:
+        logger.info(
+            "[PIPELINE] project=%s: dropped %s stock clip(s) whose final layout cannot display them",
+            project.id, dropped,
+        )
+
+    # Reserve the scenes images will cover.
+    #
+    # CRITICAL ORDERING: this runs BEFORE write_remotion_data, which is the ONLY
+    # writer of `assignedImage`. So at this point every layoutProps is still
+    # empty and the `lp.get("assignedImage")` test above can never fire — without
+    # this reservation the reconciler fetches a clip for every image-capable
+    # scene, which is exactly the "10 images, still 3 clips" bug.
+    #
+    # Coverage is predicted the same way the pre-scene-gen pass predicts it, and
+    # measured against the scenes THIS function considers clip-eligible (already
+    # filtered by the resolved descriptor layout), so the two stages agree.
+    outro_ids = _outro_scene_ids(project, db)
+    needing = [s for s in needing if s.id not in outro_ids]
+
+    # Mirror the guarantee _stock_footage_target_scenes makes: enabling the
+    # feature buys at least one clip. `existing_clips` counts the ones the main
+    # pass already landed, so this only fires when that pass came up empty
+    # (search miss / timeout). It can never double-buy — a scene that already
+    # carries a clip never enters `needing` (see the assignedVideo branch above).
+    guarantee_unmet = existing_clips == 0 and bool(needing)
+    reserved_pool = list(needing)
+
+    covered = _image_coverage_count(project, db, needing)
+    # Honour the guarantee by reserving one fewer scene for images, so the clip
+    # follows them immediately instead of jumping to the end of the video. Only
+    # when nothing else will produce a clip — see `guarantee_unmet` above.
+    if guarantee_unmet and covered >= len(needing):
+        covered = len(needing) - 1
+    if covered:
+        logger.info(
+            "[PIPELINE] project=%s: %s of %s clip-eligible scene(s) will be covered "
+            "by images; reserving them",
+            project.id, covered, len(needing),
+        )
+        needing = needing[covered:]
+
+    # Clips the project owns but no scene currently references. write_remotion_data
+    # re-places these into empty slots after the image cascade, so fetching for
+    # those scenes here would buy a second clip for a slot already covered. This is
+    # what keeps a script regeneration — which releases every clip — from
+    # re-fetching the whole video ("more videos than scenes").
+    spare_clips = _unreferenced_clip_count(project, db, scenes)
+    if spare_clips:
+        needing = needing[spare_clips:]
+        logger.info(
+            "[PIPELINE] project=%s: %s unreferenced clip(s) will be re-placed; "
+            "skipping re-fetch for that many scene(s)",
+            project.id, spare_clips,
+        )
+
+    # The coverage step above already gave a slot back for the guarantee, but the
+    # spare-clip reservation can still empty the list. That is fine when a spare
+    # exists — write_remotion_data re-places an already-paid clip, satisfying the
+    # guarantee without buying another (the double-buy this reconciler prevents).
+    # It is only a problem when the last candidate was reserved for a spare that
+    # cannot cover it, so restore the first uncovered scene in that case.
+    if guarantee_unmet and not needing and not spare_clips:
+        needing = reserved_pool[-1:]
+
+    cap = _stock_footage_scene_cap(project, db)
+    if cap is not None:
+        remaining = max(0, cap - existing_clips)
+        needing = needing[:remaining]
+
+    if not needing:
+        return 0
+
+    orientation = (
+        "portrait"
+        if (getattr(project, "aspect_ratio", "landscape") or "").lower() == "portrait"
+        else "landscape"
+    )
+    loop = asyncio.get_running_loop()
+    assigned = 0
+    used_clip_ids: set[str] = set()
+
+    # One batched LLM pass before the assign loop, mirroring
+    # _prepare_stock_footage_candidates: its latency then sits OUTSIDE each
+    # scene's STOCK_CLIP_ASSIGN_TIMEOUT_SECONDS. Without it the few scenes this
+    # reconciler handles would fall back to keyword-only queries and get
+    # noticeably worse clips than the main path.
+    llm_queries = await _build_llm_stock_queries(project, needing, db)
+    refreshed = _reload_project(db, project.id)
+    if refreshed is not None:
+        project = refreshed
+
+    for scene in needing:
+        # No used_generics — see _prepare_stock_footage_candidates: a search miss
+        # leaves the slot empty rather than duplicating an image another scene owns.
+        if await _try_assign_stock_clip_to_scene(
+            project,
+            scene,
+            db,
+            orientation=orientation,
+            loop=loop,
+            used_clip_ids=used_clip_ids,
+            llm_query=llm_queries.get(scene.id),
+        ):
+            assigned += 1
+
+    if assigned:
+        logger.info(
+            "[PIPELINE] project=%s: filled %s/%s missing stock clips after scene generation",
+            project.id, assigned, len(needing),
+        )
+    return assigned
+
+
+async def _build_llm_stock_queries(
+    project: Project, scenes: list, db: Session
+) -> dict[int, str]:
+    """Write a stock search query for each scene with one batched LLM pass.
+
+    Returns ``{scene_id: query}``, empty on any failure — callers fall back to
+    keyword extraction per scene, so this can never block footage assignment.
+
+    Runs *before* the per-scene assign loop, so its latency sits outside
+    ``STOCK_CLIP_ASSIGN_TIMEOUT_SECONDS`` and a slow model cannot push scenes
+    into the timeout path. Scene fields are snapshotted into plain dicts first
+    because the DB connection is released across the await.
+    """
+    if not scenes:
+        return {}
+
+    from app.dspy_modules.stock_query_gen import generate_stock_queries
+
+    try:
+        payload = [
+            {
+                "scene_id": s.id,
+                "title": s.title or "",
+                "display_text": s.display_text or "",
+                "narration": s.narration_text or "",
+                "visual_description": s.visual_description or "",
+            }
+            for s in scenes
+        ]
+        # Project has `name`, not `title` — a getattr on the wrong field would
+        # silently disable topic context rather than error.
+        topic = (getattr(project, "name", None) or "").strip()
+    except Exception:
+        logger.warning("[STOCK_QUERY_GEN] could not snapshot scenes", exc_info=True)
+        return {}
+
+    project_id = project.id
+    # The batched call can run for tens of seconds; Neon kills a connection held
+    # idle that long.
+    _release_db_connection(db, project_id=project_id)
+    try:
+        return await generate_stock_queries(payload, video_topic=topic)
+    except Exception:
+        logger.warning(
+            "[STOCK_QUERY_GEN] project=%s batch failed — falling back to keywords",
+            project_id, exc_info=True,
+        )
+        return {}
+
+
+async def _prepare_stock_footage_candidates(project: Project, db: Session) -> int:
+    """Auto-pick and ingest a stock clip for each targeted scene.
+
+    Which scenes those are is decided by :func:`_stock_footage_target_scenes`:
+    images cover the leading scenes, clips fill the tail, and enabling the
+    feature always yields at least one clip (on the last eligible scene, whose
+    image is displaced) even when images could cover everything.
+
+    Runs between the script and scene-generation stages. Each clip is searched by
+    keywords extracted from the whole scene (see
+    :func:`stock_relevance.build_scene_query`), picked from a ranked candidate
+    pool, ingested through the shared :func:`stock_footage.ingest_clip` (so the
+    CFR-30 contract matches the editor's path exactly), and linked into the scene
+    descriptor as ``assignedVideo``. ``used_clip_ids`` keeps two scenes in the
+    same run from landing on the same clip.
+
+    A scene whose search returns nothing, or whose download fails, is simply left
+    without a clip — the user fills it in during review rather than the whole
+    generation failing.
+
+    Returns the number of scenes that got a clip.
+    """
+    scenes = _stock_footage_target_scenes(project, db)
+    logger.info(
+        "[PIPELINE] project=%s: fetching stock clips for %s scene(s)",
+        project.id, len(scenes),
+    )
+    if not scenes:
+        return 0
+
+    already_assigned = sum(1 for s in scenes if _scene_stock_footage_prep_done(s))
+    pending = [s for s in scenes if not _scene_stock_footage_prep_done(s)]
+    if already_assigned:
+        logger.info(
+            "[PIPELINE] project=%s: skipping %s/%s scenes that already have stock clips",
+            project.id,
+            already_assigned,
+            len(scenes),
+        )
+    if not pending:
+        return already_assigned
+
+    orientation = (
+        "portrait"
+        if (getattr(project, "aspect_ratio", "landscape") or "").lower() == "portrait"
+        else "landscape"
+    )
+    loop = asyncio.get_running_loop()
+    assigned = already_assigned
+    total = len(scenes)
+    used_clip_ids: set[str] = set()
+
+    # One batched LLM pass for the whole video, before the assign loop so its
+    # latency stays outside each scene's assign timeout.
+    llm_queries = await _build_llm_stock_queries(project, pending, db)
+    refreshed = _reload_project(db, project.id)
+    if refreshed is not None:
+        project = refreshed
+
+    for idx, scene in enumerate(pending, start=already_assigned + 1):
+        _pipeline_progress.setdefault(project.id, {})["stock_footage"] = {
+            "current": idx,
+            "total": total,
+            "scene_id": scene.id,
+        }
+        # No used_generics: this scene is one no image could cover, so falling
+        # back to a still would duplicate an image an earlier scene already owns.
+        # A search miss instead leaves the slot empty and write_remotion_data's
+        # Step 5 persists hideImage=true.
+        if await _try_assign_stock_clip_to_scene(
+            project,
+            scene,
+            db,
+            orientation=orientation,
+            loop=loop,
+            used_clip_ids=used_clip_ids,
+            llm_query=llm_queries.get(scene.id),
+        ):
+            assigned += 1
+        else:
+            fresh = (
+                db.query(Scene)
+                .filter(Scene.id == scene.id, Scene.project_id == project.id)
+                .first()
+            )
+            if fresh and _scene_stock_footage_prep_done(fresh):
+                assigned += 1
+
+    _pipeline_progress.setdefault(project.id, {}).pop("stock_footage", None)
+
+    logger.info(
+        "[PIPELINE] project=%s: auto-picked %s/%s stock clips",
+        project.id, assigned, total,
+    )
+    return assigned
+
+
+async def _generate_script(
+    project: Project,
+    db: Session,
+    user_instruction: str = "",
+    progress_callback=None,
+):
+    """Async script generation using DSPy.
+
+    ``user_instruction`` is the free-form text captured by the regeneration popup
+    (only set when this is called from the regenerate-script worker — empty for
+    the initial-pipeline path). ScriptGenerator analyzes it once and injects the
+    derived constraints into both the outline and scene-expansion stages.
+    """
+    image_paths = [a.local_path for a in project.assets if a.asset_type.value == "image"]
+    hero_image = image_paths[0] if image_paths else ""
+
+    # Determine template and load its layout prompt (layout-only catalog).
+    template_id = validate_template_id(
+        project.template if project.template else "default",
+        db=db,
+        user_id=project.user_id,
+    )
+    try:
+        layout_catalog = get_layout_prompt(template_id, db=db, user_id=project.user_id)
+    except Exception:
+        layout_catalog = ""
+
+    # For bloomberg: extract tables once upfront — reused for both constraint-building and
+    # table bindings below, avoiding a second parse of the same blog_content string.
+    _bloomberg_pre_tables: list[dict] = []
+    if template_id == "bloomberg":
+        _blog_text = getattr(project, "blog_content", None) or ""
+        _bloomberg_pre_tables = extract_tables_from_content(_blog_text) if _blog_text else []
+
+    # For bloomberg: probe scraped content and append data-availability constraints so the
+    # script generator only picks data-driven layouts when the underlying data actually exists.
+    if template_id == "bloomberg" and layout_catalog:
+        _ticker_items = extract_ticker_items_from_blog(_blog_text, max_items=2)
+        _has_ohlcv = any(is_candlestick_table(t) for t in _bloomberg_pre_tables)
+        _constraints: list[str] = []
+        if not _ticker_items:
+            _constraints.append(
+                "- `terminal_ticker` MUST NOT be used: no ticker/price data was found in the scraped content."
+            )
+        if not _has_ohlcv:
+            _constraints.append(
+                "- `terminal_chart` MUST NOT be used: no OHLCV candlestick table was found in the scraped content."
+            )
+        if _constraints:
+            layout_catalog = layout_catalog.rstrip() + (
+                "\n\nData availability constraints (STRICT — do not override):\n"
+                + "\n".join(_constraints)
+            )
+
+    content_language = get_content_language_for_project(project)
+    requested_video_length = getattr(project, "video_length", "auto") or "auto"
+    video_style = getattr(project, "video_style", "explainer") or "explainer"
+    from app.services.script_style import generation_style_for_project, style_guidance_for_project
+    style_guidance = style_guidance_for_project(project)
+
+    def _effective_video_length_for_content(
+        blog_content: str | None, requested: str, style: str
+    ) -> str:
+        """Prevent hallucination: if content is short, downshift scene count.
+
+        Word thresholds per tier (content must meet minimum to justify the length):
+          short        — no minimum
+          medium       — 5 00 words  (else → short)
+          detailed     — 1 500 words  (else → medium or short)
+          more_detailed— 2 000 words  (else → detailed, medium, or short)
+        """
+        req = (requested or "auto").strip().lower()
+        if req not in {"mdetailed", "detailed", "medium", "short", "auto"}:
+            return "auto"
+        if req in {"auto", "short"}:
+            return req
+
+        text = (blog_content or "").strip()
+        words = len([w for w in re.split(r"\s+", text) if w])
+
+        if req == "medium":
+            return "short" if words < 500 else "medium"
+
+        if req == "detailed":
+            if words < 500:
+                return "short"
+            if words < 1500:
+                return "medium"
+            return "detailed"
+
+        # req == "more_detailed"
+        if words < 500:
+            return "short"
+        if words < 1500:
+            return "medium"
+        if words < 2000:
+            return "detailed"
+        return "mdetailed"
+
+    effective_video_length = _effective_video_length_for_content(
+        getattr(project, "blog_content", None), requested_video_length, video_style
+    )
+
+    if effective_video_length != requested_video_length:
+        try:
+            if project.id in _pipeline_progress:
+                _pipeline_progress[project.id]["notice"] = {
+                    "code": "video_shortened",
+                    "message": "We shortened the video because the scraped/uploaded content was too short for your selected length.",
+                    "requested_video_length": requested_video_length,
+                    "effective_video_length": effective_video_length,
+                    "video_style": video_style,
+                }
+        except Exception:
+            pass
+        logger.info(
+            "[PIPELINE] Project %s: content too short for video_length=%s (style=%s). Using effective video_length=%s for script generation.",
+            project.id,
+            requested_video_length,
+            video_style,
+            effective_video_length,
+            extra={"project_id": project.id, "user_id": project.user_id},
+        )
+        
+    generator = ScriptGenerator()
+    # Only append an ending / follow-along scene when the template declares `ending_socials`
+    # in meta.json (e.g. newscast has no EndingSocials layout — forcing it would map to a fallback).
+    # For custom templates: enable CTA ending when the template has an "outro" archetype.
+    if is_custom_template(template_id):
+        include_ending_socials = True
+    else:
+        include_ending_socials = "ending_socials" in get_valid_layouts(template_id)
+
+    # Pre-compute table bindings for templates that have dedicated data/table layouts.
+    # Each template block builds `chartable_tables_json` (passed to ScriptGenerator) and
+    # `_all_extracted_tables` (used in the scene-save loop to embed single-table hints).
+    chartable_tables_json = ""
+    _all_extracted_tables: list[dict] = []
+
+    if template_id == "newscast":
+        # newscast: dedicate scenes to data_visualization for any chartable table (line/bar/histogram).
+        # Requires ≥2 chartable tables; caps at 3 scenes.
+        _all_extracted_tables = extract_tables_from_content(
+            getattr(project, "blog_content", None) or ""
+        )
+        if len(_all_extracted_tables) >= 2:
+            _tmp_hint = build_table_context_hint(_all_extracted_tables, max_tables=len(_all_extracted_tables))
+            _chartable = get_chartable_tables_from_visual_hint(_tmp_hint)
+            _capped = _chartable[: min(3, len(_chartable))]
+            if len(_capped) >= 2:
+                _chart_type_by_idx = {
+                    orig_idx: (_build_chart_props_from_table(t) or {}).get("chartType", "auto")
+                    for orig_idx, t in _capped
+                }
+                chartable_tables_json = build_chartable_tables_payload(
+                    _capped, chart_type_by_index=_chart_type_by_idx
+                )
+
+    elif template_id == "bloomberg":
+        # bloomberg: one scene per qualifying table — layout depends on table type:
+        #   terminal_chart   → OHLCV candlestick tables only
+        #   terminal_dataviz → non-OHLCV time-series / line-chartable tables
+        #   terminal_ticker  → multi-symbol snapshot tables
+        #   terminal_table   → all remaining tables with headers + ≥1 row
+        # Reuse the tables already extracted during the constraint-check above.
+        _all_extracted_tables = _bloomberg_pre_tables
+        if _all_extracted_tables:
+            _tmp_hint = build_table_context_hint(
+                _all_extracted_tables, max_tables=len(_all_extracted_tables)
+            )
+
+            # The three classification passes are independent — run them concurrently
+            # in the thread pool so CPU-bound numeric parsing doesn't serialize.
+            _loop = asyncio.get_event_loop()
+
+            def _classify_candlestick() -> list[tuple[int, dict]]:
+                return [
+                    (idx, t) for idx, t in enumerate(_all_extracted_tables)
+                    if is_candlestick_table(t)
+                ]
+
+            def _classify_dataviz(hint: str) -> list[tuple[int, dict]]:
+                return get_line_chartable_tables_from_visual_hint(hint)
+
+            def _classify_ticker(tables: list[dict]) -> list[tuple[int, dict]]:
+                return [
+                    (idx, t) for idx, t in enumerate(tables)
+                    if is_ticker_snapshot_table(t)
+                ]
+
+            (
+                _candlestick_tables,
+                _dataviz_tables_raw,
+                _ticker_tables_all,
+            ) = await asyncio.gather(
+                _loop.run_in_executor(None, _classify_candlestick),
+                _loop.run_in_executor(None, _classify_dataviz, _tmp_hint),
+                _loop.run_in_executor(None, _classify_ticker, _all_extracted_tables),
+            )
+
+            _candlestick_indices = {idx for idx, _ in _candlestick_tables}
+
+            # terminal_dataviz: non-OHLCV tables that produce a line chart
+            _dataviz_tables: list[tuple[int, dict]] = [
+                (idx, t) for idx, t in _dataviz_tables_raw
+                if idx not in _candlestick_indices
+            ]
+            _dataviz_indices = {idx for idx, _ in _dataviz_tables}
+
+            _used_indices = _candlestick_indices | _dataviz_indices
+
+            # terminal_ticker: filter out already-claimed indices
+            _ticker_tables: list[tuple[int, dict]] = [
+                (idx, t) for idx, t in _ticker_tables_all
+                if idx not in _used_indices
+            ]
+            _ticker_indices = {idx for idx, _ in _ticker_tables}
+            _used_indices |= _ticker_indices
+
+            # terminal_table: every remaining table with headers + ≥1 row gets its own scene.
+            # Exclude tables where every row has only a single cell (e.g. HTML scraper dropped
+            # all value columns, leaving only a date/label column with no data to show).
+            def _table_has_multi_col_rows(t: dict) -> bool:
+                rows = t.get("rows") or []
+                return any(isinstance(r, list) and len(r) >= 2 for r in rows)
+
+            _table_tables: list[tuple[int, dict]] = [
+                (idx, t)
+                for idx, t in enumerate(_all_extracted_tables)
+                if idx not in _used_indices
+                and (t.get("headers") or [])
+                and len(t.get("rows") or []) >= 1
+                and _table_has_multi_col_rows(t)
+            ]
+
+            # Cap total table-bound scenes at 4 (candlestick first, then dataviz, ticker, table).
+            # Prevents token bloat and keeps scene count reasonable for table-heavy blogs.
+            _MAX_BLOOMBERG_TABLE_SCENES = 4
+            _bindings = (
+                _candlestick_tables + _dataviz_tables + _ticker_tables + _table_tables
+            )[:_MAX_BLOOMBERG_TABLE_SCENES]
+
+            if _bindings:
+                # Rebuild index sets from the capped list so layout mapping stays correct.
+                _bound_candlestick = {idx for idx, _ in _bindings if idx in _candlestick_indices}
+                _bound_dataviz = {idx for idx, _ in _bindings if idx in _dataviz_indices}
+                _bound_ticker = {idx for idx, _ in _bindings if idx in _ticker_indices}
+
+                _chart_type_by_idx = {
+                    orig_idx: (_build_chart_props_from_table(t) or {}).get("chartType", "auto")
+                    for orig_idx, t in _bindings
+                }
+                _layout_by_idx = {
+                    orig_idx: (
+                        "terminal_chart" if orig_idx in _bound_candlestick
+                        else "terminal_dataviz" if orig_idx in _bound_dataviz
+                        else "terminal_ticker" if orig_idx in _bound_ticker
+                        else "terminal_table"
+                    )
+                    for orig_idx, _ in _bindings
+                }
+                chartable_tables_json = build_chartable_tables_payload(
+                    _bindings,
+                    chart_type_by_index=_chart_type_by_idx,
+                    preferred_layout_by_index=_layout_by_idx,
+                    max_rows=20,
+                )
+
+    elif _is_laduc_or_fj(template_id):
+        # laduc / FJ Market Brief / fj_research: classify chartable tables once upfront (bloomberg-style).
+        # Run extraction + classification in the thread pool so CPU-bound
+        # HTML parsing doesn't block the event loop.
+        _laduc_blog_text = getattr(project, "blog_content", None) or ""
+
+        def _laduc_classify_tables() -> tuple[list, str]:
+            tables = extract_tables_from_content(_laduc_blog_text)
+            if not tables:
+                return tables, ""
+            tmp_hint = build_table_context_hint(tables, max_tables=len(tables))
+            # Chartable candidates (line/bar/histogram) → market_annotation
+            chartable_all = get_chartable_tables_from_visual_hint(tmp_hint)
+            # Ticker-like tables → ticker layout (excluded from chartable set so we
+            # don't double-bind the same table to two scenes).
+            ticker_tables_all: list[tuple[int, dict]] = [
+                (idx, t) for idx, t in enumerate(tables)
+                if isinstance(t, dict) and is_laduc_ticker_table(t)
+            ]
+            ticker_indices = {idx for idx, _ in ticker_tables_all}
+            # If a table matches both, prefer ticker (user wants ticker classification strict).
+            chartable = [(idx, t) for idx, t in chartable_all if idx not in ticker_indices][:2]
+            ticker_tables = ticker_tables_all[:2]
+            if not chartable and not ticker_tables:
+                return tables, ""
+            chart_type_by_idx = {
+                orig_idx: (_build_chart_props_from_table(t) or {}).get("chartType", "auto")
+                for orig_idx, t in chartable
+            }
+            preferred_layout_by_idx: dict[int, str] = {}
+            for orig_idx, _ in chartable:
+                preferred_layout_by_idx[orig_idx] = "market_annotation"
+            for orig_idx, _ in ticker_tables:
+                preferred_layout_by_idx[orig_idx] = "ticker"
+            bindings = chartable + ticker_tables
+            payload = build_chartable_tables_payload(
+                bindings,
+                chart_type_by_index=chart_type_by_idx,
+                preferred_layout_by_index=preferred_layout_by_idx,
+                max_rows=20,
+            )
+            return tables, payload
+
+        _laduc_loop = asyncio.get_event_loop()
+        _all_extracted_tables, chartable_tables_json = await _laduc_loop.run_in_executor(
+            None, _laduc_classify_tables
+        )
+
+    elif template_id == "economist":
+        # economist: bind scraped tables to the data layouts upfront so
+        # _merge_economist_chart_props finds a real TABLE_DATA_HINT_JSON per
+        # scene (without this, every chart scene falls back to prose).
+        #   chart_line  → time-series tables (incl. OHLCV — line-chartable)
+        #   chart_bar   → remaining categorical bar/histogram tables
+        #   data_table  → remaining ranked tables (headers + ≥3 multi-col rows)
+        _econ_blog_text = getattr(project, "blog_content", None) or ""
+
+        def _econ_classify_tables() -> tuple[list, str]:
+            tables = extract_tables_from_content(_econ_blog_text)
+            if not tables:
+                return tables, ""
+            tmp_hint = build_table_context_hint(tables, max_tables=len(tables))
+            line_tables = get_line_chartable_tables_from_visual_hint(tmp_hint)
+            line_indices = {idx for idx, _ in line_tables}
+            bar_tables = [
+                (idx, t)
+                for idx, t in get_chartable_tables_from_visual_hint(tmp_hint)
+                if idx not in line_indices
+            ]
+            bar_indices = {idx for idx, _ in bar_tables}
+            used = line_indices | bar_indices
+
+            def _multi_col(t: dict) -> bool:
+                return any(isinstance(r, list) and len(r) >= 2 for r in (t.get("rows") or []))
+
+            table_tables = [
+                (idx, t)
+                for idx, t in enumerate(tables)
+                if idx not in used
+                and (t.get("headers") or [])
+                and len(t.get("rows") or []) >= 3
+                and _multi_col(t)
+            ]
+            bindings = (line_tables + bar_tables + table_tables)[:3]
+            if not bindings:
+                return tables, ""
+            chart_type_by_idx = {
+                orig_idx: (_build_chart_props_from_table(t) or {}).get("chartType", "auto")
+                for orig_idx, t in bindings
+            }
+            layout_by_idx = {
+                orig_idx: (
+                    "chart_line" if orig_idx in line_indices
+                    else "chart_bar" if orig_idx in bar_indices
+                    else "data_table"
+                )
+                for orig_idx, _ in bindings
+            }
+            payload = build_chartable_tables_payload(
+                bindings,
+                chart_type_by_index=chart_type_by_idx,
+                preferred_layout_by_index=layout_by_idx,
+                max_rows=20,
+            )
+            return tables, payload
+
+        _econ_loop = asyncio.get_event_loop()
+        _all_extracted_tables, chartable_tables_json = await _econ_loop.run_in_executor(
+            None, _econ_classify_tables
+        )
+
+    elif template_id in CHART_TICKER_TEMPLATE_LAYOUTS:
+        # Built-in templates that opt into the chartTable/tickerTable data-viz
+        # pipeline use the shared classifier — chartable tables bind to the
+        # template's "chart" layout, ticker-like tables to its "ticker" layout.
+        # Add a new template by registering its two layout names in
+        # CHART_TICKER_TEMPLATE_LAYOUTS — no new branch needed here. Run in the
+        # thread pool so CPU-bound HTML parsing doesn't block the event loop.
+        _chart_layout, _ticker_layout = CHART_TICKER_TEMPLATE_LAYOUTS[template_id]
+        _dv_blog_text = getattr(project, "blog_content", None) or ""
+
+        def _classify_tables() -> tuple[list, str]:
+            return classify_chart_tables_for_template(
+                _dv_blog_text,
+                chart_layout=_chart_layout,
+                ticker_layout=_ticker_layout,
+            )
+
+        _dv_loop = asyncio.get_event_loop()
+        _all_extracted_tables, chartable_tables_json = await _dv_loop.run_in_executor(
+            None, _classify_tables
+        )
+
+    # Release the DB connection during the long-running DSPy/LLM calls below.
+    # Neon (serverless PostgreSQL) closes idle connections, and pool_pre_ping
+    # only verifies liveness on checkout — a session already holding a
+    # connection through a 30-60s LLM await can't be re-pinged, so the next
+    # commit fails with "server closed the connection unexpectedly". We
+    # capture the values we'll need post-LLM, drop the connection, run both
+    # LLM calls cold, then re-attach the project to a fresh connection.
+    _project_id = project.id
+    _project_aspect_ratio = getattr(project, "aspect_ratio", "landscape") or "landscape"
+    _project_blog_content = project.blog_content
+    _project_animation_instructions = (getattr(project, "animation_instructions", None) or "").strip()
+    db.close()
+
+    _template_style_hint = get_script_style_hint(template_id) if template_id else ""
+
+    generation_style = generation_style_for_project(project)
+    effective_instruction = (user_instruction or "").strip() or _project_animation_instructions
+    result = await generator.generate(
+        blog_content=_project_blog_content,
+        blog_images=image_paths,
+        hero_image=hero_image,
+        aspect_ratio=_project_aspect_ratio,
+        video_style=generation_style,
+        style_guidance=style_guidance,
+        video_length=effective_video_length,
+        layout_catalog=layout_catalog,
+        content_language=content_language,
+        include_ending_socials=include_ending_socials,
+        chartable_tables_json=chartable_tables_json,
+        template_id=template_id or "",
+        template_style_hint=_template_style_hint,
+        user_instruction=effective_instruction,
+        expressive=bool(getattr(project, "voice_emotion", None)),
+        progress_callback=progress_callback,
+    )
+
+    # Template-aware display text generation (second LLM call — still no DB held)
+    scenes_raw: list[dict] = result["scenes"]
+    scenes_raw = _sanitize_script_layouts(
+        template_id,
+        scenes_raw,
+        include_ending_socials=include_ending_socials,
+    )
+    display_gen = DisplayTextGenerator(
+        template_id,
+        video_style=generation_style,
+        content_language=content_language,
+        style_guidance=style_guidance,
+    )
+    display_texts = await display_gen.generate_for_scenes(scenes_raw)
+
+    # Old Documentary Reel opens on a voiced 3-2-1 academy leader. It is a
+    # system-owned scene: the LLM never writes it (docreel_countdown is not in
+    # valid_layouts), so it is prepended here instead. The system-owned generic
+    # countdown narration is recorded with the voice selected for the project.
+    #
+    # Must run AFTER _sanitize_script_layouts: that pass forces hero_layout
+    # (docreel_slate) onto index 0 and strips it from every other index, so
+    # inserting earlier would both overwrite the countdown and strand the slate.
+    if _scenes_need_countdown_leader(template_id):
+        # Defensive: strip any countdown the upstream stages may have produced,
+        # so the leader can only ever exist once and only at index 0.
+        _kept = [
+            (s, d)
+            for s, d in zip(scenes_raw, display_texts)
+            if (s.get("preferred_layout") or "") != DOCREEL_COUNTDOWN_LAYOUT
+        ]
+        scenes_raw[:] = [s for s, _ in _kept]
+        display_texts[:] = [d for _, d in _kept]
+        scenes_raw.insert(0, _build_docreel_countdown_scene())
+        display_texts.insert(0, "")
+
+    # Custom templates get dedicated data-viz scenes inserted just before the
+    # outro — EXTRA to the content scenes, mirroring the built-in templates'
+    # chart/table pair. The CHART scene is always present (seeded when the
+    # article has no chartable table) because every custom template now designs
+    # its own chart layout; the TABLE scene is added only when there is real
+    # tabular data to transcribe. See _build_custom_dataviz_scenes.
+    if is_custom_template(template_id):
+        _dataviz_scenes = _build_custom_dataviz_scenes(getattr(project, "blog_content", None) or "")
+        if _dataviz_scenes:
+            _insert_at = max(1, len(scenes_raw) - 1) if len(scenes_raw) > 1 else len(scenes_raw)
+            for _offset, _dv in enumerate(_dataviz_scenes):
+                scenes_raw.insert(_insert_at + _offset, _dv)
+                # The scene's OWN display text, never a second copy of its title.
+                # These scenes are injected after DisplayTextGenerator has run,
+                # so this is where their on-screen copy comes from; reusing the
+                # title here is what made them render as a single line.
+                display_texts.insert(_insert_at + _offset, _dv["display_text"])
+            print(
+                f"[F7-DEBUG] [CUSTOM-DATAVIZ] injected {len(_dataviz_scenes)} dedicated "
+                f"data-viz scenes at index {_insert_at} "
+                f"({[s['_scene_type'] for s in _dataviz_scenes]})"
+            )
+
+    # Re-attach the original project instance to a fresh connection.
+    # add() on a detached-but-previously-persistent instance issues UPDATE on
+    # next flush (not INSERT), and pool_pre_ping verifies the new checkout.
+    db.add(project)
+    project.name = result["title"]
+
+    # Clear existing scenes for this project (moved here so it runs in the
+    # same fresh transaction as the new scene inserts).
+    db.query(Scene).filter(Scene.project_id == project.id).delete()
+
+    # Scene-scoped edit history cascade-deletes with the scenes above. But scene
+    # deletion, addition and reordering are tracked as PROJECT-level rows
+    # (scene_deleted / scene_added / scene_order) that reference scene ids by value, so
+    # they don't cascade — drop them explicitly. A full script regen is a brand-new set
+    # of scenes; those old entries would reference now-nonexistent scene ids and revert
+    # to no-ops.
+    from app.models.Project_edit_history import ProjectEditHistory
+    db.query(ProjectEditHistory).filter(
+        ProjectEditHistory.project_id == project.id,
+        ProjectEditHistory.field_name.in_(["scene_deleted", "scene_added", "scene_order"]),
+    ).delete(synchronize_session=False)
+    db.flush()
+
+    is_custom = is_custom_template(template_id)
+
+    # Economist: precompute chartable tables by type + track which indices have
+    # already been bound, so a chart_line/chart_bar/data_table scene that the LLM
+    # left WITHOUT a data_table_index still gets a real (and distinct) table —
+    # mirroring laduc's market_annotation auto-find. Without this a chart scene
+    # reaches scene-gen with no TABLE_DATA_HINT_JSON and falls back to prose.
+    _econ_chartable: list[tuple[int, str]] = []
+    _econ_used_table_indices: set[int] = set()
+    if template_id == "economist" and _all_extracted_tables:
+        for _ci, _ct in enumerate(_all_extracted_tables):
+            _cp = _build_chart_props_from_table(_ct) or {}
+            if _cp.get("chartType"):
+                _econ_chartable.append((_ci, str(_cp.get("chartType"))))
+
+    def _econ_autofind_index(layout_id: str) -> int | None:
+        """Pick the first unused chartable table whose shape matches `layout_id`."""
+        want_line = layout_id == "chart_line"
+        # First pass: prefer a type match (line→line; bar/data_table→bar/histogram).
+        for _idx, _ctype in _econ_chartable:
+            if _idx in _econ_used_table_indices:
+                continue
+            is_line = _ctype == "line"
+            if want_line == is_line:
+                return _idx
+        # Second pass: any unused chartable table.
+        for _idx, _ctype in _econ_chartable:
+            if _idx not in _econ_used_table_indices:
+                return _idx
+        return None
+
+    for i, (scene_data, display_text) in enumerate(zip(scenes_raw, display_texts)):
+        vd = scene_data["visual_description"]
+        preferred = scene_data.get("preferred_layout")
+        if preferred == "ending_socials":
+            cta = (scene_data.get("cta_button_text") or "").strip()
+            if cta:
+                vd = prepend_b2v_cta_to_visual(cta, vd)
+            # Custom templates have no `ending_socials` layout — their closing
+            # scene is `outro`. This used to clear the value to None and rely on
+            # archetype matching, but nothing downstream reads preferred_layout
+            # for custom templates, so the intent was lost and the scene ended up
+            # re-stamped with an arrangement name. Naming `outro` explicitly keeps
+            # it in the template's own vocabulary and lets the layouts_without_image
+            # policy (which lists `outro`) actually match.
+            if is_custom:
+                preferred = "outro"
+        elif (
+            (
+                scene_data.get("preferred_layout") in {
+                    "data_visualization", "terminal_chart", "terminal_table",
+                    "terminal_dataviz", "market_annotation", "ticker",
+                    # Economist data layouts.
+                    "chart_line", "chart_bar", "data_table",
+                }
+                # Built-in data-viz templates (matrix/spotlight/chronicle) — their
+                # *_data (+ bar/histogram variants) and *_ticker layouts also need
+                # the bound table embedded so _merge_laduc_chart_props can chart it.
+                or is_builtin_chart_layout(str(scene_data.get("preferred_layout") or ""))
+                or is_builtin_ticker_layout(str(scene_data.get("preferred_layout") or ""))
+            )
+            and _all_extracted_tables
+        ):
+            # Embed only the single bound table so scene_gen has exactly one table to use.
+            bound_idx = scene_data.get("data_table_index")
+            # For terminal_chart with no bound index, auto-find the first OHLCV table.
+            if scene_data.get("preferred_layout") == "terminal_chart" and not isinstance(bound_idx, int):
+                for _ci, _ct in enumerate(_all_extracted_tables):
+                    if is_candlestick_table(_ct):
+                        bound_idx = _ci
+                        break
+            # For laduc/FJ market_annotation with no bound index, auto-find the first chartable table.
+            if (
+                _is_laduc_or_fj(template_id)
+                and scene_data.get("preferred_layout") == "market_annotation"
+                and not isinstance(bound_idx, int)
+            ):
+                for _ci, _ct in enumerate(_all_extracted_tables):
+                    if not is_candlestick_table(_ct):
+                        bound_idx = _ci
+                        break
+            # Economist chart_line/chart_bar/data_table with no bound index:
+            # auto-find a distinct chartable table so the chart never renders empty.
+            if (
+                template_id == "economist"
+                and scene_data.get("preferred_layout") in {"chart_line", "chart_bar", "data_table"}
+                and not isinstance(bound_idx, int)
+            ):
+                _auto = _econ_autofind_index(scene_data["preferred_layout"])
+                if _auto is not None:
+                    bound_idx = _auto
+                    scene_data["data_table_index"] = _auto
+            if isinstance(bound_idx, int) and 0 <= bound_idx < len(_all_extracted_tables):
+                if template_id == "economist":
+                    _econ_used_table_indices.add(bound_idx)
+                _bound_table = _all_extracted_tables[bound_idx]
+                _mr = 60 if is_candlestick_table(_bound_table) else 20
+                hint = build_table_context_hint([_bound_table], max_tables=1, max_rows=_mr)
+                if hint:
+                    vd = (vd.rstrip() + "\n\n" + hint).strip()
+        elif (
+            # Recovery: LLM wrote a non-data layout but data_table_index is still bound —
+            # the table binding was supposed to force a data layout.
+            # Embed the table hint so scene_gen has the data and can produce the right chart.
+            (template_id == "bloomberg" or _is_laduc_or_fj(template_id) or template_id == "economist")
+            and scene_data.get("data_table_index") is not None
+            and _all_extracted_tables
+        ):
+            _fallback_idx = scene_data.get("data_table_index")
+            if isinstance(_fallback_idx, int) and 0 <= _fallback_idx < len(_all_extracted_tables):
+                _fb_table = _all_extracted_tables[_fallback_idx]
+                _fb_hint = build_table_context_hint([_fb_table], max_tables=1, max_rows=20)
+                if _fb_hint:
+                    vd = (vd.rstrip() + "\n\n" + _fb_hint).strip()
+                # Upgrade preferred_layout so scene_gen uses the right component.
+                if template_id == "bloomberg":
+                    if not is_candlestick_table(_fb_table):
+                        scene_data["preferred_layout"] = "terminal_dataviz"
+                    else:
+                        scene_data["preferred_layout"] = "terminal_chart"
+                elif _is_laduc_or_fj(template_id):
+                    scene_data["preferred_layout"] = (
+                        "ticker" if is_laduc_ticker_table(_fb_table) else "market_annotation"
+                    )
+                elif template_id == "economist":
+                    _fb_type = (_build_chart_props_from_table(_fb_table) or {}).get("chartType", "")
+                    scene_data["preferred_layout"] = (
+                        "chart_line" if _fb_type == "line" else "chart_bar"
+                    )
+        elif scene_data.get("preferred_layout") == "terminal_ticker":
+            # Inject real scraped ticker data so scene_gen overrides LLM-hallucinated values.
+            _blog_text = getattr(project, "blog_content", None) or ""
+            _ticker_items = extract_ticker_items_from_blog(_blog_text, max_items=10)
+            if _ticker_items:
+                hint = "═══ SCRAPED_TICKER_ROWS ═══\n" + "\n".join(_ticker_items) + "\n═══ END_SCRAPED_TICKER_ROWS ═══"
+                vd = (vd.rstrip() + "\n\n" + hint).strip()
+        # Re-read preferred_layout: the recovery elif above may have upgraded it
+        # (e.g. data_impact → market_annotation). The local `preferred` captured at
+        # the top of this loop was set before that upgrade, so it would be stale.
+        preferred = scene_data.get("preferred_layout")
+        scene = Scene(
+            project_id=project.id,
+            order=i + 1,
+            title=scene_data["title"],
+            narration_text=scene_data["narration"],
+            visual_description=vd,
+            duration_seconds=scene_data.get("duration_seconds", 10),
+            display_text=display_text,
+            preferred_layout=preferred,
+            # Dedicated data-viz scenes (custom templates) carry an explicit
+            # scene_type so GeneratedVideo routes them to the kit chart/table scenes.
+            scene_type=scene_data.get("_scene_type"),
+        )
+        db.add(scene)
+
+    project.status = ProjectStatus.SCRIPTED
+    db.commit()
+    db.refresh(project)
+
+    # Surface the analyzer's distilled summary so callers (e.g. the regenerate
+    # worker) can hand it to downstream layout planners. Empty when no user
+    # instruction was provided.
+    return (result or {}).get("_user_instruction_summary", "") or ""
+
+
+async def _generate_scenes(
+    project: Project,
+    db: Session,
+    skip_voiceover: bool = False,
+    preserve_image_assignments: bool = True,
+    redistribute_images: bool = False,
+    strict_voiceover: bool = False,
+    verbatim_narration: bool = False,
+):
+    """Generate voiceovers and scene layout descriptors concurrently, then write Remotion data.
+
+    Voiceovers and scene descriptors are independent — descriptors only need
+    title/narration/visual_description which don't change during TTS generation.
+    Running them concurrently via asyncio.gather cuts wall-clock time significantly.
+
+    When ``skip_voiceover`` is True the TTS / narration-expansion step is skipped entirely
+    and the existing ``voiceover_path`` / ``duration_seconds`` on each scene are preserved.
+    Used by the "regenerate script" flow, which keeps the original narration + audio and only
+    refreshes titles, on-screen text, visuals, and layouts.
+
+    ``verbatim_narration`` skips the LLM narration-expansion phase and speaks each scene's
+    ``narration_text`` exactly as stored. Set only right after the user approves the initial
+    script review, so their edited wording reaches the voiceover unchanged instead of being
+    silently rephrased by the normal expansion step.
+    """
+    # Force a fresh DB checkout at the start of this step. Pipeline-step
+    # boundaries (script → scenes) leave a connection that may have been
+    # silently dropped by Neon during the previous LLM call. pool_pre_ping
+    # can miss SSL/Windows-10053 failures because they manifest mid-query
+    # rather than on the SELECT-1 probe. Closing here releases any stale
+    # connection back to the pool; the next query checks out a fresh one.
+    _project_id = project.id
+    try:
+        db.close()
+    except OperationalError as close_err:
+        logger.warning(
+            "[PIPELINE] Project %s: transient DB disconnect on db.close() before scene generation; invalidating session and retrying query: %s",
+            _project_id,
+            close_err,
+        )
+        try:
+            db.invalidate()
+        except Exception:
+            pass
+
+    try:
+        project = db.query(Project).filter(Project.id == _project_id).first()
+    except OperationalError as query_err:
+        logger.warning(
+            "[PIPELINE] Project %s: transient DB disconnect on pre-scenes reload; invalidating and retrying once: %s",
+            _project_id,
+            query_err,
+        )
+        db.invalidate()
+        project = db.query(Project).filter(Project.id == _project_id).first()
+
+    if project is None:
+        raise RuntimeError(f"Project {_project_id} disappeared before scene generation")
+
+    # Preserve personalized/custom-style narration verbatim so a second rewrite
+    # cannot dilute it. Concrete built-ins use the expander with their immutable
+    # project snapshot below.
+    from app.services.script_style import is_personalized_style, style_guidance_for_project
+    if is_personalized_style(getattr(project, "video_style", "")):
+        verbatim_narration = True
+
+    scenes = project.scenes
+
+    # Wealth Your Way: freeze the ending scene's narration + title BEFORE the
+    # voiceover task reads them, so TTS speaks the locked client copy. The
+    # descriptor override later in this function locks the on-screen text and
+    # CTAs separately; this just makes sure the audio matches.
+    # Skipped when skip_voiceover is set — that flow keeps the existing narration/audio
+    # and nulling voiceover_path here would leave the ending scene silent (no TTS re-run).
+    _is_wealth = project.template in WEALTH_TEMPLATE_IDS
+    if _is_wealth and scenes and not skip_voiceover and not verbatim_narration:
+        for s in scenes:
+            if getattr(s, "preferred_layout", None) == "ending_socials":
+                s.title = WEALTH_ENDING_TITLE
+                s.narration_text = WEALTH_ENDING_NARRATION
+                s.voiceover_path = None
+        db.commit()
+        db.refresh(project)
+        scenes = project.scenes
+
+    # Build scenes_data BEFORE launching concurrent tasks (captures immutable fields).
+    # Each data_visualization scene already carries its single bound TABLE_DATA_HINT_JSON
+    # (embedded during _generate_script); no blanket append needed here.
+    scenes_data = []
+    for s in scenes:
+        _, vis = strip_b2v_cta_from_visual(s.visual_description or "")
+        scenes_data.append(
+            {
+                "title": s.title,
+                "narration": s.narration_text,
+                "display_text": s.display_text,
+                "visual_description": vis,
+                "preferred_layout": getattr(s, "preferred_layout", None),
+            }
+        )
+
+    # Prepare scene descriptor generator
+    db.refresh(project)
+    template_id = validate_template_id(
+        project.template if project.template else "default",
+        db=db,
+        user_id=project.user_id,
+    )
+    logger.info("[PIPELINE] Project %s: template='%s', validated='%s'", project.id, project.template, template_id)
+    supports_ending_socials = "ending_socials" in get_valid_layouts(template_id)
+    scene_gen = TemplateSceneGenerator(template_id)
+    image_filenames = [
+        a.filename for a in project.assets if a.asset_type.value == "image"
+    ]
+
+    # ── Task 1: Voiceovers ───────────────────────────────────────
+    async def _voiceover_task():
+        if skip_voiceover:
+            # Regenerate-script flow: keep existing narration + audio untouched.
+            logger.info("[PIPELINE] Skipping voiceover generation for project %s (skip_voiceover)", project.id)
+            return
+        if getattr(project, "voice_gender", None) == "none":
+            logger.info("[PIPELINE] Skipping voiceover — no-audio mode for project %s", project.id)
+            from app.services.voiceover import DURATION_PAD
+            for scene in scenes:
+                if getattr(scene, "preferred_layout", None) == DOCREEL_COUNTDOWN_LAYOUT:
+                    # In the user's explicit no-audio mode the countdown stays
+                    # silent, but it must still keep the template's fixed 3s
+                    # timing instead of stretching to the normal scene minimum.
+                    scene.voiceover_path = None
+                    continue
+                if scene.narration_text:
+                    word_count = len(scene.narration_text.split())
+                    scene.duration_seconds = round(
+                        max(settings.MIN_SCENE_DURATION_SECONDS, max(5.0, word_count / 2.5) + DURATION_PAD),
+                        1,
+                    )
+                else:
+                    scene.duration_seconds = round(max(settings.MIN_SCENE_DURATION_SECONDS, 5.0), 1)
+                scene.voiceover_path = None
+            db.commit()
+        else:
+            content_lang = get_content_language_for_project(project)
+            # Advanced Options (paid) projects carry voice tuning in voice_emotion; those run on v3
+            # with the [excited] tag, so write the narration emotively too (emphasis / "!" / CAPS).
+            expressive = bool(getattr(project, "voice_emotion", None))
+            vo_paths = await generate_all_voiceovers(
+                scenes, db,
+                video_style=getattr(project, "video_style", None) or "explainer",
+                style_guidance=style_guidance_for_project(project),
+                content_language=content_lang,
+                expressive=expressive,
+                verbatim=verbatim_narration,
+            )
+            # generate_all_voiceovers swallows per-scene TTS failures (returns "" for a
+            # failed scene). In strict mode (regenerate-script, which has a restorable
+            # audio backup) treat any narrated scene that produced no audio as a hard
+            # failure so the caller can roll back to the original voiceovers instead of
+            # silently shipping missing audio.
+            if strict_voiceover:
+                failed = [
+                    scenes[i].order
+                    for i in range(len(scenes))
+                    if (scenes[i].narration_text or "").strip()
+                    and not (vo_paths[i] if i < len(vo_paths) else "")
+                ]
+                if failed:
+                    raise RuntimeError(
+                        f"Voiceover regeneration failed for {len(failed)} scene(s): {failed}"
+                    )
+
+    # ── Task 2: Scene descriptors (pure LLM, no DB writes) ──────
+    async def _descriptor_task():
+        content_lang = get_content_language_for_project(project)
+
+        if is_custom_template(template_id):
+            # NEW: Single batch call replaces 16 per-scene DSPy calls
+            from app.services.content_classifier import (
+                extract_structured_content_batch,
+                reconcile_layouts_and_content,
+            )
+
+            # What each layout is BUILT FOR, so extraction can produce the shape
+            # the scene's ALREADY-CHOSEN layout needs rather than guessing a
+            # content type and letting a matcher pick a layout afterwards.
+            _layout_best_for: dict = {}
+            _layout_content_types: dict = {}
+            _meta: dict = {}
+            try:
+                from app.services.template_service import get_meta
+
+                _meta = get_meta(template_id) or {}
+                _layout_best_for = _meta.get("layout_best_for") or {}
+                _layout_content_types = _meta.get("layout_content_types") or {}
+            except Exception:  # noqa: BLE001 — a missing meta must not block generation
+                _layout_best_for = {}
+                _layout_content_types = {}
+
+            # The per-scene declared prop schema, so the same call can also
+            # give those fields article-derived values. Without it every project
+            # on a template ships the designer's literal — one real template put
+            # "Everything, in one app" on every video made from it.
+            _layout_prop_schemas: dict = {}
+            try:
+                _lps = (_meta.get("layout_prop_schema") or {}) if _meta else {}
+                _layout_prop_schemas = {
+                    lid: (entry.get("fields") or [])
+                    for lid, entry in _lps.items()
+                    if isinstance(entry, dict)
+                }
+            except Exception:  # noqa: BLE001 — metadata must not block generation
+                _layout_prop_schemas = {}
+
+            structured_contents = await extract_structured_content_batch(
+                scenes_data,
+                content_language=content_lang,
+                layout_best_for=_layout_best_for,
+                layout_prop_schemas=_layout_prop_schemas,
+            )
+
+            # Make the layout and the props agree, ONCE, before anything is
+            # written. Forces the bookends to "plain" (the intro carries the
+            # title, the outro the CTA) and moves a content scene whose
+            # narration could not fill its assigned layout onto one built for
+            # what it actually has. Returns the final layout per scene.
+            _reconciled = reconcile_layouts_and_content(
+                scenes_data, structured_contents, _layout_content_types
+            )
+
+            # Build descriptors in the format the rest of the pipeline expects
+            # layoutConfig must be present so downstream checks detect custom template scenes
+            # Note: imageBoxAspectRatio is injected per-scene later in remotion.py once
+            # the actual content variant index is known (via match_scenes_to_archetypes).
+            descriptors = []
+            for _i, sc in enumerate(structured_contents):
+                # Values for the scene's own declared props ride under a private
+                # key on the extraction result; lift them into layoutProps,
+                # which is where the scene reads them, and drop the marker.
+                _filled_props = sc.pop("__layoutProps", None)
+                _d = {
+                    "structuredContent": sc,
+                    "layoutConfig": {},
+                }
+                if isinstance(_filled_props, dict) and _filled_props:
+                    # UNDER whatever a later stage writes: image/video
+                    # assignment, framing and chart binding all land in the same
+                    # bag and must win over a generated value.
+                    _d["layoutProps"] = dict(_filled_props)
+                # Record the decision on the descriptor too, so every downstream
+                # reader (render, preview, editor) resolves the SAME layout
+                # instead of re-deriving one. Without contentVariantIndex here,
+                # _descriptor_layout_name returns None for content scenes and
+                # the render falls back to archetype matching.
+                _lid = (
+                    _reconciled[_i].get("preferred_layout")
+                    if _i < len(_reconciled) else None
+                ) or ""
+                if _lid in ("intro", "outro"):
+                    _d["sceneTypeOverride"] = _lid
+                elif _lid.startswith("content_"):
+                    try:
+                        _d["contentVariantIndex"] = int(_lid.split("_", 1)[1])
+                        _d["sceneTypeOverride"] = "content"
+                    except (ValueError, IndexError):
+                        pass
+                descriptors.append(_d)
+
+            # Chart data for the 2 dedicated data-viz scenes is bound separately
+            # (into layoutProps) in the descriptor-application loop below, where
+            # both the DB scene and its descriptor are in scope.
+            print(f"[F7-DEBUG] [PIPELINE] Custom template: extracted structured content for {len(descriptors)} scenes in 1 call")
+            return descriptors
+        else:
+            # Built-in templates: keep existing DSPy per-scene generation (works well)
+            result = await scene_gen.generate_all_scenes(
+                scenes_data,
+                image_filenames,
+                accent_color=project.accent_color or "#7C3AED",
+                bg_color=project.bg_color or "#FFFFFF",
+                text_color=project.text_color or "#000000",
+                animation_instructions=project.animation_instructions or "",
+                content_language=content_lang,
+            )
+            return result
+
+    # ── Task 3: Stock-footage clip fetch (own DB session) ───────
+    # Runs alongside voiceover/descriptor generation instead of pausing the
+    # pipeline beforehand. Needs Scene rows with preferred_layout set (already
+    # true — script stage set it before _generate_scenes runs), but must NOT
+    # share `db`: that session is used concurrently by the other two tasks and
+    # SQLAlchemy Session objects aren't safe across concurrent coroutines.
+    stock_footage_wanted = bool(getattr(project, "stock_footage_enabled", False))
+
+    async def _stock_footage_task():
+        """Auto-pick + ingest clips for image-capable scenes. Never raises —
+        a failure here must not block scene generation; worst case some/all
+        scenes are missing a clip and the user fills them in (or rejects
+        everything) at the post-generation review gate."""
+        if not stock_footage_wanted:
+            return
+        sf_db = SessionLocal()
+        try:
+            sf_project = sf_db.query(Project).filter(Project.id == project.id).first()
+            if sf_project is None:
+                return
+            await _prepare_stock_footage_candidates(sf_project, sf_db)
+        except Exception:
+            logger.warning(
+                "[PIPELINE] project=%s: parallel stock footage fetch failed",
+                project.id, exc_info=True,
+            )
+            try:
+                sf_db.rollback()
+            except Exception:
+                pass
+        finally:
+            sf_db.close()
+
+    # Run all three concurrently
+    _, descriptors, _ = await asyncio.gather(
+        _voiceover_task(), _descriptor_task(), _stock_footage_task()
+    )
+
+    # Force a fresh DB checkout. The descriptor task is a long LLM call that
+    # runs concurrently with the voiceover task — if voiceovers finish first,
+    # the main session sits idle through the rest of the descriptor await and
+    # Neon may silently drop the connection. Closing here releases any stale
+    # connection back to the pool; the next query checks out a fresh one.
+    # On Windows + SSL this close can itself raise OperationalError if the TCP
+    # socket is already severed; handle it and invalidate the session so we can
+    # continue with a fresh checkout instead of aborting the whole pipeline.
+    _pid = project.id
+    try:
+        db.close()
+    except OperationalError as close_err:
+        logger.warning(
+            "[PIPELINE] Project %s: transient DB disconnect on db.close() after scene tasks; invalidating session and retrying query: %s",
+            _pid,
+            close_err,
+        )
+        try:
+            db.invalidate()
+        except Exception:
+            pass
+
+    try:
+        project = db.query(Project).filter(Project.id == _pid).first()
+    except OperationalError as query_err:
+        logger.warning(
+            "[PIPELINE] Project %s: transient DB disconnect on post-close reload; invalidating and retrying once: %s",
+            _pid,
+            query_err,
+        )
+        db.invalidate()
+        project = db.query(Project).filter(Project.id == _pid).first()
+
+    if project is None:
+        raise RuntimeError(f"Project {_pid} disappeared during scene generation")
+
+    # Re-load scenes to pick up voiceover changes from per-thread DB sessions.
+    # expire_all is now redundant (db.close already cleared the identity map),
+    # but kept as a no-op safeguard in case future code re-fetches before this.
+    # This freshness also carries the stock task's `assignedVideo` writes: it
+    # commits on its OWN session (sf_db) and asyncio.gather has already joined,
+    # so the rows are committed — but only a post-close/expire read sees them.
+    # The descriptor loop below reads scene.remotion_code to carry clips across
+    # the rebuild, so a stale load here would silently orphan every clip.
+    db.expire_all()
+    scenes = project.scenes
+
+    # Ending scene social icons: only enable platforms that appear in scraped content.
+    social_flags = detect_social_platforms_in_text(getattr(project, "blog_content", None) or "")
+    ending_socials_default = {
+        "facebook": {"enabled": bool(social_flags.get("facebook")), "label": "Facebook"},
+        "instagram": {"enabled": bool(social_flags.get("instagram")), "label": "Instagram"},
+        "youtube": {"enabled": bool(social_flags.get("youtube")), "label": "YouTube"},
+        "medium": {"enabled": bool(social_flags.get("medium")), "label": "Medium"},
+        "substack": {"enabled": bool(social_flags.get("substack")), "label": "Substack"},
+        "linkedin": {"enabled": bool(social_flags.get("linkedin")), "label": "LinkedIn"},
+        "tiktok": {"enabled": bool(social_flags.get("tiktok")), "label": "TikTok"},
+    }
+
+    raw_blog_url = (getattr(project, "blog_url", None) or "").strip()
+    source_link = (
+        raw_blog_url
+        if raw_blog_url and not raw_blog_url.startswith("upload://")
+        else ""
+    )
+
+    # Store descriptors as JSON in remotion_code, optionally preserving existing image assignments
+    for i, (scene, descriptor) in enumerate(zip(scenes, descriptors)):
+        # Dedicated data-viz scenes: recover the bound table from the scene's
+        # visual_description into the descriptor's layoutProps (editable + read by
+        # the kit DataChartScene/DataTableScene at render time).
+        if _bind_dataviz_layout_props(scene, descriptor):
+            sc = descriptor.setdefault("structuredContent", {})
+            sc["contentType"] = "dataviz"
+
+        # The documentary countdown leader is a fixed, system-owned scene. It is
+        # deliberately absent from the plannable layout set, so the scene
+        # generator can't name it and emits the hero layout instead — which the
+        # `scene.preferred_layout = resolve_base_layout(...)` write further down
+        # would then persist, turning the leader into a second empty slate.
+        # Pin the descriptor back to the countdown and skip the variant/rewrite
+        # path entirely. Same shape as the ending_socials override just below.
+        if getattr(scene, "preferred_layout", None) == DOCREEL_COUNTDOWN_LAYOUT:
+            countdown_props = {}
+            try:
+                stored_descriptor = (
+                    json.loads(scene.remotion_code) if scene.remotion_code else {}
+                )
+                stored_props = stored_descriptor.get("layoutProps", {})
+                if isinstance(stored_props, dict):
+                    countdown_props = stored_props
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+            descriptor["layout"] = DOCREEL_COUNTDOWN_LAYOUT
+            # The TTS task runs concurrently and writes countdownCueSeconds into
+            # the stored descriptor. Preserve those audio alignment cues here.
+            descriptor["layoutProps"] = countdown_props
+            scene.remotion_code = json.dumps(descriptor)
+            continue
+
+        # DSPy appends an ending scene with preferred_layout="ending_socials" when the template supports it.
+        # We override the descriptor here so Remotion can render the themed ending consistently.
+        if getattr(scene, "preferred_layout", None) == "ending_socials" and supports_ending_socials:
+            if template_id in WEALTH_TEMPLATE_IDS:
+                # Client-locked ending: every wealth_your_way video closes with the
+                # same headline, sub-copy, and Subscribe/Buy pills. No LLM input.
+                descriptor = {
+                    "layout": "ending_socials",
+                    "layoutProps": {
+                        "hideImage": True,
+                        "socials": ending_socials_default,
+                        "showWebsiteButton": True,
+                        "ctaButtonText": WEALTH_ENDING_CTA_TEXT,
+                        "websiteLink": WEALTH_SUBSTACK_URL,
+                        "secondaryCtaButtonText": WEALTH_ENDING_SECONDARY_CTA_TEXT,
+                        "secondaryWebsiteLink": WEALTH_AMAZON_URL,
+                    },
+                }
+                if not verbatim_narration:
+                    scene.title = WEALTH_ENDING_TITLE
+                    scene.narration_text = WEALTH_ENDING_NARRATION
+            else:
+                cta_from_visual, _ = strip_b2v_cta_from_visual(scene.visual_description or "")
+                cta = (cta_from_visual or "").strip()
+                try:
+                    if scene.remotion_code:
+                        old_desc = json.loads(scene.remotion_code)
+                        old_lp = old_desc.get("layoutProps") or {}
+                        old_cta = old_lp.get("ctaButtonText")
+                        if isinstance(old_cta, str) and old_cta.strip():
+                            cta = old_cta.strip()
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                if not cta:
+                    cta = "Get started"
+                descriptor = {
+                    "layout": "ending_socials",
+                    "layoutProps": {
+                        "hideImage": True,
+                        "socials": ending_socials_default,
+                        "showWebsiteButton": bool(source_link),
+                        "websiteLink": source_link,
+                        "ctaButtonText": cta,
+                    },
+                }
+
+        # Custom templates: stamp the scene TYPE so the descriptor is
+        # self-describing from its very first write.
+        #
+        # These used to carry only structuredContent + an empty layoutConfig, so
+        # write_remotion_data could not tell an intro from an outro and fell back
+        # to one layout id for the entire video — which is what made the image
+        # cascade strip every scene's image and clip at the end of generation.
+        # The renderer resolves this itself now (see _resolve_custom_scene_types,
+        # which also repairs projects already in the DB), but stamping it here
+        # means a freshly generated descriptor is never ambiguous.
+        #
+        # scene.scene_type WINS where set — it is how the injected data-viz
+        # scenes are marked, and a positional guess would relabel them as plain
+        # content. Only the TYPE is decided here; the content variant comes from
+        # archetype matching in remotion.py.
+        if is_custom_template(template_id):
+            _db_type = getattr(scene, "scene_type", None)
+            if _db_type in ("intro", "content", "outro", "dataviz_chart", "dataviz_table"):
+                descriptor["sceneTypeOverride"] = _db_type
+            elif i == 0:
+                descriptor["sceneTypeOverride"] = "intro"
+            elif i == len(scenes) - 1 and len(scenes) > 1:
+                descriptor["sceneTypeOverride"] = "outro"
+            else:
+                descriptor["sceneTypeOverride"] = "content"
+
+        # Custom templates: inject CTA props into the last (outro) scene
+        if is_custom_template(template_id) and i == len(scenes) - 1 and len(scenes) > 1:
+            cta_from_visual, _ = strip_b2v_cta_from_visual(scene.visual_description or "")
+            cta = (cta_from_visual or "").strip()
+            try:
+                if scene.remotion_code:
+                    old_desc = json.loads(scene.remotion_code)
+                    old_cta_props = old_desc.get("ctaProps") or {}
+                    old_cta = old_cta_props.get("ctaButtonText")
+                    if isinstance(old_cta, str) and old_cta.strip():
+                        cta = old_cta.strip()
+            except (json.JSONDecodeError, TypeError):
+                pass
+            if not cta:
+                cta = "Get started"
+            # `ctas` IS WHAT THE OUTRO ACTUALLY RENDERS FROM.
+            #
+            # The ending contract tells every generated outro to map
+            # `(props.ctaProps?.ctas ?? [])` and draw a button per entry, with
+            # the singular pair only as a fallback. The pipeline never wrote
+            # that array, so a contract-compliant outro mapped an empty list and
+            # drew NOTHING — the CTA button was simply missing from the video
+            # while ctaButtonText sat correctly in the descriptor.
+            #
+            # Both shapes are written: the array for the documented path, the
+            # singular pair for outros generated before it and for the
+            # fallback the contract still describes.
+            _cta_entry = {"ctaButtonText": cta}
+            if source_link:
+                _cta_entry["websiteLink"] = source_link
+            descriptor["ctaProps"] = {
+                "socials": ending_socials_default,
+                # A CTA with a label is worth showing even when there is no link
+                # to attach — this was `bool(source_link)`, which is false for
+                # every `upload://` project, so uploaded-document videos lost
+                # their button entirely.
+                "showWebsiteButton": bool(source_link or cta),
+                "websiteLink": source_link,
+                "ctaButtonText": cta,
+                "ctas": [_cta_entry],
+            }
+
+        has_layout_config = "layoutConfig" in descriptor
+        # `preserve_image_assignments` governs whether this rebuild keeps the
+        # PREVIOUS sequence's visual choices. Stills and clips are treated alike:
+        # a regenerated script is new content, so both are released and
+        # write_remotion_data(redistribute_images=True) re-assigns from scratch —
+        # images first, then clips into whatever no image covered.
+        #
+        # Releasing a clip is NOT the "more videos than scenes" bug that the old
+        # unconditional carry-over was written to fix. That bug was a re-FETCH:
+        # the asset was orphaned and a fresh clip bought for the same scene. It
+        # cannot recur here because the asset survives and is re-placed by the
+        # spare-clip pass in write_remotion_data, and because
+        # _fill_missing_stock_clips_after_scene_gen (which runs first) now trims
+        # `needing` by _unreferenced_clip_count for exactly this reason.
+        if scene.remotion_code:
+            try:
+                old_desc = json.loads(scene.remotion_code)
+                old_lp = old_desc.get("layoutProps") or {}
+                old_assigned = old_lp.get("assignedImage") if preserve_image_assignments else None
+                old_hide = old_lp.get("hideImage") if preserve_image_assignments else None
+                old_video = old_lp.get("assignedVideo") if preserve_image_assignments else None
+                if old_assigned or old_hide or old_video:
+                    if "layoutProps" not in descriptor:
+                        descriptor["layoutProps"] = {}
+                    # Images own the visual slot. A clip and a still are mutually
+                    # exclusive, so when a scene carries both — the descriptor
+                    # generator assigned a still while the concurrent stock task
+                    # fetched a clip for the same scene — the IMAGE wins and the
+                    # clip is left unreferenced for write_remotion_data to place
+                    # on a scene no image could cover.
+                    #
+                    # This branch order is load-bearing: testing `old_video` first
+                    # is what used to pop assignedImage here, producing the
+                    # "images appear, then get replaced by clips" behaviour.
+                    if old_assigned:
+                        descriptor["layoutProps"]["assignedImage"] = old_assigned
+                        for key in (
+                            "imageFocusX",
+                            "imageFocusY",
+                            "imageZoom",
+                            "stockFootageImageFallback",
+                        ):
+                            if key in old_lp:
+                                descriptor["layoutProps"][key] = old_lp[key]
+                        descriptor["layoutProps"].pop("assignedVideo", None)
+                        descriptor["layoutProps"]["hideImage"] = False
+                    elif old_video:
+                        descriptor["layoutProps"]["assignedVideo"] = old_video
+                        # Carry the clip's playback settings and framing with it.
+                        for key in ("videoMuted", "videoVolume", "videoStartSeconds", "imageFocusX", "imageFocusY", "imageZoom"):
+                            if key in old_lp:
+                                descriptor["layoutProps"][key] = old_lp[key]
+                        descriptor["layoutProps"].pop("assignedImage", None)
+                        descriptor["layoutProps"]["hideImage"] = False
+                    if old_hide and not old_video and not old_assigned:
+                        descriptor["layoutProps"]["hideImage"] = True
+            except (json.JSONDecodeError, TypeError):
+                pass
+        # Pick this scene's visual variant. The generator only ever emits base
+        # layout IDs (variants are not in the plannable set), so this is where a
+        # scene gets its style. Deterministic per (project, scene), so a re-render
+        # reproduces the same video while a different project gets a different mix.
+        if not is_custom_template(template_id) and isinstance(descriptor.get("layout"), str):
+            _base_layout = resolve_base_layout(template_id, descriptor["layout"])
+            if descriptor["layout"] == _base_layout:
+                descriptor["layout"] = _seeded_variant(
+                    template_id=template_id,
+                    project_id=project.id,
+                    scene_order=scene.order,
+                    base_layout=_base_layout,
+                )
+        scene.remotion_code = json.dumps(sanitize_chart_descriptor(descriptor))
+        resolved_layout = _descriptor_layout_name(template_id, descriptor)
+        if resolved_layout:
+            # preferred_layout means "which layout FAMILY" — every consumer
+            # validates it against the plannable set, which holds no variant IDs.
+            # The variant itself lives in remotion_code.
+            scene.preferred_layout = resolve_base_layout(template_id, resolved_layout)
+        if has_layout_config:
+            lc = descriptor["layoutConfig"]
+            logger.info(
+                "[PIPELINE] Scene %s stored: layoutConfig.arrangement=%s, elements=%s, decorations=%s",
+                i, lc.get("arrangement"), len(lc.get("elements", [])), lc.get("decorations"),
+            )
+        else:
+            lp_keys = list(descriptor.get("layoutProps", {}).keys())
+            logger.info(
+                "[PIPELINE] Scene %s stored: legacy layout=%s, layoutProps keys=%s",
+                i, descriptor.get("layout"), lp_keys,
+            )
+            if descriptor.get("layout") == "terminal_dataviz":
+                logger.info(
+                    "[PIPELINE] Scene %s terminal_dataviz full layoutProps=%s",
+                    i, json.dumps(descriptor.get("layoutProps", {})),
+                )
+    db.commit()
+    logger.info("[PIPELINE] All %s scene descriptors committed to DB", len(scenes))
+
+    # Re-apply clips the project already owns, BEFORE the reconcile below — that
+    # step skips scenes which already carry `assignedVideo`, so restoring first is
+    # what stops a re-fetch. Runs regardless of `preserve_image_assignments`.
+    # Reconciles BOTH directions against the layouts scene generation actually
+    # resolved: a scene that became image-capable (economist chart_line →
+    # leader_article) gets a clip, and a scene that became no-image
+    # (leader_article → key_indicators) has its unusable clip dropped.
+    if getattr(project, "stock_footage_enabled", False):
+        try:
+            await _fill_missing_stock_clips_after_scene_gen(project, scenes, db, template_id)
+            db.commit()
+        except Exception:
+            logger.warning(
+                "[PIPELINE] project=%s: post-scene-gen stock clip fill failed",
+                project.id, exc_info=True,
+            )
+
+    project = _reload_project(db, project.id)
+    if project is None:
+        raise RuntimeError("Project missing after scene generation")
+    scenes = (
+        db.query(Scene)
+        .filter(Scene.project_id == project.id, Scene.is_active.is_(True))
+        .order_by(Scene.order)
+        .all()
+    )
+
+    # NOTE: avatars are NOT generated here. They are per-scene and on-demand —
+    # the user requests one from the Scene Edit modal, which starts a SceneAvatarJob
+    # (see POST /projects/{id}/scenes/{id}/avatar). A scene without a rendered clip
+    # simply plays with no overlay.
+
+    # Write data.json + assets to per-project Remotion workspace
+    write_remotion_data(project, scenes, db, redistribute_images=redistribute_images)
+
+    # Non-bulk stock-footage projects land in the post-generation review gate
+    # instead of GENERATED, so the user can confirm/change/reject the
+    # auto-picked clips before the video is considered final. Bulk projects
+    # run unattended: stamp the approval marker so a later re-entrant call to
+    # _generate_scenes (e.g. an edit job) doesn't try to re-fetch clips that
+    # were already resolved.
+    # Auto-picked clips are accepted as-is: generation runs straight through to
+    # GENERATED with no interactive review. The approval marker is still stamped
+    # so a later re-entrant _generate_scenes (e.g. an edit job) treats the clips
+    # as already resolved. Users change or remove a clip per scene in the editor.
+    if getattr(project, "stock_footage_enabled", False):
+        from datetime import datetime as _dt
+        project.stock_footage_approved_at = _dt.utcnow()
+    project.status = ProjectStatus.GENERATED
+    user = db.query(User).filter(User.id == project.user_id).first()
+    db.commit()
+    db.refresh(project)
+
+    # Notify the user that their video is ready to preview
+    try:
+        if user:
+            
+            project_url = f"{settings.FRONTEND_URL}/project/{project.id}"
+            # email_service.send_preview_ready_email(
+            #     user_email=user.email,
+            #     user_name=user.name,
+            #     project_name=project.name,
+            #     project_url=project_url,
+            # )
+            
+            # Schedule follow-up email 30 min before 7-day deletion (6d 23h 30m after creation)
+            scheduled_at = project.created_at + timedelta(days=6, hours=23, minutes=30)
+            # Only schedule follow-up email for unpaid users
+            if user.plan == PlanTier.FREE:
+                email_service.schedule_followup_email(
+                    user_email=user.email,
+                    user_name=user.name,
+                    project_name=project.name,
+                    project_url=project_url,
+                    scheduled_at=scheduled_at,
+                )
+                logger.info(f"[PIPELINE] Project {project.id}: follow-up email scheduled at {scheduled_at}")
+            
+        else:
+            logger.error(f"[PIPELINE] Project {project.id}: no user found, skipping preview + follow-up emails")
+    except EmailServiceError as e:
+        logger.error(f"[PIPELINE] Preview-ready email failed for project {project.id}: {e}")
+    except Exception as e:
+        logger.error(f"[PIPELINE] Unexpected error sending preview email for project {project.id}: {e}", exc_info=True)
+
+
+# ─── Legacy individual endpoints (kept for compatibility) ────
+
+@router.post("/scrape", response_model=ProjectOut)
+def scrape_blog_endpoint(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Scrape blog content and images from the project's URL."""
+    project = _get_project(project_id, user.id, db)
+    try:
+        return scrape_blog(project, db)
+    except BlogScrapeFailed as e:
+        logger.warning("[SCRAPE_ENDPOINT] BlogScrapeFailed project=%s: %s", project_id, e)
+        _rollback_project_after_endpoint_failure(db, project_id, user.id)
+        raise HTTPException(
+            status_code=410,
+            detail=format_scrape_failed_public_message(project.blog_url),
+        )
+    except Exception as e:
+        logger.exception("[SCRAPE_ENDPOINT] project=%s", project_id)
+        _rollback_project_after_endpoint_failure(db, project_id, user.id)
+        raise HTTPException(
+            status_code=410,
+            detail=format_scrape_failed_public_message(project.blog_url),
+        )
+
+
+@router.post("/generate-script", response_model=ProjectOut)
+async def generate_script_endpoint(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Generate a video script from the scraped blog content using DSPy (async)."""
+    project = _get_project(project_id, user.id, db)
+    if not project.blog_content:
+        raise HTTPException(status_code=400, detail="Blog content not yet scraped.")
+    try:
+        await _generate_script(project, db)
+        db.refresh(project)
+        if project.script_review_enabled and project.script_review_approved_at is None:
+            project.status = ProjectStatus.AWAITING_SCRIPT_REVIEW
+            db.commit()
+            db.refresh(project)
+    except Exception as e:
+        logger.exception("[GENERATE_SCRIPT_ENDPOINT] project=%s", project_id)
+        _rollback_project_after_endpoint_failure(db, project_id, user.id)
+        raise HTTPException(status_code=410, detail=PUBLIC_MSG_PIPELINE_FAILED)
+    return project
+
+
+@router.post("/generate-scenes", response_model=ProjectOut)
+async def generate_scenes_endpoint(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Generate Remotion layout descriptors + voiceovers for each scene (async)."""
+    project = _get_project(project_id, user.id, db)
+    if (
+        project.status == ProjectStatus.AWAITING_SCRIPT_REVIEW
+        or (project.script_review_enabled and project.script_review_approved_at is None)
+    ):
+        raise HTTPException(status_code=409, detail="Review and approve the script before generating voiceovers.")
+    if not project.scenes:
+        raise HTTPException(status_code=400, detail="No scenes found.")
+    try:
+        await _generate_scenes(project, db)
+    except Exception as e:
+        logger.exception("[GENERATE_SCENES_ENDPOINT] project=%s", project_id)
+        _rollback_project_after_endpoint_failure(db, project_id, user.id)
+        raise HTTPException(status_code=410, detail=PUBLIC_MSG_PIPELINE_FAILED)
+    return project
+
+
+@router.post("/launch-studio", response_model=StudioResponse)
+def launch_studio_endpoint(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Launch Remotion Studio for this project (local dev only)."""
+    project = _get_project(project_id, user.id, db)
+    try:
+        # Ensure workspace has latest data before launching studio
+        rebuild_workspace(project, project.scenes, db)
+        port = launch_studio(project, db)
+        return StudioResponse(studio_url=f"http://localhost:{port}", port=port)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to launch studio: {str(e)}")
+
+
+@router.get("/download-studio")
+def download_studio_endpoint(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Download the project's Remotion workspace as a zip (paid plan or per-video paid)."""
+    project = _get_project(project_id, user.id, db)
+    from app.models.user import PAID_TIERS
+    if user.plan not in PAID_TIERS and not project.studio_unlocked:
+        raise HTTPException(status_code=403, detail="Studio requires a paid plan or per-video purchase")
+
+    try:
+        # Build workspace from latest DB state on demand (edits no longer sync eagerly).
+        rebuild_workspace(project, project.scenes, db)
+        zip_path = create_studio_zip(project.id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Could not build studio workspace.")
+
+    safe_name = project.name.replace(" ", "_")[:50] if project.name else "project"
+    return FileResponse(
+        path=zip_path,
+        media_type="application/zip",
+        filename=f"{safe_name}_studio.zip",
+    )
+
+
+def _rebuild_workspace_sync(project_id: int) -> None:
+    """Rebuild workspace in a thread (uses its own DB session). Avoids blocking the event loop."""
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return
+        # Start from a clean workspace so canceled/previous runs cannot leave stale files behind.
+        safe_remove_workspace(get_workspace_dir(project_id))
+        scenes = (
+            db.query(Scene)
+            .filter(Scene.project_id == project_id)
+            .order_by(Scene.order)
+            .all()
+        )
+        if not scenes:
+            raise ValueError("No scenes found")
+        rebuild_workspace(project, scenes, db)
+    finally:
+        db.close()
+
+
+@router.post("/render")
+async def render_video_endpoint(
+    project_id: int,
+    resolution: str = "1080p",
+    force_render: bool = False,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Kick off async video render. Poll /render-status for progress.
+
+    Whiteboard and newspaper templates render at 720p; all others at 1080p.
+    Workspace rebuild runs in a thread so the server stays responsive.
+    When force_render=True, re-render even if already rendered (rebuilds workspace with latest DB data).
+    """
+    project = _get_project(project_id, user.id, db)
+    return await start_render_for_project(
+        project, resolution=resolution, force_render=force_render, user=user, db=db
+    )
+
+
+async def start_render_for_project(
+    project: Project,
+    *,
+    resolution: str,
+    force_render: bool,
+    user: User,
+    db: Session,
+) -> dict:
+    """Start (or join) a render for an already-authorised project.
+
+    Extracted from the endpoint so the publish flow can start a render on the
+    same path instead of duplicating it. Billing, the one-job-per-project lock,
+    the already-rendering join and the stale-progress cleanup are all decisions
+    that must not drift between the two callers — the return value carries
+    ``render_run_id`` so a publish job can bind itself to this exact run.
+
+    Assumes the caller has already checked access to ``project``.
+    """
+    project_id = project.id
+
+    # Only one long-running job per project across all types: reject a render if a
+    # template change / script regen / voice change is in progress (another user may
+    # have started one). include_render=False so an active render is handled below by
+    # this endpoint's own re-render / already-rendering logic instead.
+    from app.routers.projects import _assert_no_active_job
+    _assert_no_active_job(project_id, db, include_render=False)
+
+    # Render at 720p for whiteboard (stickman) and newspaper templates
+    resolution = "720p" if project.template in ("whiteboard", "newspaper","newscast") else "1080p"
+
+    # Already rendered and available in R2 — skip re-render unless force_render (re-render with latest changes)
+    if project.r2_video_url and not force_render:
+        return {
+            "detail": "Already rendered",
+            "progress": 100,
+            "r2_video_url": project.r2_video_url,
+        }
+
+    if (is_custom_template(project.template) or is_crafted_template(project.template)) and _load_custom_template_data(
+        project.template,
+        db=db,
+        user_id=project.user_id,
+    ) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This project uses a missing template. Rendering is blocked because the template is unavailable.",
+        )
+    if is_crafted_template(project.template) and not validate_crafted_template_access(project.template, project.user_id, db):
+        raise HTTPException(
+            status_code=403,
+            detail="This project no longer has access to its crafted template.",
+        )
+
+    # Owner pays: a re-render is billed to the project OWNER, not the acting
+    # collaborator. Align the owner's per-video credits with Stripe before the check.
+    from app.services.access import project_owner, video_limit_message
+    payer = project_owner(project, db)
+    payer.roll_video_period_if_due(db)
+    payer.sync_video_limit_bonus(db)
+    db.refresh(payer)
+
+    # Re-render: deduct a video count from the owner (same as creating a new video)
+    if force_render:
+        if not payer.can_create_video:
+            raise HTTPException(
+                status_code=403,
+                detail=video_limit_message(payer, user, "re-render"),
+            )
+        payer.videos_used_this_period += 1
+        db.commit()
+
+    # Don't restart if already rendering (guard by DB status so stale shared payloads
+    # from a previous run don't block a fresh render after cancellation).
+    is_rendering_state = project.status == ProjectStatus.RENDERING
+    prog = get_render_progress(project_id)
+    if is_rendering_state and prog and not prog.get("done", True):
+        return {
+            "detail": "Render already running",
+            "progress": prog.get("progress", 0),
+            "render_run_id": prog.get("_run_id"),
+        }
+    shared_prog = get_render_progress_from_r2(project_id, user.id)
+    if is_rendering_state and shared_prog and not shared_prog.get("done", True):
+        return {
+            "detail": "Render already running",
+            "progress": int(shared_prog.get("progress", 0) or 0),
+            "render_run_id": shared_prog.get("render_run_id"),
+        }
+    # If DB says not rendering but we still see an active shared payload, treat it as stale.
+    if (not is_rendering_state) and shared_prog and not shared_prog.get("done", True):
+        try:
+            r2_storage.delete_render_progress_json(user.id, project_id)
+        except Exception:
+            pass
+
+    scenes = (
+        db.query(Scene)
+        .filter(Scene.project_id == project_id)
+        .order_by(Scene.order)
+        .all()
+    )
+    if not scenes:
+        raise HTTPException(status_code=400, detail="No scenes found. Generate the video first.")
+
+    # Mark as rendering immediately so status polling can show startup phases
+    # while workspace prep is still running.
+    project.status = ProjectStatus.RENDERING
+    db.commit()
+
+    # Seed a fresh progress record (progress=0, new run id) FIRST. This overwrites any
+    # stale dict left by a previous completed render (progress=100/done=true).
+    render_run_id = seed_render_progress(project_id, user.id, phase_message="Preparing workspace...")
+
+    # Only now tell live collaborators a render started, so when they reload and poll
+    # /render-status they read the freshly-seeded 0% progress — not the previous run's
+    # stale 100%/done snapshot. Broadcast after the seed to close that race. This
+    # handler runs on the event loop, so await the broadcast directly. Exclude the
+    # acting user — they already entered the rendering view locally.
+    try:
+        from app.routers.collab_ws import collab_manager
+        await collab_manager.broadcast(
+            project_id, {"type": "project_reloaded"}, exclude_user_id=user.id
+        )
+    except Exception as broadcast_err:
+        logger.warning(
+            "[RENDER] Failed to broadcast render-start reload for project %s: %s",
+            project_id, broadcast_err,
+        )
+
+    # Rebuild workspace in thread pool so the event loop is not blocked (file I/O, copy, etc.).
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _rebuild_workspace_sync, project_id)
+    except Exception as e:
+        msg = f"Failed to prepare workspace: {str(e)}. Please try again."
+        fail_render_start(project_id, msg)
+        project.status = ProjectStatus.GENERATED
+        db.commit()
+        raise HTTPException(
+            status_code=500,
+            detail=msg,
+        )
+    set_render_phase_message(project_id, "Preparing render bundle...")
+
+    try:
+        start_render_async(project, resolution=resolution, run_id=render_run_id)
+        return {
+            "detail": "Render started",
+            "progress": 0,
+            "resolution": resolution,
+            "render_run_id": render_run_id,
+        }
+    except Exception as e:
+        logger.exception("[RENDER] Failed to start render for project %s: %s", project_id, e)
+        fail_render_start(project_id, f"Failed to start render: {str(e)}. Please try again.")
+        project.status = ProjectStatus.GENERATED
+        db.commit()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to start render: {str(e)}. Please try again.",
+        )
+
+
+@router.get("/render-status")
+def render_status_endpoint(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Poll this endpoint to get render progress."""
+    project = _get_project(project_id, user.id, db)
+    prog = get_render_progress(project_id)
+
+    # If no progress dict exists, try shared progress payload first (R2).
+    if not prog:
+        shared = get_render_progress_from_r2(project_id, user.id)
+        if shared:
+            try:
+                is_rendering = project.status == ProjectStatus.RENDERING
+                shared_done = bool(shared.get("done", False))
+                updated_at = float(shared.get("updated_at_epoch") or 0.0)
+                stale_after = max(60, int(getattr(settings, "RENDER_PROGRESS_STALE_SECONDS", 360)))
+                is_stale = updated_at > 0 and (time.time() - updated_at) > stale_after
+
+                # Owner instance likely died: shared progress stopped heartbeating while DB still says RENDERING.
+                if is_rendering and (not shared_done) and is_stale:
+                    project.status = ProjectStatus.GENERATED
+                    db.commit()
+                    # Best effort cleanup of stale progress payload.
+                    try:
+                        r2_storage.delete_render_progress_json(user.id, project_id)
+                    except Exception:
+                        pass
+                    return {
+                        "progress": int(shared.get("progress", 0) or 0),
+                        "rendered_frames": int(shared.get("rendered_frames", 0) or 0),
+                        "total_frames": int(shared.get("total_frames", 0) or 0),
+                        "done": True,
+                        "error": "Render failed because the render worker became unavailable. Please try rendering again.",
+                        "time_remaining": None,
+                        "eta_seconds": None,
+                        "progress_unknown": False,
+                        "render_attempt": shared.get("render_attempt", None),
+                        "render_run_id": shared.get("render_run_id", None),
+                        "r2_video_url": project.r2_video_url,
+                    }
+            except Exception:
+                # Fall back to returning shared payload if stale detection fails.
+                pass
+            
+            return {
+                "progress": int(shared.get("progress", 0) or 0),
+                "rendered_frames": int(shared.get("rendered_frames", 0) or 0),
+                "total_frames": int(shared.get("total_frames", 0) or 0),
+                "done": bool(shared.get("done", False)),
+                "error": shared.get("error"),
+                "time_remaining": shared.get("time_remaining"),
+                "eta_seconds": shared.get("eta_seconds"),
+                "progress_unknown": bool(shared.get("progress_unknown", False)),
+                "render_attempt": shared.get("render_attempt", None),
+                "render_run_id": shared.get("render_run_id", None),
+                "r2_video_url": shared.get("r2_video_url") or project.r2_video_url,
+            }
+
+        # If no shared progress exists, check project status to determine state.
+        # Project is RENDERING but this worker has no in-memory progress: another
+        # server instance may be rendering, or the render just started. Do NOT reset
+        # DB status — that caused false "lost render" and 0% when load-balanced
+        # polls hit a cold instance.
+        if project.status == ProjectStatus.RENDERING:
+            logger.warning(
+                "[RENDER] Project %s is RENDERING but no progress dict on this worker — "
+                "continuing (another instance may hold progress, or render is starting)",
+                project_id,
+            )
+            return {
+                "progress": 0,
+                "rendered_frames": 0,
+                "total_frames": 0,
+                "done": False,
+                "error": None,
+                "time_remaining": None,
+                "eta_seconds": None,
+                "progress_unknown": True,
+                "render_attempt": None,
+                "render_run_id": None,
+                "r2_video_url": project.r2_video_url,
+            }
+
+        # Project is not rendering — return default state
+        return {
+            "progress": 0,
+            "rendered_frames": 0,
+            "total_frames": 0,
+            "done": project.status == ProjectStatus.DONE,
+            "error": None,
+            "time_remaining": None,
+            "eta_seconds": None,
+            "progress_unknown": False,
+            "render_attempt": None,
+            "render_run_id": None,
+            "r2_video_url": project.r2_video_url,
+        }
+
+    # If render just finished, update project status
+    if prog.get("done") and not prog.get("error") and project.status == ProjectStatus.RENDERING:
+        project.status = ProjectStatus.DONE
+        db.commit()
+        db.refresh(project)
+
+
+    return {
+        "progress": prog.get("progress", 0),
+        "rendered_frames": prog.get("rendered_frames", 0),
+        "total_frames": prog.get("total_frames", 0),
+        "done": prog.get("done", False),
+        "error": prog.get("error"),
+        "time_remaining": prog.get("time_remaining"),
+        "eta_seconds": prog.get("eta_seconds"),
+        "progress_unknown": False,
+        "render_attempt": prog.get("_attempt", 1),
+        "render_run_id": prog.get("_run_id"),
+        "r2_video_url": project.r2_video_url,
+    }
+
+
+@router.post("/cancel-render")
+def cancel_render_endpoint(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Cancel an active render process for this project."""
+    project = _get_project(project_id, user.id, db)
+    cancelled = cancel_running_render(project_id, reason="Render cancelled by user.")
+    # If cancelling a re-render and an older video already exists, keep DONE.
+    # Otherwise fall back to GENERATED.
+    if project.status == ProjectStatus.RENDERING:
+        has_existing_video = bool(project.r2_video_url)
+        project.status = (
+            ProjectStatus.DONE if has_existing_video else ProjectStatus.GENERATED
+        )
+        db.commit()
+
+    # Any "publish when this render finishes" intent dies with the render. The
+    # periodic sweep would catch these eventually, but cancelling here means the
+    # user sees it immediately rather than up to ten minutes later. Best-effort:
+    # never let it turn a successful cancel into an error.
+    try:
+        from app.services.publish_queue import cancel_pending_jobs_sync
+        if cancel_pending_jobs_sync(project_id, db):
+            db.commit()
+    except Exception as publish_err:
+        logger.warning(
+            "[RENDER] Could not cancel pending publish jobs for project %s: %s",
+            project_id, publish_err,
+        )
+    if cancelled:
+        return {"detail": "Render cancelled", "cancelled": True}
+    # Even if this instance didn't own the subprocess, forcing status to GENERATED
+    # triggers cross-instance worker self-termination via periodic DB health check.
+    return {
+        "detail": "Cancel requested; render worker will stop after next health check",
+        "cancelled": True,
+    }
+
+
+@router.get("/download-url")
+def get_download_url(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get the download URL for the rendered video (R2 public URL or local fallback)."""
+    project = _get_project(project_id, user.id, db)
+
+    # Prefer R2 URL
+    if project.r2_video_url:
+        return {"url": project.r2_video_url}
+
+    # Fallback: check if a local rendered file exists (R2 upload may still be in progress)
+    local_path = os.path.join(
+        settings.MEDIA_DIR, f"projects/{project.id}/output/video.mp4"
+    )
+    if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+        return {"url": f"/media/projects/{project.id}/output/video.mp4"}
+
+    # Check if render is still in progress
+    prog = get_render_progress(project_id)
+    if prog and not prog.get("done", True):
+        raise HTTPException(status_code=202, detail="Video is still rendering.")
+
+    raise HTTPException(status_code=404, detail="Video not rendered yet.")
+
+
+@router.get("/download")
+def download_video_endpoint(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Directs the client to the video file. 
+    1. Checks if the video is on R2 and redirects.
+    2. Falls back to local storage if R2 is not available.
+    3. Returns 202 if still rendering or 404 if missing.
+    """
+    # 1. Fetch project and verify access (owner or accepted collaborator)
+    from app.services.access import get_accessible_project
+    project = get_accessible_project(project_id, user, db)
+
+    # 2. Case A: Video is stored on Cloudflare R2
+    if project.r2_video_url:
+        # Generate Cache-buster based on project update time
+        sep = "&" if "?" in project.r2_video_url else "?"
+        ts = int(project.updated_at.timestamp()) if project.updated_at else 0
+        redirect_url = f"{project.r2_video_url}{sep}v={ts}"
+        
+        # 307 Temporary Redirect: Hands off the request to the R2 CDN
+        return RedirectResponse(url=redirect_url, status_code=307)
+
+    # 3. Case B: Fallback to Local Storage
+    local_path = os.path.join(
+        settings.MEDIA_DIR, f"projects/{project.id}/output/video.mp4"
+    )
+    
+    if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+        # Sanitized filename for the browser save dialog
+        safe_name = (project.name or "video").replace(" ", "_")[:50]
+        return FileResponse(
+            path=local_path,
+            media_type="video/mp4",
+            filename=f"{safe_name}.mp4",
+        )
+
+    # 4. Case C: Check rendering progress before giving up
+    prog = get_render_progress(project_id)
+    if prog and not prog.get("done", True):
+        raise HTTPException(
+            status_code=202, 
+            detail="Video is still rendering. Please wait."
+        )
+
+    raise HTTPException(status_code=404, detail="Video file not found.")
+
+
+
+def _get_project(project_id: int, user_id: int, db: Session) -> Project:
+    """Helper to get a project the user may access (owner or collaborator), or 404."""
+    from app.models.user import User as _User
+    from app.services.access import get_accessible_project
+
+    acting = db.query(_User).filter(_User.id == user_id).first()
+    if acting is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project = get_accessible_project(project_id, acting, db)
+    # Crafted-template entitlement is held by the OWNER (who bought/created it),
+    # so validate against the owner rather than the acting collaborator.
+    if is_crafted_template(project.template) and not validate_crafted_template_access(project.template, project.user_id, db):
+        raise HTTPException(
+            status_code=403,
+            detail="Access to this project's crafted template has been revoked.",
+        )
+    return project

@@ -1,0 +1,1377 @@
+import html
+import json
+import re
+from typing import Any
+
+
+_TIME_LIKE_RE = re.compile(
+    r"(^q[1-4](\s*\d{2,4})?$)"
+    r"|(^\d{4}$)"
+    r"|(^\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?$)"
+    r"|(^\d{1,2}[/-]("
+    r"jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|"
+    r"jul(y)?|aug(ust)?|sep(t|tember)?|oct(ober)?|nov(ember)?|dec(ember)?"
+    r")([/-]\d{2,4})?$)"
+    r"|(^((jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|"
+    r"jul(y)?|aug(ust)?|sep(t|tember)?|oct(ober)?|nov(ember)?|dec(ember)?)"
+    r"\s+\d{1,2},?\s*\d{2,4})$)"
+    r"|(^("
+    r"jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|"
+    r"jul(y)?|aug(ust)?|sep(t|tember)?|oct(ober)?|nov(ember)?|dec(ember)?"
+    r")[/-]\d{1,2}([/-]\d{2,4})?$)"
+    r"|(^("
+    r"jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|"
+    r"jul(y)?|aug(ust)?|sep(t|tember)?|oct(ober)?|nov(ember)?|dec(ember)?"
+    r")(\b|[./-]\d{2,4}|\s+\d{2,4})$)"
+    # "1 Jun", "5 June 2026", "11 Jun, 26" — day SPACE month (optional year)
+    r"|(^\d{1,2}\s+("
+    r"jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|"
+    r"jul(y)?|aug(ust)?|sep(t|tember)?|oct(ober)?|nov(ember)?|dec(ember)?"
+    r")(,?\s*\d{2,4})?$)"
+    # weekday names ("Mon", "Tuesday") — daily series
+    r"|(^(mon(day)?|tue(s|sday)?|wed(nesday)?|thu(r|rs|rsday)?|fri(day)?|sat(urday)?|sun(day)?)$)"
+    # "Week 1" / "Day 3" / "Wk 12" ordinal periods
+    r"|(^(week|wk|day)\s*\d+$)"
+    # fiscal years ("FY24", "FY 2025") and half-years ("H1", "H2 2025")
+    r"|(^fy\s*'?\d{2,4}$)"
+    r"|(^h[1-2](\s*\d{2,4})?$)"
+    # year ranges ("2023-24", "2023/2024")
+    r"|(^\d{4}\s*[-–/]\s*\d{2,4}$)",
+    re.IGNORECASE,
+)
+_BUCKET_LIKE_RE = re.compile(r"(^\d+\s*[-–]\s*\d+$)|(^<\s*\d+$)|(^>\s*\d+$)|(^\d+\+$)")
+_STRICT_NUMERIC_CELL_RE = re.compile(
+    r"^\s*\(?\s*(?:[a-z]{1,6}\.?\s*)?[+\-]?"
+    r"(?:\$|€|£|¥|₹)?\s*\d[\d,]*(?:\.\d+)?(?:[eE][+\-]?\d+)?"
+    r"\s*(?:%|[a-z]{1,12}(?:/[a-z]{1,12})?)?\s*\)?\s*$",
+    re.IGNORECASE,
+)
+_CURRENCY_HINT_RE = re.compile(r"(?:^|\b)(rs\.?|pkr|usd|eur|gbp|aed|sar|inr|\$|€|£|¥|₹)", re.IGNORECASE)
+_SYNTH_HEADER_RE = re.compile(r"^col_\d+$", re.IGNORECASE)
+_PLACEHOLDER_HEADER_RE = re.compile(r"^series\s+\d+$", re.IGNORECASE)
+
+
+def _is_placeholder_chart_header(value: str) -> bool:
+    s = (value or "").strip()
+    if not s:
+        return True
+    if _SYNTH_HEADER_RE.fullmatch(s):
+        return True
+    if _PLACEHOLDER_HEADER_RE.fullmatch(s):
+        return True
+    return False
+
+
+def _ensure_chart_headers(
+    headers: list[str],
+    col_count: int,
+    label_col_idx: int = 0,
+) -> list[str]:
+    """Guarantee every chart column has a display header (never bare 'Series N')."""
+    out = [_clean_text_cell(h) for h in headers]
+    while len(out) < col_count:
+        out.append("")
+    out = out[:col_count]
+
+    if _is_placeholder_chart_header(out[label_col_idx]):
+        out[label_col_idx] = "Category"
+
+    numeric_cols = [c for c in range(col_count) if c != label_col_idx]
+    metric_n = 0
+    for c in numeric_cols:
+        if not _is_placeholder_chart_header(out[c]):
+            continue
+        if len(numeric_cols) == 1:
+            out[c] = "Value"
+        else:
+            metric_n += 1
+            out[c] = f"Metric {metric_n}"
+
+    return out
+
+
+def assign_chart_axis_captions(props: dict[str, Any]) -> dict[str, Any]:
+    """Normalize chartTable headers and set subtitle / yAxisLabel from real column names."""
+    chart_table = props.get("chartTable")
+    if not isinstance(chart_table, dict):
+        return props
+
+    normalized = normalize_chart_table(chart_table)
+    if not normalized or len(normalized.get("headers") or []) < 2:
+        return props
+
+    headers = normalized["headers"]
+    col_count = len(headers)
+    out = dict(props)
+    out["chartTable"] = normalized
+
+    if not str(out.get("subtitle") or "").strip() and headers[0]:
+        out["subtitle"] = headers[0]
+
+    numeric_headers = [
+        headers[c]
+        for c in range(col_count)
+        if c != 0 and headers[c] and not _is_placeholder_chart_header(headers[c])
+    ]
+    if not str(out.get("yAxisLabel") or "").strip() and numeric_headers:
+        out["yAxisLabel"] = numeric_headers[0]
+
+    return out
+
+# Markdown emphasis markers that leak into scraped/LLM labels (e.g. a "**Value**"
+# header showing literally in a chart legend). Stripped from display cells only.
+_MARKDOWN_EMPHASIS_RE = re.compile(r"\*\*|__|~~|`")
+_PERCENT_RE = re.compile(r"%")
+_CURRENCY_SYMBOL_RE = re.compile(r"[$€£¥₹]")
+_CURRENCY_WORD_RE = re.compile(r"\b(rs|pkr|usd|eur|gbp|aed|sar|inr)\b\.?", re.IGNORECASE)
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove markdown emphasis markers (**bold**, __bold__, ~~strike~~, `code`).
+
+    Single * / _ are intentionally left alone: they appear unmatched in real prose
+    and identifiers and stripping them would mangle labels more than it helps.
+    """
+    return _MARKDOWN_EMPHASIS_RE.sub("", text)
+
+
+def _value_cell_dimension(value: Any) -> str | None:
+    """Classify a cell's measurement dimension: 'percent', 'currency', or None.
+
+    A percent sign wins over a currency hint (a "+30%" cell is a percentage even
+    if the table is otherwise about money), so the two never get conflated.
+    """
+    text = re.sub(r"<[^>]+>", " ", str(value or ""))
+    if _PERCENT_RE.search(text):
+        return "percent"
+    if _CURRENCY_SYMBOL_RE.search(text) or _CURRENCY_WORD_RE.search(text):
+        return "currency"
+    return None
+
+
+def _detect_currency_unit(cells: list) -> str:
+    """Return the most common currency token ($, €, Rs, …) across cells, else ''."""
+    counts: dict[str, int] = {}
+    for c in cells:
+        text = re.sub(r"<[^>]+>", " ", str(c or ""))
+        m = _CURRENCY_SYMBOL_RE.search(text)
+        if m:
+            counts[m.group(0)] = counts.get(m.group(0), 0) + 1
+            continue
+        m2 = _CURRENCY_WORD_RE.search(text)
+        if m2:
+            tok = m2.group(0).rstrip(".")
+            tok = "Rs" if tok.lower() == "rs" else tok.upper()
+            counts[tok] = counts.get(tok, 0) + 1
+    if not counts:
+        return ""
+    return max(counts, key=counts.get)
+
+
+def reconcile_chart_units(
+    chart_table: dict[str, Any],
+    declared_unit: str = "",
+    drop_conflicts: bool = True,
+) -> dict[str, Any]:
+    """Reconcile a chartTable's display unit with its actual data.
+
+    Two independent fixes for bar/line charts whose unit and rows came from the
+    LLM rather than the numbers:
+
+    1. Unit: when the value column has a clear currency/percent dimension and the
+       declared unit doesn't match it (e.g. a hallucinated "AM" on a "$" column),
+       replace the declared unit with one derived from the data. A declared unit
+       that already matches the data's dimension (e.g. "USD" vs "$") is respected.
+    2. Mixed dimensions: drop rows whose value cells are entirely the conflicting
+       dimension (e.g. a "Premium ~30%" row inside a dollar bar chart), which would
+       otherwise render as a meaningless "$30" bar. Never strips below two rows.
+
+    Returns {"unit", "chartTable", "dropped"}.
+    """
+    if not isinstance(chart_table, dict):
+        return {"unit": declared_unit, "chartTable": chart_table, "dropped": []}
+    rows = [r for r in (chart_table.get("rows") or []) if isinstance(r, list)]
+    headers = chart_table.get("headers") or []
+    if not rows:
+        return {"unit": declared_unit, "chartTable": chart_table, "dropped": []}
+
+    dim_counts = {"currency": 0, "percent": 0}
+    currency_cells: list[Any] = []
+    for r in rows:
+        for cell in r[1:]:
+            d = _value_cell_dimension(cell)
+            if d in dim_counts:
+                dim_counts[d] += 1
+            if d == "currency":
+                currency_cells.append(cell)
+
+    dominant_dim: str | None = None
+    if dim_counts["currency"] or dim_counts["percent"]:
+        dominant_dim = max(dim_counts, key=dim_counts.get)
+
+    resolved_unit = declared_unit
+    declared_dim = _value_cell_dimension(declared_unit)
+    if dominant_dim == "currency" and declared_dim != "currency":
+        resolved_unit = _detect_currency_unit(currency_cells) or "$"
+    elif dominant_dim == "percent" and declared_dim != "percent":
+        resolved_unit = "%"
+
+    dropped: list[str] = []
+    out_rows = rows
+    if drop_conflicts and dominant_dim in ("currency", "percent"):
+        conflict_dim = "percent" if dominant_dim == "currency" else "currency"
+        kept = []
+        for r in rows:
+            known = [d for d in (_value_cell_dimension(c) for c in r[1:]) if d]
+            if known and all(d == conflict_dim for d in known):
+                dropped.append(str(r[0]) if r else "")
+                continue
+            kept.append(r)
+        if len(kept) >= 2:
+            out_rows = kept
+        else:
+            dropped = []
+
+    return {
+        "unit": resolved_unit,
+        "chartTable": {"headers": headers, "rows": out_rows},
+        "dropped": dropped,
+    }
+
+
+def _looks_like_header_row(values: list[str]) -> bool:
+    if not values:
+        return False
+    cleaned = [str(v or "").strip() for v in values]
+    non_empty = [v for v in cleaned if v]
+    if len(non_empty) < max(2, len(cleaned) // 2):
+        return False
+    numeric = sum(1 for v in non_empty if re.fullmatch(r"[-+]?\d+(\.\d+)?", v))
+    return numeric <= max(1, len(non_empty) // 3)
+
+
+def _parse_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    # Strip HTML tags (e.g. "Rs.<br> 484,500" → "Rs. 484,500")
+    text = re.sub(r"<[^>]+>", " ", text).strip()
+    # Collapse any whitespace left by tag removal
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    if not text:
+        return None
+    # Guardrail: only parse cells that are mostly numeric.
+    # Reject mixed prose such as "minor bump, range-bound" or
+    # multi-number phrases like "+15% initial, -15-18% decline".
+    strict_match = bool(_STRICT_NUMERIC_CELL_RE.match(text))
+    if not strict_match:
+        # Safe fallback for common currency-like strings that strict regex can miss.
+        # We only accept exactly one numeric token and a currency hint, to avoid
+        # misparsing prose/date strings like "Apr 10, 26".
+        if not _CURRENCY_HINT_RE.search(text):
+            return None
+        tokens = re.findall(r"[+\-]?\d[\d,]*(?:\.\d+)?(?:[eE][+\-]?\d+)?", text)
+        if len(tokens) != 1:
+            return None
+        token = tokens[0].replace(",", "")
+        if token in {"", "-", ".", "-."}:
+            return None
+        negative_by_parens = text.startswith("(") and text.endswith(")")
+        try:
+            n = float(token)
+            return -abs(n) if negative_by_parens else n
+        except ValueError:
+            return None
+    negative_by_parens = text.startswith("(") and text.endswith(")")
+    token_match = re.search(r"[+\-]?\d[\d,]*(?:\.\d+)?(?:[eE][+\-]?\d+)?", text)
+    if not token_match:
+        return None
+    token = token_match.group(0).replace(",", "")
+    if token in {"", "-", ".", "-."}:
+        return None
+    try:
+        n = float(token)
+        return -abs(n) if negative_by_parens else n
+    except ValueError:
+        return None
+
+
+def _tokenize(text: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(t) > 2}
+
+
+def _clean_text_cell(value: Any) -> str:
+    """Normalize scraped or LLM text for chart labels and table cells.
+
+    Strips HTML tags/entities, markdown link/formatting noise, and collapses
+    whitespace so chartTable values saved to the DB are plain display text.
+    """
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    # Strip markdown emphasis so a "**Value**" header / "__label__" cell doesn't
+    # render its asterisks literally in a chart legend or table.
+    text = _strip_markdown(text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"[\u200b-\u200d\ufeff]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def normalize_chart_table(chart_table: dict | None) -> dict | None:
+    """Return a chartTable with cleaned headers/rows and guaranteed column labels."""
+    if not isinstance(chart_table, dict):
+        return None
+
+    raw_headers = chart_table.get("headers")
+    raw_rows = chart_table.get("rows")
+    if not isinstance(raw_headers, list) or not isinstance(raw_rows, list):
+        return None
+
+    clean_rows: list[list[str]] = []
+    for row in raw_rows[:20]:
+        if not isinstance(row, list):
+            continue
+        cells = [_clean_text_cell(cell) for cell in row[:8]]
+        if any(cells):
+            clean_rows.append(cells)
+
+    if not clean_rows:
+        return None
+
+    col_count = max(len(raw_headers), max((len(r) for r in clean_rows), default=0))
+    headers = _ensure_chart_headers(
+        [_clean_text_cell(h) for h in raw_headers[:8]],
+        col_count,
+        label_col_idx=0,
+    )
+    return {"headers": headers, "rows": clean_rows}
+
+
+def sanitize_chart_table_layout_props(props: dict | None) -> dict:
+    """Normalize chartTable and axis caption strings in layoutProps."""
+    out = dict(props or {})
+    normalized = normalize_chart_table(out.get("chartTable"))
+    if normalized:
+        out["chartTable"] = normalized
+    for key in ("subtitle", "yAxisLabel"):
+        if key in out and out[key] is not None:
+            out[key] = _clean_text_cell(out[key])
+    return assign_chart_axis_captions(out)
+
+
+def sanitize_chart_descriptor(descriptor: dict | None) -> dict:
+    """Normalize chart data in a scene descriptor before persisting to the DB."""
+    out = dict(descriptor or {})
+    layout_props = out.get("layoutProps")
+    if not isinstance(layout_props, dict):
+        return out
+
+    props = dict(layout_props)
+    layout_norm = str(out.get("layout") or "").strip().lower().replace("-", "_")
+    if layout_norm == "data_visualization":
+        for key in ("lineChartLabels", "lineChartDatasets", "barChartRows", "histogramRows"):
+            props.pop(key, None)
+
+    if isinstance(props.get("chartTable"), dict):
+        props = sanitize_chart_table_layout_props(props)
+
+    out["layoutProps"] = props
+    return out
+
+
+
+def _extract_tables_from_visual_hint(visual_description: str) -> list[dict[str, Any]]:
+    if not visual_description:
+        return []
+    m = re.search(
+        r"(?:TABLE_DATA_HINT_JSON\s*:\s*|[═=]{2,}\s*EXTRACTED_TABLES_JSON\s*[═=]{2,}\s*)(\{.*\})"
+        r"(?:\s*[═=]{2,}\s*END_EXTRACTED_TABLES_JSON\s*[═=]{2,})?",
+        visual_description,
+        flags=re.DOTALL,
+    )
+    if not m:
+        return []
+    try:
+        payload = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return []
+    tables = payload.get("tables") if isinstance(payload, dict) else None
+    if not isinstance(tables, list):
+        return []
+    from app.services.table_extraction import _dedup_tables, _normalize_stored_table
+
+    normalized = [_normalize_stored_table(t) for t in tables if isinstance(t, dict)]
+    return _dedup_tables([t for t in normalized if t])
+
+
+def count_tables_in_visual_hint(visual_description: str) -> int:
+    return len(_extract_tables_from_visual_hint(visual_description))
+
+
+def get_tables_from_visual_hint(visual_description: str) -> list[dict[str, Any]]:
+    return _extract_tables_from_visual_hint(visual_description)
+
+
+def get_chartable_tables_from_visual_hint(
+    visual_description: str,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Return (original_index, table) pairs for tables that produce non-empty chart props."""
+    tables = _extract_tables_from_visual_hint(visual_description)
+    return [
+        (i, t)
+        for i, t in enumerate(tables)
+        if isinstance(t, dict) and _build_chart_props_from_table(t)
+    ]
+
+
+def get_line_chartable_tables_from_visual_hint(
+    visual_description: str,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Return (original_index, table) pairs for tables that produce a line chart."""
+    tables = _extract_tables_from_visual_hint(visual_description)
+    result = []
+    for i, t in enumerate(tables):
+        if not isinstance(t, dict):
+            continue
+        props = _build_chart_props_from_table(t)
+        if props.get("chartType") == "line":
+            result.append((i, t))
+    return result
+
+
+_CANDLESTICK_REQUIRED = {"open", "high", "low", "close"}
+_CANDLESTICK_DATE_KEYWORDS = {"date", "time", "period", "week", "month", "year", "day", "quarter"}
+
+
+def is_candlestick_table(table: dict[str, Any]) -> bool:
+    """Return True if the table has OHLCV columns AND a date/time axis column.
+
+    A multi-symbol snapshot (e.g. SYMBOL | OPEN | HIGH | LOW | CLOSE) has the
+    OHLC columns but no time axis — it should be a terminal_table, not terminal_chart.
+    """
+    headers = [str(h or "").strip().lower() for h in (table.get("headers", []) or [])]
+    found = set()
+    has_date_col = False
+    for h in headers:
+        for r in _CANDLESTICK_REQUIRED:
+            if r in h:
+                found.add(r)
+        if any(kw in h for kw in _CANDLESTICK_DATE_KEYWORDS):
+            has_date_col = True
+    return _CANDLESTICK_REQUIRED.issubset(found) and has_date_col
+
+
+def has_candlestick_table_in_visual_hint(visual_description: str) -> bool:
+    """Return True if any table in the visual hint looks like OHLCV data."""
+    tables = _extract_tables_from_visual_hint(visual_description)
+    return any(is_candlestick_table(t) for t in tables if isinstance(t, dict))
+
+
+def _parse_volume_to_billions(raw: str) -> float:
+    s = str(raw or "").replace("$", "").replace(",", "").strip()
+    multiplier = 1.0
+    if s.upper().endswith("B"):
+        s = s[:-1]
+    elif s.upper().endswith("M"):
+        s, multiplier = s[:-1], 0.001
+    elif s.upper().endswith("K"):
+        s, multiplier = s[:-1], 0.000001
+    try:
+        return float(s) * multiplier
+    except ValueError:
+        return 0.0
+
+
+def generate_terminal_chart_candlestick_items(table: dict[str, Any], max_items: int = 60) -> list[str]:
+    """Format an OHLCV table as candlestick items for TerminalChart.
+
+    Each item: "<date_label>|<open>|<high>|<low>|<close>|<vol_billions>"
+    """
+    headers = [str(h or "").strip().lower() for h in (table.get("headers", []) or [])]
+    rows = [r for r in (table.get("rows", []) or []) if isinstance(r, list)]
+    if not rows:
+        return []
+
+    def _find_col(*keywords: str) -> int | None:
+        for kw in keywords:
+            for i, h in enumerate(headers):
+                if kw in h:
+                    return i
+        return None
+
+    date_col = _find_col("date start", "date") or 0
+    open_col = _find_col("open")
+    high_col = _find_col("high")
+    low_col = _find_col("low")
+    close_col = _find_col("close")
+    vol_col = _find_col("volume")
+
+    if None in (open_col, high_col, low_col, close_col):
+        return []
+
+    items = []
+    for row in rows[:max_items]:
+        label = str(row[date_col] if date_col < len(row) else "").strip()
+        label = label.split(",")[0].strip()  # "Mar 21, 2026" → "Mar 21"
+
+        o = _parse_number(row[open_col] if open_col < len(row) else "")
+        h = _parse_number(row[high_col] if high_col < len(row) else "")
+        l = _parse_number(row[low_col] if low_col < len(row) else "")
+        c = _parse_number(row[close_col] if close_col < len(row) else "")
+
+        if None in (o, h, l, c):
+            continue
+
+        vol = 0.0
+        if vol_col is not None and vol_col < len(row):
+            vol = _parse_volume_to_billions(row[vol_col])
+
+        items.append(f"{label}|{o:.2f}|{h:.2f}|{l:.2f}|{c:.2f}|{vol:.2f}")
+
+    return items
+
+
+def compute_ohlcv_chart_analysis(table: dict[str, Any]) -> dict[str, str]:
+    """Derive plain-English chart analysis from an OHLCV table.
+
+    Returns a dict with keys: verdict, trend, momentum, biggest_move,
+    range_position, volatility, summary.  All values are human-readable
+    sentences suitable for direct inclusion in narration prompts.
+    """
+    headers = [str(h or "").strip().lower() for h in (table.get("headers", []) or [])]
+    rows = [r for r in (table.get("rows", []) or []) if isinstance(r, list)]
+    if not rows:
+        return {}
+
+    def _find_col(*kws: str) -> int | None:
+        for kw in kws:
+            for i, h in enumerate(headers):
+                if kw in h:
+                    return i
+        return None
+
+    close_col = _find_col("close")
+    open_col = _find_col("open")
+    high_col = _find_col("high")
+    low_col = _find_col("low")
+    date_col = _find_col("date") or 0
+
+    if None in (close_col, open_col, high_col, low_col):
+        return {}
+
+    def _pn(row: list, col: int | None) -> float | None:
+        if col is None or col >= len(row):
+            return None
+        return _parse_number(row[col])
+
+    candles: list[dict] = []
+    for row in rows:
+        o = _pn(row, open_col)
+        h = _pn(row, high_col)
+        l = _pn(row, low_col)
+        c = _pn(row, close_col)
+        if None in (o, h, l, c):
+            continue
+        label = str(row[date_col] if date_col < len(row) else "").strip().split(",")[0]
+        candles.append({"o": o, "h": h, "l": l, "c": c, "label": label})
+
+    n = len(candles)
+    if n < 2:
+        return {}
+
+    closes = [k["c"] for k in candles]
+    highs = [k["h"] for k in candles]
+    lows = [k["l"] for k in candles]
+    p_max = max(highs)
+    p_min = min(lows)
+    p_range = max(p_max - p_min, 0.001)
+    first_close = closes[0]
+    last_close = closes[-1]
+
+    # 1. Overall trend
+    pct_change = ((last_close - first_close) / max(abs(first_close), 0.001)) * 100
+    direction = "up" if pct_change >= 0 else "down"
+    verdict = (
+        "BULLISH TREND" if pct_change > 5
+        else "BEARISH DECLINE" if pct_change < -5
+        else "CONSOLIDATING"
+    )
+    trend = (
+        f"{direction.capitalize()} {abs(pct_change):.1f}% over {n} trading periods "
+        f"(from {first_close:.2f} to {last_close:.2f})"
+    )
+
+    # 2. Recent momentum (last ~12% of bars, min 3)
+    recent_window = max(3, int(n * 0.12))
+    recent_closes = closes[-recent_window:]
+    recent_delta = recent_closes[-1] - recent_closes[0]
+    recent_pct = (recent_delta / max(abs(recent_closes[0]), 0.001)) * 100
+    recent_label = candles[-recent_window]["label"] or f"{recent_window} periods ago"
+    if abs(recent_pct) < 0.4:
+        momentum = f"Price has been flat since {recent_label} — no clear short-term direction"
+    elif recent_pct > 0 and pct_change > 0:
+        momentum = f"Accelerating — gained another {recent_pct:.1f}% since {recent_label}, building on the uptrend"
+    elif recent_pct > 0 and pct_change <= 0:
+        momentum = f"Recovering — up {recent_pct:.1f}% since {recent_label} after the broader decline"
+    elif pct_change > 0:
+        momentum = f"Stalling — down {abs(recent_pct):.1f}% since {recent_label} despite the overall uptrend"
+    else:
+        momentum = f"Still under pressure — fell another {abs(recent_pct):.1f}% since {recent_label}"
+
+    # 3. Biggest single-bar move
+    body_pcts = [((k["c"] - k["o"]) / max(abs(k["o"]), 0.001)) * 100 for k in candles]
+    biggest_i = max(range(n), key=lambda i: abs(body_pcts[i]))
+    biggest_pct = body_pcts[biggest_i]
+    biggest_label = candles[biggest_i]["label"] or f"bar {biggest_i + 1}"
+    sign = "+" if biggest_pct >= 0 else ""
+    move_type = "surge" if biggest_pct >= 0 else "selloff"
+    biggest_move = (
+        f"Biggest single-period move: {sign}{biggest_pct:.1f}% on {biggest_label} "
+        f"— a sharp {move_type} that stands out in this period"
+    )
+
+    # 4. Where price sits vs. the period range
+    pos_in_range = (last_close - p_min) / p_range
+    if pos_in_range > 0.75:
+        range_position = (
+            f"Currently near its {n}-period high of {p_max:.2f} "
+            f"— buyers remain in control"
+        )
+    elif pos_in_range < 0.25:
+        range_position = (
+            f"Sitting close to its {n}-period low of {p_min:.2f} "
+            f"— sellers have dominated this stretch"
+        )
+    else:
+        range_position = (
+            f"Trading mid-range between {p_min:.2f} and {p_max:.2f} "
+            f"— no decisive winner yet between buyers and sellers"
+        )
+
+    # 5. Volatility — average daily range as % of close
+    avg_daily_range = sum((k["h"] - k["l"]) / max(k["c"], 0.001) for k in candles) / n * 100
+    if avg_daily_range < 1.5:
+        volatility = f"Low volatility period — average daily swing of {avg_daily_range:.1f}%, tight and orderly"
+    elif avg_daily_range > 3.5:
+        volatility = (
+            f"Highly volatile — average daily swing of {avg_daily_range:.1f}%, "
+            f"expect large intraday moves in either direction"
+        )
+    else:
+        volatility = f"Moderate volatility — average daily swing of {avg_daily_range:.1f}%"
+
+    summary = (
+        f"Chart verdict: {verdict}. "
+        f"{trend}. {momentum}. {biggest_move}. "
+        f"{range_position}. {volatility}."
+    )
+
+    return {
+        "verdict": verdict,
+        "trend": trend,
+        "momentum": momentum,
+        "biggest_move": biggest_move,
+        "range_position": range_position,
+        "volatility": volatility,
+        "summary": summary,
+    }
+
+
+def generate_terminal_chart_items(table: dict[str, Any], max_items: int = 8) -> list[str]:
+    """Format a time-series table as items strings for the TerminalChart layout.
+
+    Produces "{label}: {value}" per row using the first column as the label and the
+    first numeric column as the value.  The Remotion component extracts numbers from
+    these strings to drive the synthetic candlestick chart.
+    """
+    rows = [r for r in (table.get("rows", []) or []) if isinstance(r, list) and len(r) >= 2]
+    if len(rows) < 2:
+        return []
+
+    # Find first numeric column (skip column 0 which is the label)
+    col_count = max(len(r) for r in rows)
+    numeric_col = None
+    for c in range(1, col_count):
+        if sum(1 for r in rows if _parse_number(r[c] if c < len(r) else "") is not None) >= 2:
+            numeric_col = c
+            break
+    if numeric_col is None:
+        return []
+
+    items = []
+    for r in rows[:max_items]:
+        label = str(r[0] if r else "").strip()
+        raw_val = r[numeric_col] if numeric_col < len(r) else ""
+        num = _parse_number(raw_val)
+        if num is None:
+            continue
+        val_str = f"{num:g}"
+        items.append(f"{label}: {val_str}" if label else val_str)
+
+    return items
+
+
+def is_ticker_snapshot_table(table: dict[str, Any]) -> bool:
+    """True if the table is a multi-symbol market snapshot (symbol column + % change column).
+
+    These should be rendered as terminal_ticker, not terminal_table.
+    """
+    headers = [str(h or "").strip().lower() for h in (table.get("headers", []) or [])]
+    has_symbol = any(kw in h for h in headers for kw in ("symbol", "ticker", "scrip"))
+    has_pct = any("%" in h for h in headers)
+    return has_symbol and has_pct
+
+
+# Keywords that strongly identify a ticker/snapshot table (entity name column).
+_LADUC_TICKER_NAME_KEYWORDS = ("name", "symbol", "ticker", "scrip", "stock", "asset", "fund", "etf", "company")
+# Keywords that identify value/movement columns.
+_LADUC_TICKER_VALUE_KEYWORDS = ("price", "cost", "value", "share", "close", "last", "bid", "ask")
+# "change" or "%" alone isn't enough — they also appear in plain time-series tables
+# (e.g. "% Change YoY"). They qualify only when combined with a name column.
+_LADUC_TICKER_CHANGE_KEYWORDS = ("change", "%", "return", "gain", "loss", "delta", "chg")
+
+
+def is_laduc_ticker_table(table: dict[str, Any]) -> bool:
+    """True if a table looks like a LaDuc ticker/snapshot layout.
+
+    Two paths to qualify:
+    1. Has a name/entity column + at least one value or change column.
+    2. Any header contains the word "change" AND the table has >=3 columns
+       (multi-column tables with a change column are snapshot-style, not
+       a simple two-column time-series with a single "% Change" column).
+    """
+    headers = [str(h or "").strip().lower() for h in (table.get("headers", []) or [])]
+    if not headers:
+        return False
+    # Path 1: name column + value/change column
+    has_name = any(kw in h for h in headers for kw in _LADUC_TICKER_NAME_KEYWORDS)
+    has_value = any(kw in h for h in headers for kw in _LADUC_TICKER_VALUE_KEYWORDS)
+    has_change = any(kw in h for h in headers for kw in _LADUC_TICKER_CHANGE_KEYWORDS)
+    if has_name and (has_value or has_change):
+        return True
+    # Path 2: "change" in any header + multi-column table (>=3 cols)
+    has_change_word = any("change" in h for h in headers)
+    if has_change_word and len(headers) >= 3:
+        return True
+    return False
+
+
+def generate_terminal_ticker_items(table: dict[str, Any], max_items: int = 10) -> list[str]:
+    """Convert a multi-symbol snapshot table to terminal ticker item strings.
+
+    Detects SYMBOL, PRICE (close > ldcp > last > price), and CHANGE(%) columns by
+    header keywords. Returns empty list if required columns are not found.
+    Output format per item: "SYMBOL  +X.XX%  PRICE"
+    """
+    headers = [str(h or "").strip().lower() for h in (table.get("headers", []) or [])]
+    rows = [r for r in (table.get("rows", []) or []) if isinstance(r, list)]
+    if not headers or not rows:
+        return []
+
+    def _find(keywords: list[str]) -> int | None:
+        for kw in keywords:
+            for i, h in enumerate(headers):
+                if kw in h:
+                    return i
+        return None
+
+    sym_col = _find(["symbol", "ticker", "scrip"])
+    pct_col = _find(["%"])
+    # Prefer close over ldcp for the displayed price
+    price_col = _find(["close", "last", "price", "ldcp"])
+
+    if sym_col is None or pct_col is None:
+        return []
+
+    items = []
+    for row in rows[:max_items]:
+        sym = str(row[sym_col] if sym_col < len(row) else "").strip()
+        pct = str(row[pct_col] if pct_col < len(row) else "").strip()
+        if not sym or not pct:
+            continue
+        # Ensure explicit sign
+        if pct and not pct.startswith(("+", "-")):
+            pct = "+" + pct
+        if price_col is not None and price_col < len(row):
+            price = str(row[price_col]).strip()
+            items.append(f"{sym}  {pct}  {price}")
+        else:
+            items.append(f"{sym}  {pct}")
+
+    return items
+
+
+def generate_terminal_table_items(table: dict[str, Any], max_items: int = 12) -> list[str]:
+    """Format a table as pipe-delimited items strings for the TerminalTable layout.
+
+    Returns a list where item[0] is the header row and the rest are data rows,
+    all pipe-delimited and uppercased to match the Bloomberg terminal aesthetic.
+    max_items includes the header row, so data rows = max_items - 1.
+    """
+    headers = [str(h or "").strip() for h in (table.get("headers", []) or [])]
+    rows = [r for r in (table.get("rows", []) or []) if isinstance(r, list)]
+    if not headers or len(rows) < 1:
+        return []
+
+    def _fmt_row(cells: list) -> str:
+        return " | ".join(str(c or "").strip().upper() for c in cells)
+
+    header_str = _fmt_row(headers)
+    data_strs = [_fmt_row(r) for r in rows[: max_items - 1] if any(str(c or "").strip() for c in r)]
+
+    items = [header_str] + data_strs
+    return items[:max_items]
+
+
+_TICKER_ARROW_RE = re.compile(
+    # Matches the Motley Fool arrow-block format WITH the Arrow-Thin-Down prefix:
+    # "Arrow-Thin-Down\\\n\\\nSYMBOL NAME\\\n\\\n$PRICE\\\n\\\n+X.X%"
+    r"Arrow-Thin-(?:Down|Up)\s*\\\s*\n"
+    r"\s*\\\s*\n\s*([^\\\n]{1,30}?)\s*\\\s*\n"  # name/symbol line
+    r"\s*\\\s*\n\s*(\$?[\d,]+\.?\d*)\s*\\\s*\n"  # price line
+    r"\s*\\\s*\n\s*([+\-]\d+\.?\d*%)",            # pct change line
+    re.MULTILINE,
+)
+
+_TICKER_BARE_BLOCK_RE = re.compile(
+    # Matches bare backslash-newline blocks WITHOUT the Arrow-Thin prefix:
+    # "S&P 500\\\n\\\n7,108.40\\\n\\\n-0.4%"
+    r"([^\\\n]{1,40})\\\n"    # name line ending with backslash-newline
+    r"\\\n"                    # blank backslash-newline separator
+    r"(\$?[\d,]+\.?\d*)\\\n"  # price line
+    r"\\\n"                    # blank separator
+    r"([+\-]\d+\.?\d*%)",     # pct change line
+    re.MULTILINE,
+)
+
+_TICKER_PAREN_RE = re.compile(
+    # Matches Motley Fool inline format: "CompanyName (\nMSFT\n3.90%\n)"
+    r'\(\s*\n\s*([A-Z]{1,6})\s*\n\s*([+\-]?\d+\.?\d*%)\s*\n\s*\)',
+    re.MULTILINE,
+)
+
+_TICKER_INLINE_RE = re.compile(
+    r"\b([A-Z]{2,5})\b"           # ticker symbol (2-5 caps)
+    r"[^$\d\n]{0,40}"             # optional gap (stock name)
+    r"\$?([\d,]+\.?\d*)"          # price
+    r"[^%\-+\d\n]{0,10}"
+    r"([+\-]\d+\.?\d*%)",         # change pct
+    re.MULTILINE,
+)
+
+_TICKER_STOPWORDS = {
+    "THE", "AND", "FOR", "ARE", "NOT", "BUT", "INC", "LLC", "ETF", "IPO",
+    "CEO", "CFO", "SEC", "NYSE", "USA", "GDP", "FED", "USD", "ALL", "NEW",
+    "ITS", "HAS", "WAS", "THIS", "WITH", "FROM", "INTO", "THAT", "THEY",
+    "WILL", "HAVE", "BEEN", "THEIR", "MORE", "ALSO", "BOTH", "EACH", "OVER",
+}
+
+# Abbreviate long index names to a short label for display
+_NAME_ABBREV = {
+    "S&P 500": "SPX",
+    "DOW JONES": "DJI",
+    "NASDAQ": "NDX",
+    "BITCOIN": "BTC",
+    "ETHEREUM": "ETH",
+}
+
+
+def extract_ticker_items_from_blog(blog_content: str, max_items: int = 10) -> list[str]:
+    """Extract real ticker rows from scraped blog content for terminal_ticker.
+
+    Returns formatted strings: "SYMBOL  +X.XX%  $PRICE"
+    Priority: arrow-block format → tables with Name/Last/Chg% → inline text pattern.
+    """
+    if not blog_content:
+        return []
+
+    seen: set[str] = set()
+    items: list[str] = []
+
+    def _add(raw_name: str, price: str, pct: str) -> None:
+        name = raw_name.strip().upper()
+        # Map long names to short symbols
+        sym = _NAME_ABBREV.get(name, name)
+        # If still long, try to use the last all-caps word as symbol
+        if len(sym) > 7:
+            tokens = [t for t in re.split(r"\s+", sym) if t.isalpha()]
+            short = next((t for t in tokens if 1 <= len(t) <= 6 and t not in _TICKER_STOPWORDS), None)
+            sym = short or sym[:6]
+        sym = sym.lstrip("^").strip()
+        if not sym or sym in seen or sym in _TICKER_STOPWORDS:
+            return
+        seen.add(sym)
+        price_clean = price.strip().lstrip("$").replace(",", "")
+        pct_clean = pct.strip()
+        if not pct_clean.startswith(("+", "-")):
+            pct_clean = "+" + pct_clean
+        items.append(f"{sym:<6}  {pct_clean:<8}  ${price_clean}")
+
+    # Priority 1a: bare backslash-newline block — "S&P 500\\\n\\\n7,108.40\\\n\\\n-0.4%"
+    for m in _TICKER_BARE_BLOCK_RE.finditer(blog_content):
+        if len(items) >= max_items:
+            break
+        _add(m.group(1), m.group(2), m.group(3))
+
+    # Priority 1b: Motley Fool arrow-block format with Arrow-Thin-Down prefix
+    if len(items) < 4:
+        for m in _TICKER_ARROW_RE.finditer(blog_content):
+            if len(items) >= max_items:
+                break
+            _add(m.group(1), m.group(2), m.group(3))
+
+    # Priority 1c: Motley Fool inline paren format — "CompanyName (\nMSFT\n3.90%\n)"
+    # No price available in this format; use pct-only display
+    if len(items) < 4:
+        for m in _TICKER_PAREN_RE.finditer(blog_content):
+            if len(items) >= max_items:
+                break
+            sym = m.group(1).strip()
+            pct = m.group(2).strip()
+            if sym in _TICKER_STOPWORDS or sym in seen:
+                continue
+            seen.add(sym)
+            pct_clean = pct if pct.startswith(("+", "-")) else "+" + pct
+            items.append(f"{sym:<6}  {pct_clean:<8}  —")
+
+    # Priority 2: tables with Name/Last/Chg.% columns
+    if len(items) < 4:
+        try:
+            from app.services.table_extraction import extract_tables_from_content
+            tables = extract_tables_from_content(blog_content)
+        except Exception:
+            tables = []
+        for tbl in tables:
+            if len(items) >= max_items:
+                break
+            hdrs = [str(h).lower() for h in tbl.get("headers", [])]
+            name_i = next((i for i, h in enumerate(hdrs) if h in {"name", "ticker", "symbol"}), -1)
+            last_i = next((i for i, h in enumerate(hdrs) if "last" in h or "price" in h or "close" in h), -1)
+            chg_i = next((i for i, h in enumerate(hdrs) if "chg" in h and "%" in h or h == "chg. %"), -1)
+            if name_i == -1 or last_i == -1 or chg_i == -1:
+                continue
+            for row in tbl.get("rows", []):
+                if len(items) >= max_items:
+                    break
+                name = str(row[name_i] if name_i < len(row) else "").strip()
+                price = str(row[last_i] if last_i < len(row) else "").strip()
+                pct = str(row[chg_i] if chg_i < len(row) else "").strip()
+                if name and price and pct:
+                    _add(name, price, pct)
+
+    # Priority 3: inline "TICKER $price +X%" pattern (last resort)
+    if len(items) < 4:
+        for m in _TICKER_INLINE_RE.finditer(blog_content):
+            if len(items) >= max_items:
+                break
+            sym = m.group(1)
+            if sym in _TICKER_STOPWORDS:
+                continue
+            _add(sym, m.group(2), m.group(3))
+
+    return items[:max_items]
+
+
+def _score_table_for_scene(table: dict[str, Any], scene_text: str) -> float:
+    headers = table.get("headers", []) or []
+    rows = table.get("rows", []) or []
+    if not headers or not rows:
+        return -1.0
+
+    scene_tokens = _tokenize(scene_text)
+    if not scene_tokens:
+        scene_tokens = set()
+
+    header_tokens = _tokenize(" ".join(str(h) for h in headers))
+    first_col_tokens = _tokenize(" ".join(str((r or [""])[0]) for r in rows if isinstance(r, list) and r))
+
+    overlap = len(scene_tokens & header_tokens) * 2.0 + len(scene_tokens & first_col_tokens) * 3.0
+
+    # Prefer tables with at least one numeric column and enough rows.
+    numeric_cols = 0
+    max_cols = max(len(r) for r in rows if isinstance(r, list))
+    for c in range(max_cols):
+        nums = 0
+        for r in rows:
+            if not isinstance(r, list) or c >= len(r):
+                continue
+            if _parse_number(r[c]) is not None:
+                nums += 1
+        if nums >= 2:
+            numeric_cols += 1
+
+    row_bonus = min(len(rows), 8) * 0.2
+    numeric_bonus = numeric_cols * 1.5
+    return overlap + row_bonus + numeric_bonus
+
+
+def _is_time_like(values: list[str]) -> bool:
+    if len(values) < 2:
+        return False
+    hits = sum(1 for v in values if _TIME_LIKE_RE.search((v or "").strip()))
+    return hits >= max(2, len(values) // 2)
+
+
+def _is_bucket_like(values: list[str]) -> bool:
+    if len(values) < 3:
+        return False
+    hits = sum(1 for v in values if _BUCKET_LIKE_RE.search((v or "").strip()))
+    return hits >= max(2, len(values) // 2)
+
+
+def _build_chart_props_from_table(table: dict[str, Any]) -> dict[str, Any]:
+    headers = [str(h or "").strip() for h in (table.get("headers", []) or [])]
+    rows = [r for r in (table.get("rows", []) or []) if isinstance(r, list) and len(r) >= 2]
+    if len(rows) < 2:
+        return {}
+
+    # Recover real header names if upstream provided placeholder headers.
+    if headers and all(_SYNTH_HEADER_RE.fullmatch(h or "") for h in headers if h):
+        first = [str(c or "").strip() for c in rows[0]] if rows else []
+        if _looks_like_header_row(first):
+            headers = first
+            rows = rows[1:]
+            if len(rows) < 2:
+                return {}
+
+    col_count = max(len(r) for r in rows)
+    headers = _ensure_chart_headers(headers, col_count, label_col_idx=0)
+    labels = [
+        _clean_text_cell(r[0] if len(r) > 0 else "") or str(i + 1)
+        for i, r in enumerate(rows)
+    ]
+
+    numeric_columns: list[tuple[int, str, list[float]]] = []
+    for c in range(1, col_count):
+        values: list[float] = []
+        missing = 0
+        for r in rows:
+            cell = r[c] if c < len(r) else ""
+            n = _parse_number(cell)
+            if n is None:
+                missing += 1
+                values.append(float("nan"))
+            else:
+                values.append(n)
+        if sum(1 for x in values if x == x) >= 2:
+            label = headers[c] if c < len(headers) else ""
+            numeric_columns.append((c, label, values))
+
+    if not numeric_columns:
+        return {}
+
+    time_like = _is_time_like(labels)
+    bucket_like = _is_bucket_like(labels)
+
+    chart_table = {
+        "headers": [_clean_text_cell(h) for h in headers[:8]],
+        "rows": [[_clean_text_cell(cell) for cell in row[:8]] for row in rows[:20]],
+    }
+    axis_captions = {
+        "subtitle": headers[0] if headers else "",
+        "yAxisLabel": numeric_columns[0][1] if numeric_columns else "",
+    }
+
+    # Prefer line charts for ordered/time-like rows; otherwise histogram for bucket labels; else bar.
+    if time_like:
+        first_series = [v for v in numeric_columns[0][2] if v == v]
+        if len(first_series) >= 2:
+            start = first_series[0]
+            end = first_series[-1]
+            delta = end - start
+            pct = ((delta / start) * 100.0) if start else 0.0
+            return {
+                "chartType": "line",
+                "chartTable": chart_table,
+                **axis_captions,
+                "marketSymbol": _clean_text_cell(numeric_columns[0][1]),
+                "marketValue": f"{end:g}",
+                "marketDelta": f"{delta:+.2f}",
+                "marketPercent": f"{pct:+.2f}%",
+                "marketTrend": "up" if delta >= 0 else "down",
+            }
+
+    primary_label = _clean_text_cell(numeric_columns[0][1])
+    primary_values = numeric_columns[0][2]
+    rows_out = []
+    for i, value in enumerate(primary_values):
+        if value != value:
+            continue
+        rows_out.append({"label": labels[i], "value": f"{value:g}"})
+    rows_out = rows_out[:20]
+    if len(rows_out) < 2:
+        return {}
+
+    if bucket_like and len(rows_out) >= 3:
+        return {
+            "chartType": "histogram",
+            "chartTable": chart_table,
+            **axis_captions,
+            "marketSymbol": primary_label,
+        }
+
+    start = _parse_number(rows_out[0]["value"]) or 0.0
+    end = _parse_number(rows_out[-1]["value"]) or start
+    delta = end - start
+    pct = ((delta / start) * 100.0) if start else 0.0
+    return {
+        "chartType": "bar",
+        "chartTable": chart_table,
+        **axis_captions,
+        "marketSymbol": primary_label,
+        "marketValue": f"{end:g}",
+        "marketDelta": f"{delta:+.2f}",
+        "marketPercent": f"{pct:+.2f}%",
+        "marketTrend": "up" if delta >= 0 else "down",
+    }
+
+
+def generate_chart_props_from_table_hints(
+    visual_description: str,
+    scene_title: str = "",
+    narration: str = "",
+    preferred_table_index: int | None = None,
+) -> dict[str, Any]:
+    """
+    Build graph-ready props from TABLE_DATA_HINT_JSON.
+
+    Returns chart props suitable for `data_visualization` layout:
+    - chartType
+    - chartTable
+    - optional market summary fields
+    """
+    tables = _extract_tables_from_visual_hint(visual_description)
+    if not tables:
+        return {}
+
+    if (
+        preferred_table_index is not None
+        and isinstance(preferred_table_index, int)
+        and 0 <= preferred_table_index < len(tables)
+        and isinstance(tables[preferred_table_index], dict)
+    ):
+        best_table: dict[str, Any] | None = tables[preferred_table_index]
+    else:
+        scene_text = f"{scene_title}\n{narration}".strip()
+        best_table = None
+        best_score = float("-inf")
+        for t in tables:
+            if not isinstance(t, dict):
+                continue
+            score = _score_table_for_scene(t, scene_text)
+            if score > best_score:
+                best_score = score
+                best_table = t
+
+    if not best_table:
+        return {}
+    return _build_chart_props_from_table(best_table)
+
+
+# ─── Scene copy for the custom data-viz scenes ───────────────────────────────
+#
+# Every ordinary scene gets its on-screen copy from DisplayTextGenerator, an LLM
+# pass over the scene's content. The custom chart/table scenes are INJECTED after
+# that pass (pipeline._build_custom_dataviz_scenes), so they never reach it — and
+# the injection used to reuse the hardcoded title as the display text, leaving
+# both fields holding one string. The renderer then correctly blanks the
+# duplicate, so the scene showed a single generic line where every other scene
+# shows two.
+#
+# These build the copy instead, from the table itself. Deterministic on purpose:
+# the built-in chart scenes caption themselves the same way, it adds no latency
+# or cost, and a figure that comes from the bound rows cannot be invented.
+
+# First-column headers too generic to make a title noun. They are perfectly good
+# AXIS labels ("Category" under the x-axis reads fine); they just make a poor
+# subject — "Related breakdown" and "Category by Price" are worse than the plain
+# fallbacks, so these route to the generic title instead.
+_WEAK_HEADERS = frozenset({
+    "", "#", "id", "index", "no", "no.", "sr", "sr.", "rank",
+    "related", "category", "categories", "name", "names", "item", "items",
+    "label", "labels", "type", "types", "field", "fields",
+    "metric", "metrics", "value", "values", "data", "col 1", "column 1",
+})
+
+# What the scenes were titled before this existed. Still the fallback whenever
+# the table gives nothing better, so a weak table is never made worse.
+_DEFAULT_CHART_TITLE = "By the numbers"
+_DEFAULT_TABLE_TITLE = "The full breakdown"
+
+
+def _is_weak_header(header: str) -> bool:
+    return str(header or "").strip().lower() in _WEAK_HEADERS
+
+
+def _sentence_case(text: str) -> str:
+    """Capitalise the first letter, leaving the rest as the source wrote it.
+
+    `.title()` would mangle real headers ("BBL/D/1K" -> "Bbl/D/1K"), so only the
+    leading character is touched.
+    """
+    s = str(text or "").strip()
+    return s if not s or s[:1].isupper() else s[:1].upper() + s[1:]
+
+
+def _format_chart_value(value: float) -> str:
+    """Compact figure for scene copy. Mirrors formatCompact1dp in chartData.ts."""
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M".replace(".0M", "M")
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:.1f}K".replace(".0K", "K")
+    return f"{value:g}"
+
+
+def build_dataviz_scene_copy(
+    props: dict[str, Any], is_table: bool = False
+) -> tuple[str, str]:
+    """(title, display_text) for one injected data-viz scene.
+
+    `props` is a `_build_chart_props_from_table` result — its `chartTable` plus
+    the `subtitle` / `yAxisLabel` already derived from the real column names.
+
+    Returns the generic strings when the table has nothing usable, so this can
+    never produce worse copy than the hardcoded pair it replaces. The two fields
+    are always DIFFERENT: a scene whose title and display text match renders as
+    one line, which is the defect this exists to fix.
+    """
+    table = props.get("chartTable") if isinstance(props, dict) else None
+    table = table if isinstance(table, dict) else {}
+    headers = [_clean_text_cell(h) for h in (table.get("headers") or [])]
+    headers = [h for h in headers if h]
+    rows = [r for r in (table.get("rows") or []) if isinstance(r, list)]
+
+    x_label = _sentence_case(props.get("subtitle") or (headers[0] if headers else ""))
+    y_label = _sentence_case(
+        props.get("yAxisLabel") or (headers[1] if len(headers) > 1 else "")
+    )
+    n = len(rows)
+
+    if is_table:
+        title = (
+            f"{x_label} in full"
+            if x_label and not _is_weak_header(x_label)
+            else _DEFAULT_TABLE_TITLE
+        )
+        value_cols = headers[1:]
+        # "All 1 rows" reads as a bug to a viewer, so singular gets its own shape.
+        subject = "Every row" if n == 1 else f"All {n} rows"
+        if n and len(value_cols) > 1:
+            listed = ", ".join(value_cols[:-1])
+            display = f"{subject}, with {listed} and {value_cols[-1]}."
+        elif n and value_cols:
+            display = f"{subject}, with {value_cols[0]}."
+        elif n:
+            display = f"{subject} in full."
+        else:
+            display = "Every figure behind the story."
+        return title, display
+
+    # ── Chart ──
+    if y_label and not _is_weak_header(y_label):
+        title = (
+            f"{y_label} by {x_label}"
+            if x_label and not _is_weak_header(x_label)
+            else f"{y_label} at a glance"
+        )
+    else:
+        title = _DEFAULT_CHART_TITLE
+
+    # Cite the data's real range, the way buildAutoChartSummary does on the TS
+    # side — it is the one line that could not have been written without the
+    # article's own figures.
+    pairs: list[tuple[str, float]] = []
+    for row in rows:
+        if len(row) < 2:
+            continue
+        label = _clean_text_cell(row[0])
+        value = _parse_number(row[1])
+        if label and value is not None:
+            pairs.append((label, value))
+
+    # COUNT WHAT THE CHART ACTUALLY PLOTS, not what the table holds.
+    #
+    # A bar chart drops every row with a negative value
+    # (filterBarChartNonNegativeRows in _shared/chartData.ts), so a 6-row table
+    # with 3 negatives renders 3 bars. Saying "across 6 entries" under a chart
+    # showing 3 reads as a bug in the chart. Line and histogram plot every row.
+    if str(props.get("chartType") or "").strip().lower() == "bar":
+        pairs = [p for p in pairs if p[1] >= 0]
+
+    if len(pairs) >= 2:
+        lo_label, lo = min(pairs, key=lambda p: p[1])
+        hi_label, hi = max(pairs, key=lambda p: p[1])
+        # The fallback noun has to agree with the singular verbs below —
+        # "Values ranges from" reads as broken English.
+        measure = y_label if y_label and not _is_weak_header(y_label) else "The range"
+        if lo == hi:
+            display = f"{measure} holds at {_format_chart_value(hi)} across {len(pairs)} entries."
+        else:
+            display = (
+                f"{measure} runs from {_format_chart_value(lo)} at {lo_label} "
+                f"to {_format_chart_value(hi)} at {hi_label}, across {len(pairs)} entries."
+            )
+    elif len(pairs) == 1:
+        label, value = pairs[0]
+        measure = y_label if y_label and not _is_weak_header(y_label) else "Value"
+        display = f"{measure} at {label}: {_format_chart_value(value)}."
+    else:
+        display = "Here's what the figures show at a glance."
+
+    return title, display
+
+
+def build_dataviz_chart_caption(props: dict[str, Any]) -> str:
+    """A short caption for the chart scene's `chartSummary`, or "".
+
+    WHY THIS EXISTS. Generated chart scenes commonly write
+
+        const caption = props.chartSummary ?? props.displayText;
+
+    and then render BOTH the display text and that caption. `chartSummary` was
+    never populated on the custom path — `_build_chart_props_from_table` does not
+    produce one, and only the built-in templates fill it (via an LLM caption in
+    TemplateSceneGenerator) — so the fallback fired every time and the scene
+    printed the same sentence twice.
+
+    This gives the slot real content instead. Deterministic, and deliberately a
+    DIFFERENT fact from the display text (which states the range): here it is
+    what is plotted and how, so the two lines complement rather than repeat.
+    Returns "" when the table says nothing worth captioning, which leaves the
+    scene to its own fallback.
+    """
+    table = props.get("chartTable") if isinstance(props, dict) else None
+    table = table if isinstance(table, dict) else {}
+    headers = [_clean_text_cell(h) for h in (table.get("headers") or [])]
+    headers = [h for h in headers if h]
+    rows = [r for r in (table.get("rows") or []) if isinstance(r, list)]
+    if not rows or len(headers) < 2:
+        return ""
+
+    x_label = _sentence_case(props.get("subtitle") or headers[0])
+    kind = str(props.get("chartType") or "").strip().lower()
+    shape = {
+        "line": "Plotted as a trend",
+        "histogram": "Plotted as a distribution",
+        "bar": "Compared side by side",
+    }.get(kind, "Plotted")
+
+    # Same correction as the display text: a bar chart omits negative rows, so
+    # count the bars that are actually drawn.
+    if kind == "bar":
+        rows = [
+            r for r in rows
+            if len(r) > 1 and (_parse_number(r[1]) or 0) >= 0
+        ]
+        if not rows:
+            return ""
+
+    n = len(rows)
+    noun = "entry" if n == 1 else "entries"
+    if x_label and not _is_weak_header(x_label):
+        return f"{shape} across {n} {x_label.lower()} {noun}."
+    return f"{shape} across {n} {noun}."

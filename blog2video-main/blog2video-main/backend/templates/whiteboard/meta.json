@@ -1,0 +1,990 @@
+{
+  "id": "whiteboard",
+  "name": "Stick Man",
+  "new_template": false,
+  "popular_template": true,
+  "new_scenes": true,
+  "description": "Storytelling-first template with hand-drawn marker motion, line-draw text reveals, and stick-figure visual metaphors.",
+  "genres": [
+    "Technology",
+    "Business"
+  ],
+  "preview_colors": {
+    "accent": "#1F2937",
+    "bg": "#F7F3E8",
+    "text": "#111827"
+  },
+  "composition_id": "WhiteboardVideo",
+  "hero_layout": "drawn_title",
+  "fallback_layout": "marker_story",
+  "valid_layouts": [
+    "drawn_title",
+    "marker_story",
+    "stick_figure_scene",
+    "stats_figures",
+    "stats_chart",
+    "comparison",
+    "countdown_timer",
+    "handwritten_equation",
+    "speech_bubble_dialogue",
+    "data_visualisation",
+    "ticker_table",
+    "ending_socials"
+  ],
+  "layout_variants": {
+    "drawn_title": [
+      "drawn_title",
+      "drawn_title__v2",
+      "drawn_title__v3"
+    ],
+    "marker_story": [
+      "marker_story",
+      "marker_story__v2"
+    ],
+    "stick_figure_scene": [
+      "stick_figure_scene",
+      "stick_figure_scene__v2"
+    ],
+    "ending_socials": [
+      "ending_socials",
+      "ending_socials__v2"
+    ]
+  },
+  "layout_variant_labels": {
+    "drawn_title": "Classic",
+    "drawn_title__v2": "Sketch Board",
+    "drawn_title__v3": "Marker Sweep",
+    "marker_story": "Classic",
+    "marker_story__v2": "Framed Photo",
+    "stick_figure_scene": "Classic",
+    "stick_figure_scene__v2": "Chalk Talk",
+    "ending_socials": "Classic",
+    "ending_socials__v2": "Signboard"
+  },
+  "layouts_without_image": [
+    "drawn_title",
+    "stick_figure_scene",
+    "stats_figures",
+    "stats_chart",
+    "comparison",
+    "countdown_timer",
+    "handwritten_equation",
+    "speech_bubble_dialogue",
+    "data_visualisation",
+    "ending_socials",
+    "ticker_table"
+  ],
+  "layout_prop_schema": {
+    "drawn_title": {
+      "label": "Drawn Title",
+      "scene_defaults": {
+        "title": "Every Big Idea Starts on a Blank Page",
+        "narration": "Before the polish and the pitch decks, there was a scribble in a notebook that nobody else believed in yet."
+      },
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 81,
+          "landscape": 66
+        },
+        "descriptionFontSize": {
+          "portrait": 37,
+          "landscape": 27
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 90,
+          "step": 1
+        }
+      ]
+    },
+    "marker_story": {
+      "label": "Marker Story",
+      "scene_defaults": {
+        "title": "The Simplest Ideas Travel the Furthest",
+        "narration": "Complexity is easy to manufacture and hard to explain. The ideas that spread are the ones a stranger can repeat correctly after hearing them once."
+      },
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 90,
+          "landscape": 63
+        },
+        "descriptionFontSize": {
+          "portrait": 33,
+          "landscape": 28
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 90,
+          "step": 1
+        }
+      ]
+    },
+    "stick_figure_scene": {
+      "label": "Stick Figure Scene",
+      "scene_defaults": {
+        "title": "Show Up Long Enough to Get Good",
+        "narration": "Consistency beats perfection every single time, because the work you actually finish is the only work anyone ever gets to see."
+      },
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 73,
+          "landscape": 62
+        },
+        "descriptionFontSize": {
+          "portrait": 31,
+          "landscape": 28
+        }
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 90,
+          "step": 1
+        }
+      ]
+    },
+    "stats_figures": {
+      "label": "Stats Figures",
+      "scene_defaults": {
+        "title": "The Numbers Behind the Story",
+        "narration": "Every figure below represents thousands of small decisions, and together they explain more than any headline could on its own."
+      },
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 72,
+          "landscape": 62
+        },
+        "descriptionFontSize": {
+          "portrait": 27,
+          "landscape": 25
+        },
+        "stats": [
+          {
+            "label": "Growth",
+            "value": "50%"
+          },
+          {
+            "label": "Faster",
+            "value": "3x"
+          },
+          {
+            "label": "Users",
+            "value": "10K+"
+          },
+          {
+            "label": "Revenue",
+            "value": "$2M"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "stats",
+          "label": "Stats",
+          "type": "object_array",
+          "maxItems": 5,
+          "subFields": [
+            {
+              "key": "label",
+              "label": "Label"
+            },
+            {
+              "key": "value",
+              "label": "Value"
+            }
+          ]
+        }
+      ]
+    },
+    "stats_chart": {
+      "label": "Stats Chart",
+      "scene_defaults": {
+        "title": "How the Options Really Stack Up",
+        "narration": "Side by side, the trade-offs become obvious in a way that no amount of description manages to capture."
+      },
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 72,
+          "landscape": 69
+        },
+        "descriptionFontSize": {
+          "portrait": 31,
+          "landscape": 23
+        },
+        "stats": [
+          {
+            "label": "Option A",
+            "value": "85"
+          },
+          {
+            "label": "Option B",
+            "value": "60"
+          },
+          {
+            "label": "Option C",
+            "value": "40"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "stats",
+          "label": "Bars",
+          "type": "object_array",
+          "maxItems": 5,
+          "subFields": [
+            {
+              "key": "label",
+              "label": "Label"
+            },
+            {
+              "key": "value",
+              "label": "Value (0-100)"
+            }
+          ]
+        }
+      ]
+    },
+    "comparison": {
+      "label": "Comparison",
+      "scene_defaults": {
+        "title": "Two Ways of Looking at the Same Problem",
+        "narration": "Neither side is arguing in bad faith. They are optimising for different things, and that is what makes the debate worth having."
+      },
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 50,
+          "landscape": 57
+        },
+        "descriptionFontSize": {
+          "portrait": 22,
+          "landscape": 29
+        },
+        "leftThought": "Coffee first thing in the morning",
+        "rightThought": "Tea for a mindful start to the day"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "leftThought",
+          "label": "Left Thought",
+          "type": "text"
+        },
+        {
+          "key": "rightThought",
+          "label": "Right Thought",
+          "type": "text"
+        }
+      ]
+    },
+    "countdown_timer": {
+      "label": "Countdown Timer",
+      "scene_defaults": {
+        "title": "The Clock Is Already Running",
+        "narration": "until the window closes for good"
+      },
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 69,
+          "landscape": 53
+        },
+        "descriptionFontSize": {
+          "portrait": 35,
+          "landscape": 25
+        },
+        "stats": [
+          {
+            "label": "start",
+            "value": "5"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "stats",
+          "label": "Countdown Settings",
+          "type": "object_array",
+          "maxItems": 1,
+          "subFields": [
+            {
+              "key": "value",
+              "label": "Start At (2-9)"
+            },
+            {
+              "key": "label",
+              "label": "Label (optional)"
+            }
+          ]
+        }
+      ]
+    },
+    "handwritten_equation": {
+      "label": "Handwritten Equation",
+      "scene_defaults": {
+        "title": "Breaking the Formula Down Piece by Piece",
+        "narration": "Once you see which term does the heavy lifting, the rest of the equation stops looking intimidating and starts looking obvious."
+      },
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 80,
+          "landscape": 68
+        },
+        "descriptionFontSize": {
+          "portrait": 32,
+          "landscape": 27
+        },
+        "stats": [
+          {
+            "label": "Compound Interest Formula",
+            "value": "A = P · (1 + r/n)^(n·t)"
+          },
+          {
+            "label": "Where:",
+            "value": "P = principal,  r = rate,  n = compounds/yr"
+          },
+          {
+            "label": "Example:",
+            "value": "A = 1000 · (1 + 0.05/12)^(12·5)"
+          },
+          {
+            "label": "Result:",
+            "value": "A ≈ $1,283.36"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "stats",
+          "label": "Equation Steps",
+          "type": "object_array",
+          "maxItems": 5,
+          "subFields": [
+            {
+              "key": "label",
+              "label": "Step Label"
+            },
+            {
+              "key": "value",
+              "label": "Step Value"
+            }
+          ]
+        }
+      ]
+    },
+    "speech_bubble_dialogue": {
+      "label": "Speech Bubble Dialogue",
+      "scene_defaults": {
+        "title": "The Conversation Everyone Is Having",
+        "narration": ""
+      },
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 72,
+          "landscape": 33
+        },
+        "descriptionFontSize": {
+          "portrait": 30,
+          "landscape": 17
+        },
+        "leftThought": "Wait, did you know?",
+        "rightThought": "Tell me more!",
+        "stats": [
+          {
+            "label": "Person A",
+            "value": ""
+          },
+          {
+            "label": "Person B",
+            "value": ""
+          }
+        ]
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 20,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Description Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "leftThought",
+          "label": "Left Bubble",
+          "type": "text"
+        },
+        {
+          "key": "rightThought",
+          "label": "Right Bubble",
+          "type": "text"
+        },
+        {
+          "key": "stats",
+          "label": "Speaker Labels",
+          "type": "object_array",
+          "maxItems": 2,
+          "subFields": [
+            {
+              "key": "label",
+              "label": "Name"
+            },
+            {
+              "key": "value",
+              "label": "Unused (optional)"
+            }
+          ]
+        }
+      ]
+    },
+    "data_visualisation": {
+      "label": "Data Visualisation",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 63,
+          "landscape": 48
+        },
+        "descriptionFontSize": {
+          "portrait": 33,
+          "landscape": 22
+        },
+        "chartType": "line",
+        "chartSummary": "The trend climbs steadily before easing off near the end.",
+        "chartTable": {
+          "headers": [
+            "Step",
+            "Value",
+            "Target"
+          ],
+          "rows": [
+            [
+              "One",
+              "298",
+              "72"
+            ],
+            [
+              "Two",
+              "308",
+              "68"
+            ],
+            [
+              "Three",
+              "315",
+              "61"
+            ],
+            [
+              "Four",
+              "324",
+              "55"
+            ],
+            [
+              "Five",
+              "318",
+              "59"
+            ]
+          ]
+        },
+        "chartYAxisTicks": [],
+        "subtitle": "Step",
+        "yAxisLabel": "Value",
+        "barPrimaryColor": "#1F2937",
+        "barSecondaryColor": "#C0563B",
+        "barTertiaryColor": "#2F7D5B"
+      },
+      "scene_defaults": {
+        "title": "What the Data Actually Says",
+        "narration": "Here is how the figures stack up on the board, once you strip away the framing and let the numbers speak plainly for themselves.",
+        "durationSeconds": 6
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "chartType",
+          "label": "Chart Type",
+          "type": "select",
+          "options": [
+            {
+              "label": "Auto (infer from data)",
+              "value": "auto"
+            },
+            {
+              "label": "Line",
+              "value": "line"
+            },
+            {
+              "label": "Bar",
+              "value": "bar"
+            },
+            {
+              "label": "Histogram",
+              "value": "histogram"
+            }
+          ]
+        },
+        {
+          "key": "chartTable",
+          "label": "Chart data — col 1: X labels; cols 2–4: up to 3 numeric series (max 20 data rows). Use bar for named categories; histogram for bins/ranges (0–10, <5, 50+).",
+          "type": "chart_table"
+        },
+        {
+          "key": "yAxisLabel",
+          "label": "Y-axis label (overrides chart header)",
+          "type": "string"
+        },
+        {
+          "key": "subtitle",
+          "label": "X-axis / category caption (overrides first column header)",
+          "type": "string"
+        },
+        {
+          "key": "chartYAxisTicks",
+          "label": "Y-axis tick labels (top → bottom; 2–4 values)",
+          "type": "string_array"
+        },
+        {
+          "key": "chartSummary",
+          "label": "Chart summary (short read beside the graphic)",
+          "type": "string"
+        },
+        {
+          "key": "barPrimaryColor",
+          "label": "Series color 1",
+          "type": "color"
+        },
+        {
+          "key": "barSecondaryColor",
+          "label": "Series color 2",
+          "type": "color"
+        },
+        {
+          "key": "barTertiaryColor",
+          "label": "Series color 3",
+          "type": "color"
+        }
+      ]
+    },
+    "ending_socials": {
+      "label": "Ending / Follow along",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 88,
+          "landscape": 58
+        },
+        "descriptionFontSize": {
+          "portrait": 44,
+          "landscape": 26
+        },
+        "hideImage": true,
+        "socials": [
+          {
+            "platform": "facebook",
+            "enabled": "true",
+            "label": "Facebook"
+          },
+          {
+            "platform": "instagram",
+            "enabled": "true",
+            "label": "Instagram"
+          },
+          {
+            "platform": "youtube",
+            "enabled": "true",
+            "label": "YouTube"
+          },
+          {
+            "platform": "medium",
+            "enabled": "false",
+            "label": "Medium"
+          },
+          {
+            "platform": "substack",
+            "enabled": "false",
+            "label": "Substack"
+          },
+          {
+            "platform": "linkedin",
+            "enabled": "false",
+            "label": "LinkedIn"
+          },
+          {
+            "platform": "tiktok",
+            "enabled": "false",
+            "label": "TikTok"
+          }
+        ],
+        "showWebsiteButton": true,
+        "websiteLink": "https://yourwebsite.com"
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 18,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Subtext Font Size",
+          "type": "number",
+          "responsive": true,
+          "min": 12,
+          "max": 120,
+          "step": 1
+        },
+        {
+          "key": "socials",
+          "label": "Social Platforms",
+          "type": "object_array",
+          "maxItems": 7,
+          "subFields": [
+            {
+              "key": "platform",
+              "label": "Platform (facebook, instagram, youtube, medium, substack, linkedin, tiktok)"
+            },
+            {
+              "key": "enabled",
+              "label": "Enabled (true/false)"
+            },
+            {
+              "key": "label",
+              "label": "Label / handle / URL text"
+            }
+          ]
+        },
+        {
+          "key": "showWebsiteButton",
+          "label": "Show Website CTA Button",
+          "type": "select",
+          "options": [
+            {
+              "label": "Enabled",
+              "value": "true"
+            },
+            {
+              "label": "Disabled",
+              "value": "false"
+            }
+          ]
+        },
+        {
+          "key": "websiteLink",
+          "label": "Website Link",
+          "type": "string",
+          "placeholder": "https://yourwebsite.com"
+        }
+      ]
+    },
+    "ticker_table": {
+      "label": "Data Table",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 62,
+          "landscape": 56
+        },
+        "descriptionFontSize": {
+          "portrait": 31,
+          "landscape": 26
+        },
+        "tickerTitle": "Key Figures",
+        "tickerFootnote": "Source: editorial research",
+        "tickerHighlightCol": 2,
+        "tickerTable": {
+          "headers": [
+            "Category",
+            "Value",
+            "Change"
+          ],
+          "rows": [
+            [
+              "Item A",
+              "1,240",
+              "+4.2%"
+            ],
+            [
+              "Item B",
+              "980",
+              "-1.8%"
+            ],
+            [
+              "Item C",
+              "2,100",
+              "+7.1%"
+            ]
+          ]
+        }
+      },
+      "scene_defaults": {
+        "title": "Key Figures From the Story",
+        "narration": "The numbers at a glance, pulled straight from the reporting so you can scan the whole picture without losing the detail.",
+        "durationSeconds": 6
+      },
+      "fields": [
+        {
+          "key": "titleFontSize",
+          "label": "Title Size",
+          "type": "number",
+          "responsive": true,
+          "min": 14,
+          "max": 180,
+          "step": 1
+        },
+        {
+          "key": "descriptionFontSize",
+          "label": "Body Size",
+          "type": "number",
+          "responsive": true,
+          "min": 10,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "key": "tickerTitle",
+          "label": "Table subtitle",
+          "type": "string"
+        },
+        {
+          "key": "tickerTable",
+          "label": "Table data — col 1: row labels; cols 2–6: values (max 20 rows, 6 cols)",
+          "type": "ticker_table"
+        },
+        {
+          "key": "tickerHighlightCol",
+          "label": "Highlight column index (0-based, -1 to disable)",
+          "type": "number",
+          "min": -1,
+          "max": 5,
+          "step": 1
+        },
+        {
+          "key": "tickerFootnote",
+          "label": "Source / Footnote",
+          "type": "string"
+        }
+      ]
+    },
+    "ending_socials__v2": {
+      "label": "Signboard",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 46,
+          "landscape": 43
+        },
+        "descriptionFontSize": {
+          "portrait": 29,
+          "landscape": 24
+        }
+      }
+    },
+    "drawn_title__v2": {
+      "label": "Sketch Board",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 62,
+          "landscape": 51
+        },
+        "descriptionFontSize": {
+          "portrait": 32,
+          "landscape": 27
+        }
+      }
+    },
+    "drawn_title__v3": {
+      "label": "Marker Sweep",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 77,
+          "landscape": 66
+        },
+        "descriptionFontSize": {
+          "portrait": 37,
+          "landscape": 27
+        }
+      }
+    },
+    "stick_figure_scene__v2": {
+      "label": "Chalk Talk",
+      "defaults": {
+        "titleFontSize": {
+          "portrait": 52,
+          "landscape": 54
+        },
+        "descriptionFontSize": {
+          "portrait": 29,
+          "landscape": 28
+        }
+      }
+    }
+  },
+  "features": [
+    "Hand-drawn marker reveal animations",
+    "Story-beat focused layout flow",
+    "Stick-figure and doodle metaphor scenes",
+    "Stats and chart layouts for key figures",
+    "Comparison layout with two stick figures and thought clouds",
+    "Countdown timer with ring and tick marks",
+    "Handwritten equation step-by-step reveal",
+    "Speech bubble dialogue between two figures",
+    "Portrait and landscape responsive layout"
+  ]
+}

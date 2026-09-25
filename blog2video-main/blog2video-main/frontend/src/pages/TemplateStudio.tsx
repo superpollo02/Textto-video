@@ -1,0 +1,3619 @@
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentType,
+  type MouseEvent as ReactMouseEvent,
+  type TouchEvent as ReactTouchEvent,
+} from "react";
+import ReactDOM from "react-dom";
+import { Player } from "@remotion/player";
+import {
+  applyTemplateAiPreview,
+  discardTemplateAiPreview,
+  getTemplates,
+  startTemplateAiPreview,
+  startTemplateAiPreviewFile,
+  saveTemplateSourceDefaults,
+  switchTemplateAiPreviewVersion,
+  type LayoutPropField,
+  type LayoutPropSchema,
+  type TemplateMeta,
+  type StartTemplateAiPreviewResponse,
+  getTemplateAiVersions,
+  type ListTemplateAiVersionsResponse,
+  rebuildTemplateLayout,
+  rebuildTemplateLayoutFile,
+  createTemplateLayout,
+  createTemplateFromDoc,
+  planTemplateFromDoc,
+  extractDesignDocFile,
+  renderTemplateLayout,
+  type PropDef,
+  type TemplatePlan,
+  SUPPORTED_PROP_TYPES,
+} from "../api/client";
+import { getTemplateConfig } from "../components/remotion/templateConfig";
+import { baseLayoutId } from "../utils/layoutVariants";
+import { getPlaybackSpeed, getSceneDurationFrames } from "../components/remotion/playbackSpeed";
+import { getImageBoxAspectRatio, normalizeLayoutId, isImageBoxCircular } from "../components/remotion/imageBoxConfig";
+import { BLOOMBERG_LAYOUT_REGISTRY } from "../components/remotion/bloomberg/layouts";
+import type { MagazineLayoutType } from "../components/remotion/magazine/types";
+import { planMagazineBoundaries, resolveMagazineLayout } from "../components/remotion/magazine/MagazineVideoComposition";
+import { computeSakuraVideoTotalFrames } from "../components/remotion/sakura/SakuraVideoComposition";
+
+const BLOOMBERG_LAYOUT_IDS = new Set(Object.keys(BLOOMBERG_LAYOUT_REGISTRY));
+const MAGAZINE_EXTRA_HOLD = 42;
+import ManifestPropEditor from "../components/template-studio/ManifestPropEditor";
+
+const IMAGE_ADJUST_ZOOM_MIN = 0.1;
+const IMAGE_ADJUST_ZOOM_MAX = 8;
+
+// Length limits for the AI-generation text inputs. These MUST match the backend
+// Pydantic `Field(min_length=…, max_length=…)` constraints so the UI blocks/warns
+// before the request 422s. See backend/app/routers/template_studio.py:
+//   AiLayoutCreateRequest.layout_description  → min 10,  max 2000
+//   PlanTemplateRequest/…create.design_doc    → min 50,  max 40000
+const LAYOUT_DESC_MIN = 10;
+const LAYOUT_DESC_MAX = 2000;
+const DESIGN_DOC_MIN = 50;
+const DESIGN_DOC_MAX = 40000;
+
+type AspectRatio = "landscape" | "portrait";
+
+function clampFocusPct(value: number): number {
+  return Math.max(0, Math.min(100, value));
+}
+type ResponsiveValue = { portrait: number; landscape: number };
+
+function isResponsiveValue(value: unknown): value is ResponsiveValue {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.portrait === "number" && typeof v.landscape === "number";
+}
+
+function normalizeTemplateId(templateId: string): string {
+  return (templateId || "").trim().toLowerCase();
+}
+
+function humanize(value: string): string {
+  return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function planLayoutRowsForReview(
+  plan: TemplatePlan,
+  layoutOrder: string[],
+): { id: string; label: string }[] {
+  const raw = plan && typeof plan === "object" && Array.isArray((plan as { layouts?: unknown }).layouts)
+    ? (plan as { layouts: { id?: string; label?: string }[] }).layouts
+    : [];
+  const labelById = new Map(
+    raw.filter((l) => l && typeof l.id === "string").map((l) => [l.id as string, String(l.label || l.id)]),
+  );
+  return layoutOrder.map((id) => ({ id, label: labelById.get(id) ?? id }));
+}
+
+const TYPOGRAPHY_FIELDS: LayoutPropField[] = [
+  { key: "titleFontSize", label: "Title Font Size", type: "number", responsive: true, min: 20, max: 180, step: 1 },
+  { key: "descriptionFontSize", label: "Description Font Size", type: "number", responsive: true, min: 12, max: 100, step: 1 },
+];
+
+const TYPOGRAPHY_DEFAULTS: Record<string, ResponsiveValue> = {
+  titleFontSize: { portrait: 56, landscape: 76 },
+  descriptionFontSize: { portrait: 24, landscape: 34 },
+};
+
+const NEWSCAST_TYPOGRAPHY_DEFAULTS_BY_LAYOUT: Record<string, { titleFontSize: ResponsiveValue; descriptionFontSize: ResponsiveValue }> = {
+  opening: { titleFontSize: { portrait: 94, landscape: 72 }, descriptionFontSize: { portrait: 23, landscape: 18 } },
+  anchor_narrative: { titleFontSize: { portrait: 39, landscape: 30 }, descriptionFontSize: { portrait: 20, landscape: 16 } },
+  live_metrics_board: { titleFontSize: { portrait: 23, landscape: 18 }, descriptionFontSize: { portrait: 18, landscape: 14 } },
+  briefing_code_panel: { titleFontSize: { portrait: 23, landscape: 18 }, descriptionFontSize: { portrait: 18, landscape: 14 } },
+  headline_insight: { titleFontSize: { portrait: 75, landscape: 58 }, descriptionFontSize: { portrait: 17, landscape: 13 } },
+  story_stack: { titleFontSize: { portrait: 31, landscape: 24 }, descriptionFontSize: { portrait: 18, landscape: 14 } },
+  side_by_side_brief: { titleFontSize: { portrait: 34, landscape: 26 }, descriptionFontSize: { portrait: 18, landscape: 14 } },
+  segment_break: { titleFontSize: { portrait: 47, landscape: 36 }, descriptionFontSize: { portrait: 18, landscape: 14 } },
+  field_image_focus: { titleFontSize: { portrait: 34, landscape: 26 }, descriptionFontSize: { portrait: 19, landscape: 15 } },
+  ending_socials: { titleFontSize: { portrait: 52, landscape: 40 }, descriptionFontSize: { portrait: 20, landscape: 16 } },
+  data_visualization: { titleFontSize: { portrait: 46, landscape: 34 }, descriptionFontSize: { portrait: 30, landscape: 25 } },
+};
+
+const ECONOMIST_TYPOGRAPHY_DEFAULTS_BY_LAYOUT: Record<string, { titleFontSize: ResponsiveValue; descriptionFontSize: ResponsiveValue }> = {
+  cover_reveal: { titleFontSize: { portrait: 104, landscape: 132 }, descriptionFontSize: { portrait: 30, landscape: 26 } },
+  leader_article: { titleFontSize: { portrait: 68, landscape: 82 }, descriptionFontSize: { portrait: 32, landscape: 30 } },
+  section_divider: { titleFontSize: { portrait: 120, landscape: 156 }, descriptionFontSize: { portrait: 28, landscape: 26 } },
+  chart_line: { titleFontSize: { portrait: 46, landscape: 50 }, descriptionFontSize: { portrait: 24, landscape: 22 } },
+  chart_bar: { titleFontSize: { portrait: 46, landscape: 50 }, descriptionFontSize: { portrait: 24, landscape: 22 } },
+  data_table: { titleFontSize: { portrait: 48, landscape: 52 }, descriptionFontSize: { portrait: 24, landscape: 22 } },
+  pros_cons: { titleFontSize: { portrait: 56, landscape: 62 }, descriptionFontSize: { portrait: 24, landscape: 22 } },
+  key_indicators: { titleFontSize: { portrait: 52, landscape: 56 }, descriptionFontSize: { portrait: 24, landscape: 22 } },
+  leader_quote: { titleFontSize: { portrait: 56, landscape: 72 }, descriptionFontSize: { portrait: 24, landscape: 22 } },
+  image_feature: { titleFontSize: { portrait: 64, landscape: 80 }, descriptionFontSize: { portrait: 24, landscape: 22 } },
+  ending_socials: { titleFontSize: { portrait: 56, landscape: 60 }, descriptionFontSize: { portrait: 26, landscape: 24 } },
+};
+
+// Per-layout title/body sizes mirrored from SceneEditModal's LAYOUT_FONT_DEFAULTS.magazine
+// so the Template Studio Typography section matches the scene editor and the rendered MP4.
+const MAGAZINE_TYPOGRAPHY_DEFAULTS_BY_LAYOUT: Record<string, { titleFontSize: ResponsiveValue; descriptionFontSize: ResponsiveValue }> = {
+  magazine_cover: { titleFontSize: { portrait: 68, landscape: 88 }, descriptionFontSize: { portrait: 16, landscape: 20 } },
+  editorial_quote: { titleFontSize: { portrait: 56, landscape: 72 }, descriptionFontSize: { portrait: 18, landscape: 24 } },
+  by_the_numbers: { titleFontSize: { portrait: 56, landscape: 72 }, descriptionFontSize: { portrait: 20, landscape: 26 } },
+  interview_qa: { titleFontSize: { portrait: 40, landscape: 52 }, descriptionFontSize: { portrait: 16, landscape: 20 } },
+  magazine_data_visualization: { titleFontSize: { portrait: 56, landscape: 52 }, descriptionFontSize: { portrait: 28, landscape: 26 } },
+  timeline_journey: { titleFontSize: { portrait: 40, landscape: 52 }, descriptionFontSize: { portrait: 16, landscape: 20 } },
+  text_narration: { titleFontSize: { portrait: 100, landscape: 72 }, descriptionFontSize: { portrait: 40, landscape: 30 } },
+  ending_socials: { titleFontSize: { portrait: 88, landscape: 72 }, descriptionFontSize: { portrait: 35, landscape: 27 } },
+  magazine_ticker: { titleFontSize: { portrait: 52, landscape: 42 }, descriptionFontSize: { portrait: 28, landscape: 22 } },
+};
+
+function withTypographyControls(
+  schema: LayoutPropSchema,
+  options?: { defaultTypography?: { titleFontSize: ResponsiveValue; descriptionFontSize: ResponsiveValue } },
+): LayoutPropSchema {
+  const fields = Array.isArray(schema.fields) ? schema.fields : [];
+  const hasTitleField = fields.some((field) => field.key === "titleFontSize" && field.responsive);
+  const hasDescriptionField = fields.some((field) => field.key === "descriptionFontSize" && field.responsive);
+  if (hasTitleField && hasDescriptionField) return schema;
+
+  const defaultTypography = options?.defaultTypography ?? {
+    titleFontSize: TYPOGRAPHY_DEFAULTS.titleFontSize,
+    descriptionFontSize: TYPOGRAPHY_DEFAULTS.descriptionFontSize,
+  };
+  const defaults = { ...(schema.defaults ?? {}) } as Record<string, unknown>;
+  if (!isResponsiveValue(defaults.titleFontSize)) defaults.titleFontSize = defaultTypography.titleFontSize;
+  if (!isResponsiveValue(defaults.descriptionFontSize)) defaults.descriptionFontSize = defaultTypography.descriptionFontSize;
+
+  return {
+    ...schema,
+    defaults,
+    fields: [
+      ...(hasTitleField ? [] : [TYPOGRAPHY_FIELDS[0]]),
+      ...(hasDescriptionField ? [] : [TYPOGRAPHY_FIELDS[1]]),
+      ...fields,
+    ],
+  };
+}
+
+function getSchema(
+  template: TemplateMeta | null,
+  layoutId: string | null
+): LayoutPropSchema | undefined {
+  if (!template || !layoutId) return undefined;
+  // Visual variants share their base layout's FIELDS, but may declare their own
+  // entry for per-variant typography defaults — and `save_source_defaults` writes
+  // to the EXACT layout id (see backend _update_meta_defaults). So the exact
+  // entry must win here; resolving straight to the base made Studio read the
+  // base's defaults back after saving a variant, reverting the inputs to the old
+  // values. Falling back to the base keeps variants without an entry working.
+  const baseId = baseLayoutId(layoutId) || layoutId;
+  const baseEntry = template.layout_prop_schema?.[baseId];
+  const variantEntry = layoutId !== baseId ? template.layout_prop_schema?.[layoutId] : undefined;
+  // A variant entry carries only `label` + `defaults` (no `fields`), so it is
+  // MERGED over the base rather than replacing it: base supplies the editable
+  // prop fields, the variant overrides the typography defaults and label.
+  const explicit =
+    variantEntry && baseEntry
+      ? {
+          ...baseEntry,
+          ...variantEntry,
+          defaults: { ...(baseEntry.defaults ?? {}), ...(variantEntry.defaults ?? {}) },
+        }
+      : (variantEntry ?? baseEntry);
+  const tid = normalizeTemplateId(template.id);
+  const perLayoutTypography =
+    tid === "newscast"
+      ? NEWSCAST_TYPOGRAPHY_DEFAULTS_BY_LAYOUT
+      : tid === "economist"
+        ? ECONOMIST_TYPOGRAPHY_DEFAULTS_BY_LAYOUT
+        : tid === "magazine"
+          ? MAGAZINE_TYPOGRAPHY_DEFAULTS_BY_LAYOUT
+          : null;
+  const applyTypography = perLayoutTypography !== null;
+  const layoutTypographyDefaults =
+    perLayoutTypography && layoutId ? perLayoutTypography[layoutId] : undefined;
+  if (explicit) {
+    return applyTypography
+      ? withTypographyControls(explicit, { defaultTypography: layoutTypographyDefaults })
+      : explicit;
+  }
+
+  const fallbackSchema: LayoutPropSchema = {
+    label: humanize(layoutId),
+    defaults: TYPOGRAPHY_DEFAULTS,
+    fields: TYPOGRAPHY_FIELDS,
+  };
+  return applyTypography
+    ? withTypographyControls(fallbackSchema, { defaultTypography: layoutTypographyDefaults })
+    : fallbackSchema;
+}
+
+function layoutSupportsImageForTemplate(template: TemplateMeta | null, layoutId: string): boolean {
+  if (!template || !layoutId) return false;
+  const noImage = template.layouts_without_image ?? [];
+  // Keyed by base layout — a variant inherits its base's image support.
+  return !noImage.includes(baseLayoutId(layoutId) || layoutId);
+}
+
+/** Per-layout defaults for preview (used when sequencing all layouts; not the editable single-layout overrides). */
+function buildResolvedLayoutPropsForPreview(
+  template: TemplateMeta | null,
+  layoutId: string,
+  isPortrait: boolean,
+  imageUrlTrimmed: string,
+  fetchedImageUrl: string,
+  imageFetching: boolean,
+  imageFocusX: number,
+  imageFocusY: number,
+  imageZoom: number,
+): Record<string, unknown> {
+  const schema = getSchema(template, layoutId);
+  if (!schema) return {};
+  // Layer the layout's own dummy `sample_props` over `defaults` so the
+  // "play all layouts" sequence shows each layout's preset content (exchanges,
+  // stats, milestones, …), mirroring the single-scene effect. sample_props is
+  // Studio-preview-only and never reaches real renders.
+  const next: Record<string, unknown> = { ...(schema.defaults ?? {}), ...(schema.sample_props ?? {}) };
+  schema.fields.forEach((field) => {
+    if (field.type === "number" && field.responsive) {
+      const raw = next[field.key];
+      if (isResponsiveValue(raw)) next[field.key] = isPortrait ? raw.portrait : raw.landscape;
+    }
+  });
+  const supportsImage = layoutSupportsImageForTemplate(template, layoutId);
+  const effectiveUrl =
+    supportsImage && imageUrlTrimmed && fetchedImageUrl && !imageFetching ? fetchedImageUrl : undefined;
+  if (effectiveUrl) {
+    next.imageFocusX = Math.max(0, Math.min(100, imageFocusX));
+    next.imageFocusY = Math.max(0, Math.min(100, imageFocusY));
+    next.imageZoom = Math.max(IMAGE_ADJUST_ZOOM_MIN, Math.min(IMAGE_ADJUST_ZOOM_MAX, imageZoom));
+  } else {
+    delete next.imageFocusX;
+    delete next.imageFocusY;
+    delete next.imageZoom;
+  }
+  return next;
+}
+
+// ─── Design tokens ────────────────────────────────────────────────────────────
+// Font stack pulled from the attached layout component (Geist/system ui-sans-serif)
+const FONT = `-apple-system, BlinkMacSystemFont, "Segoe UI", "Geist", ui-sans-serif, system-ui, sans-serif`;
+
+const T = {
+  bg:           "#ffffff",
+  surface:      "#ffffff",
+  surfaceAlt:   "#f9fafb",
+  border:       "#e5e7eb",
+  borderStrong: "#d1d5db",
+  accent:       "#9333ea",
+  accentLight:  "#faf5ff",
+  accentMid:    "#c084fc",
+  accentDark:   "#7e22ce",
+  text:         "#111827",
+  textSub:      "#6b7280",
+  textMuted:    "#9ca3af",
+  green:        "#16a34a",
+  greenBg:      "#f0fdf4",
+  greenBorder:  "#bbf7d0",
+};
+
+// ─── Icons ────────────────────────────────────────────────────────────────────
+const Svg = ({ d, size = 14 }: { d: string; size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d={d} />
+  </svg>
+);
+const IconGrid    = ({ size }: { size?: number } = {}) => <Svg d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z" size={size} />;
+const IconLayout  = ({ size }: { size?: number } = {}) => <Svg d="M3 3h18v18H3zM3 9h18M9 21V9" size={size} />;
+const IconType    = ({ size }: { size?: number } = {}) => <Svg d="M4 7V4h16v3M9 20h6M12 4v16" size={size} />;
+const IconLink    = ({ size }: { size?: number } = {}) => <Svg d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" size={size} />;
+const IconDroplet = ({ size }: { size?: number } = {}) => <Svg d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" size={size} />;
+const IconReset   = ({ size }: { size?: number } = {}) => <Svg d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5" size={size} />;
+const IconSliders = ({ size }: { size?: number } = {}) => <Svg d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" size={size} />;
+const IconWand    = ({ size }: { size?: number } = {}) => <Svg d="M15 4V2M15 6v2M21 10h-2M7 10H5M18.3 6.7l-1.4-1.4M11.1 13.9l-7 7 1.4 1.4 7-7M11.7 6.7l1.4-1.4M18.9 13.9l1.4 1.4" size={size} />;
+const IconImage   = ({ size }: { size?: number } = {}) => <Svg d="M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14l3.5-3.5 3 3 4-4 3.5 3.5z" size={size} />;
+const IconClock   = ({ size }: { size?: number } = {}) => <Svg d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zM12 6v6l4 2" size={size} />;
+const IconSave    = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+    <polyline points="17 21 17 13 7 13 7 21"/>
+    <polyline points="7 3 7 8 15 8"/>
+  </svg>
+);
+const IconEdit = () => (
+  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+  </svg>
+);
+const IconX = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+  </svg>
+);
+const IconChevronDown = ({ open }: { open: boolean }) => (
+  <svg
+    width="16" height="16" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+    style={{ transform: open ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s ease" }}
+  >
+    <path d="M19 9l-7 7-7-7" />
+  </svg>
+);
+
+// ─── Base input style ─────────────────────────────────────────────────────────
+const inputBase: React.CSSProperties = {
+  width: "100%", padding: "7px 10px",
+  background: T.surfaceAlt, border: `1px solid ${T.border}`,
+  borderRadius: "8px", color: T.text,
+  fontSize: "13px", fontFamily: FONT,
+  outline: "none", boxSizing: "border-box",
+  transition: "border-color 0.15s, box-shadow 0.15s",
+};
+
+// ─── Primitives ───────────────────────────────────────────────────────────────
+function FieldLabel({ children }: { children: string }) {
+  return (
+    <label style={{ display: "block", fontSize: "11px", fontWeight: 500, color: T.textMuted, marginBottom: "5px", letterSpacing: "0.02em", fontFamily: FONT, textTransform: "uppercase" }}>
+      {children}
+    </label>
+  );
+}
+
+function SectionLabel({ icon, children }: { icon: React.ReactNode; children: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "10px" }}>
+      <span style={{ color: T.accentMid }}>{icon}</span>
+      <span style={{ fontSize: "10px", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase" as const, color: T.textSub, fontFamily: FONT }}>
+        {children}
+      </span>
+    </div>
+  );
+}
+
+function StudioInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return <input type="text" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="studio-input" style={inputBase} />;
+}
+
+function StudioTextarea({ value, onChange, rows = 3 }: { value: string; onChange: (v: string) => void; rows?: number }) {
+  return <textarea value={value} onChange={(e) => onChange(e.target.value)} rows={rows} className="studio-input" style={{ ...inputBase, resize: "vertical" as const, lineHeight: "1.6" }} />;
+}
+
+// ─── Custom Dropdown — pill + chevron + popover (matches attached layout code) ─
+function StudioDropdown({
+  value, onChange, options, sectionLabel,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  sectionLabel: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const selectedLabel = options.find((o) => o.value === value)?.label || humanize(value);
+
+  // Close on outside click
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, []);
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <h4 style={{
+        fontSize: "11px", fontWeight: 500, color: T.textMuted,
+        textTransform: "uppercase", letterSpacing: "0.06em",
+        marginBottom: "6px", fontFamily: FONT,
+      }}>
+        {sectionLabel}
+      </h4>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        <span style={{
+          display: "inline-block", padding: "4px 10px",
+          background: T.accentLight, color: T.accent,
+          borderRadius: "8px", fontSize: "12px", fontWeight: 500,
+          fontFamily: FONT,
+          maxWidth: "180px", overflow: "hidden",
+          textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {selectedLabel}
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          style={{
+            padding: "4px", background: "transparent", border: "none",
+            borderRadius: "6px", cursor: "pointer",
+            color: T.textMuted,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            transition: "color 0.15s, background 0.15s",
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.color = T.accent;
+            (e.currentTarget as HTMLButtonElement).style.background = T.accentLight;
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.color = T.textMuted;
+            (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+          }}
+        >
+          <IconChevronDown open={open} />
+        </button>
+      </div>
+
+      {open && (
+        <div style={{
+          position: "absolute", zIndex: 200, top: "100%", left: 0, marginTop: "6px",
+          minWidth: "100%", width: "max-content",
+          background: T.bg, border: `1px solid ${T.border}`,
+          borderRadius: "10px", boxShadow: "0 8px 24px rgba(0,0,0,0.10)",
+          padding: "4px 0", maxHeight: "200px", overflowY: "auto",
+        }}>
+          {options.map((opt) => {
+            const isActive = opt.value === value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => { onChange(opt.value); setOpen(false); }}
+                style={{
+                  width: "100%", textAlign: "left",
+                  padding: "6px 12px", fontSize: "12px",
+                  fontFamily: FONT,
+                  background: isActive ? T.accentLight : "transparent",
+                  color: isActive ? T.accent : T.textSub,
+                  fontWeight: isActive ? 600 : 400,
+                  border: "none", cursor: "pointer",
+                  transition: "background 0.12s, color 0.12s",
+                  whiteSpace: "nowrap",
+                }}
+                onMouseEnter={(e) => {
+                  if (!isActive) {
+                    (e.currentTarget as HTMLButtonElement).style.background = T.accentLight;
+                    (e.currentTarget as HTMLButtonElement).style.color = T.accent;
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!isActive) {
+                    (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+                    (e.currentTarget as HTMLButtonElement).style.color = T.textSub;
+                  }
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Image attach row (for AI layout editing) ──────────────────────────────────
+function ImageAttachRow({
+  image,
+  onImageChange,
+  label = "Reference image",
+}: {
+  image: File | null;
+  onImageChange: (img: File | null) => void;
+  label?: string;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!image) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(image);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [image]);
+
+  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !file.type.startsWith("image/")) return;
+    onImageChange(file);
+    e.target.value = "";
+  };
+  return (
+    <div style={{ marginBottom: "10px" }}>
+      <FieldLabel>{label}</FieldLabel>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,image/gif"
+        onChange={handleFile}
+        style={{ display: "none" }}
+      />
+      {image ? (
+        <div style={{
+          display: "flex", alignItems: "center", gap: "8px",
+          padding: "8px", background: T.surfaceAlt, borderRadius: "8px",
+          border: `1px solid ${T.border}`,
+        }}>
+          <img
+            src={previewUrl || ""}
+            alt="Reference"
+            style={{ width: 48, height: 48, objectFit: "cover", borderRadius: "6px" }}
+          />
+          <span style={{ fontSize: "11px", color: T.textSub, fontFamily: FONT, flex: 1 }}>Attached</span>
+          <button
+            type="button"
+            onClick={() => onImageChange(null)}
+            style={{
+              padding: "4px 8px", fontSize: "11px", fontFamily: FONT,
+              background: "transparent", border: `1px solid ${T.border}`,
+              borderRadius: "6px", color: T.textSub, cursor: "pointer",
+            }}
+          >
+            Remove
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          style={{
+            display: "flex", alignItems: "center", gap: "6px",
+            padding: "8px 12px", fontSize: "11px", fontFamily: FONT,
+            background: T.surfaceAlt, border: `1px dashed ${T.border}`,
+            borderRadius: "8px", color: T.textSub, cursor: "pointer",
+          }}
+        >
+          <IconImage size={14} />
+          Attach image (optional)
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Optional HTML/SVG markup input for the Rebuild flow: paste directly, or upload a
+// file (read client-side into the same textarea). Sent to the backend as the plain-
+// text `html_example` / `svg_example` field, which threads it into the rebuild prompt.
+function MarkupExampleRow({
+  value,
+  onChange,
+  label,
+  accept,
+  uploadLabel,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  label: string;
+  accept: string;
+  uploadLabel: string;
+  placeholder: string;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      onChange(await file.text());
+    } catch {
+      /* ignore unreadable file */
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: "10px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+        <FieldLabel>{label}</FieldLabel>
+        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <input ref={inputRef} type="file" accept={accept} onChange={handleFile} style={{ display: "none" }} />
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            style={{
+              padding: "4px 8px", fontSize: "10px", fontFamily: FONT,
+              background: T.surfaceAlt, border: `1px dashed ${T.border}`,
+              borderRadius: "6px", color: T.textSub, cursor: "pointer",
+            }}
+          >
+            {uploadLabel}
+          </button>
+          {value && (
+            <button
+              type="button"
+              onClick={() => onChange("")}
+              style={{
+                padding: "4px 8px", fontSize: "10px", fontFamily: FONT,
+                background: "transparent", border: `1px solid ${T.border}`,
+                borderRadius: "6px", color: T.textSub, cursor: "pointer",
+              }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
+      <textarea
+        className="studio-input"
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={5}
+        spellCheck={false}
+        style={{
+          ...inputBase, resize: "vertical" as const, background: T.surfaceAlt,
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          fontSize: "11px", lineHeight: "1.5", marginTop: "4px",
+        }}
+      />
+    </div>
+  );
+}
+
+// ─── Responsive font-size row ─────────────────────────────────────────────────
+function ResponsiveFieldRow({ field, value, aspectRatio, onChange }: {
+  field: LayoutPropField; value: unknown;
+  aspectRatio: AspectRatio; onChange: (key: string, val: unknown) => void;
+}) {
+  const rv = isResponsiveValue(value) ? value : { portrait: (value as number) ?? 0, landscape: (value as number) ?? 0 };
+  const currentVal = aspectRatio === "portrait" ? rv.portrait : rv.landscape;
+  const pct = Math.round(((currentVal - (field.min ?? 0)) / ((field.max ?? 200) - (field.min ?? 0))) * 100);
+
+  const handleChange = (v: number) => {
+    onChange(field.key, {
+      portrait:  aspectRatio === "portrait"  ? v : rv.portrait,
+      landscape: aspectRatio === "landscape" ? v : rv.landscape,
+    });
+  };
+
+  return (
+    <div style={{ marginBottom: "14px" }}>
+      <FieldLabel>{field.label}</FieldLabel>
+      <input
+        type="range" min={field.min ?? 0} max={field.max ?? 200} step={field.step ?? 1}
+        value={currentVal} onChange={(e) => handleChange(Number(e.target.value))}
+        className="studio-range"
+        style={{ width: "100%", marginBottom: "4px", background: `linear-gradient(to right, ${T.accent} 0%, ${T.accent} ${pct}%, ${T.border} ${pct}%, ${T.border} 100%)` }}
+      />
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <span style={{ fontSize: "10px", color: T.textMuted, fontFamily: FONT }}>{field.min ?? 0}</span>
+        <span style={{ fontSize: "12px", color: T.accent, fontWeight: 600, background: T.accentLight, padding: "1px 8px", borderRadius: "100px", border: `1px solid ${T.accentMid}44`, fontFamily: FONT }}>
+          {currentVal}px
+        </span>
+        <span style={{ fontSize: "10px", color: T.textMuted, fontFamily: FONT }}>{field.max ?? 200}</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Scene Settings Modal ─────────────────────────────────────────────────────
+function SceneSettingsModal({
+  open, onClose,
+  title, setTitle, narration, setNarration,
+  imageUrl, setImageUrl, fetchedImageUrl, imageFetching, imageError,
+  accentColor, setAccentColor, bgColor, setBgColor, textColor, setTextColor,
+  durationSeconds, setDurationSeconds,
+  layoutSupportsImage,
+  onOpenImageAdjust,
+}: {
+  open: boolean; onClose: () => void;
+  title: string; setTitle: (v: string) => void;
+  narration: string; setNarration: (v: string) => void;
+  imageUrl: string; setImageUrl: (v: string) => void;
+  fetchedImageUrl: string; imageFetching: boolean; imageError: string;
+  accentColor: string; setAccentColor: (v: string) => void;
+  bgColor: string; setBgColor: (v: string) => void;
+  textColor: string; setTextColor: (v: string) => void;
+  durationSeconds: number; setDurationSeconds: (v: number) => void;
+  layoutSupportsImage: boolean;
+  onOpenImageAdjust?: () => void;
+}) {
+  if (!open) return null;
+
+  const sliderPct = Math.round(((durationSeconds - 2) / 10) * 100);
+  const canOpenFramingEditor =
+    Boolean(onOpenImageAdjust) &&
+    layoutSupportsImage &&
+    imageUrl.trim() &&
+    Boolean(fetchedImageUrl) &&
+    !imageFetching &&
+    !imageError;
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(17,24,39,0.4)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        backdropFilter: "blur(3px)",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "460px", maxHeight: "88vh",
+          background: T.bg, borderRadius: "16px",
+          border: `1px solid ${T.border}`,
+          boxShadow: "0 24px 64px rgba(0,0,0,0.15), 0 4px 16px rgba(0,0,0,0.08)",
+          display: "flex", flexDirection: "column", overflow: "hidden",
+          fontFamily: FONT,
+        }}
+      >
+        {/* Header */}
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "16px 20px", borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+        }}>
+          <div>
+            <h2 style={{ fontSize: "14px", fontWeight: 600, color: T.text, margin: 0, fontFamily: FONT }}>Scene settings</h2>
+            <p style={{ fontSize: "11px", color: T.textMuted, margin: "2px 0 0", fontFamily: FONT }}>Content, image, colors &amp; duration</p>
+          </div>
+          <button type="button" onClick={onClose} style={{
+            padding: "6px", borderRadius: "8px",
+            border: `1px solid ${T.border}`, background: T.surfaceAlt,
+            color: T.textSub, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            transition: "all 0.15s",
+          }}>
+            <IconX />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ overflowY: "auto", padding: "20px", display: "flex", flexDirection: "column", gap: "20px" }}>
+
+          {/* Content */}
+          <div>
+            <SectionLabel icon={<IconType size={13} />}>Content</SectionLabel>
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              <div>
+                <FieldLabel>Title</FieldLabel>
+                <StudioInput value={title} onChange={setTitle} />
+              </div>
+              <div>
+                <FieldLabel>Narration</FieldLabel>
+                <StudioTextarea value={narration} onChange={setNarration} rows={3} />
+              </div>
+            </div>
+          </div>
+
+          {/* Image */}
+          <div>
+            <SectionLabel icon={<IconLink size={13} />}>Image</SectionLabel>
+            <FieldLabel>Image URL</FieldLabel>
+            <StudioInput value={imageUrl} onChange={setImageUrl} placeholder="https://…" />
+            {imageFetching && (
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "8px" }}>
+                <div style={{ width: "10px", height: "10px", borderRadius: "50%", border: `1.5px solid ${T.border}`, borderTopColor: T.accent, animation: "spin 0.7s linear infinite", flexShrink: 0 }} />
+                <span style={{ fontSize: "11px", color: T.textMuted, fontFamily: FONT }}>Fetching image…</span>
+              </div>
+            )}
+            {!imageFetching && imageUrl.trim() && (
+              <div style={{ marginTop: "8px", borderRadius: "8px", overflow: "hidden", border: `1px solid ${imageError ? "#fecaca" : T.border}`, background: T.surfaceAlt, minHeight: "72px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                {fetchedImageUrl ? (
+                  <img src={fetchedImageUrl} alt="preview" style={{ width: "100%", display: "block", maxHeight: "120px", objectFit: "cover" }} />
+                ) : (
+                  <span style={{ fontSize: "11px", color: imageError ? "#dc2626" : T.textMuted, padding: "14px", fontFamily: FONT }}>{imageError || "No image"}</span>
+                )}
+              </div>
+            )}
+            {canOpenFramingEditor && (
+              <div style={{ marginTop: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                <p style={{ fontSize: "11px", color: T.textMuted, margin: 0, lineHeight: 1.45, fontFamily: FONT }}>
+                  Pan and zoom match the project scene editor. Preview uses a 16:9 frame; values apply to the final render.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onOpenImageAdjust?.()}
+                  style={{
+                    padding: "8px 14px",
+                    borderRadius: "8px",
+                    border: `1px solid ${T.accentMid}`,
+                    background: T.accentLight,
+                    color: T.accentDark,
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontFamily: FONT,
+                    alignSelf: "flex-start",
+                  }}
+                >
+                  Adjust framing…
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Colors */}
+          <div>
+            <SectionLabel icon={<IconDroplet size={13} />}>Colors</SectionLabel>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px" }}>
+              {[
+                { label: "Accent", value: accentColor, set: setAccentColor },
+                { label: "Background", value: bgColor, set: setBgColor },
+                { label: "Text", value: textColor, set: setTextColor },
+              ].map(({ label, value, set }) => (
+                <div key={label}>
+                  <FieldLabel>{label}</FieldLabel>
+                  <div style={{ width: "100%", height: "36px", borderRadius: "8px", overflow: "hidden", border: `1.5px solid ${T.border}` }}>
+                    <input type="color" value={value} onChange={(e) => set(e.target.value)} className="color-swatch" />
+                  </div>
+                  <div style={{ fontSize: "9px", color: T.textMuted, textAlign: "center", marginTop: "4px", letterSpacing: "0.04em", fontFamily: FONT }}>
+                    {value.toUpperCase()}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Duration */}
+          <div>
+            <SectionLabel icon={<IconClock size={13} />}>Duration</SectionLabel>
+            <input
+              type="range" min={2} max={12} step={1} value={durationSeconds}
+              onChange={(e) => setDurationSeconds(Number(e.target.value))}
+              className="studio-range"
+              style={{ background: `linear-gradient(to right, ${T.accent} 0%, ${T.accent} ${sliderPct}%, ${T.border} ${sliderPct}%, ${T.border} 100%)` }}
+            />
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: "6px" }}>
+              <span style={{ fontSize: "10px", color: T.textMuted, fontFamily: FONT }}>2s</span>
+              <span style={{ fontSize: "12px", color: T.accent, fontWeight: 600, background: T.accentLight, padding: "1px 8px", borderRadius: "100px", border: `1px solid ${T.accentMid}44`, fontFamily: FONT }}>
+                {durationSeconds}s
+              </span>
+              <span style={{ fontSize: "10px", color: T.textMuted, fontFamily: FONT }}>12s</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: "14px 20px", borderTop: `1px solid ${T.border}`, flexShrink: 0, display: "flex", justifyContent: "flex-end" }}>
+          <button type="button" onClick={onClose} style={{
+            padding: "8px 22px", background: T.accent, color: "#fff",
+            border: "none", borderRadius: "8px", fontSize: "13px", fontWeight: 500,
+            cursor: "pointer", transition: "background 0.15s", fontFamily: FONT,
+          }}>
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Layout Props Modal ───────────────────────────────────────────────────────
+function LayoutPropsModal({
+  open,
+  onClose,
+  schema,
+  regularFields,
+  layoutLabel,
+  layoutProps,
+  onSave,
+}: {
+  open: boolean;
+  onClose: () => void;
+  schema?: LayoutPropSchema;
+  regularFields: LayoutPropSchema["fields"];
+  layoutLabel: string;
+  layoutProps: Record<string, unknown>;
+  onSave: (next: Record<string, unknown>) => void;
+}) {
+  const [draft, setDraft] = useState<Record<string, unknown>>(layoutProps);
+
+  useEffect(() => {
+    if (open) setDraft({ ...layoutProps });
+  }, [open, layoutProps]);
+
+  if (!open) return null;
+
+  const hasFields = Boolean(schema && (regularFields.length > 0 || (schema.fields?.length ?? 0) > 0));
+
+  const handleSave = () => {
+    onSave(draft);
+    onClose();
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(17,24,39,0.4)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        backdropFilter: "blur(3px)",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "520px", maxHeight: "88vh",
+          background: T.bg, borderRadius: "16px",
+          border: `1px solid ${T.border}`,
+          boxShadow: "0 24px 64px rgba(0,0,0,0.15), 0 4px 16px rgba(0,0,0,0.08)",
+          display: "flex", flexDirection: "column", overflow: "hidden",
+          fontFamily: FONT,
+        }}
+      >
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "16px 20px", borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+        }}>
+          <div>
+            <h2 style={{ fontSize: "14px", fontWeight: 600, color: T.text, margin: 0, fontFamily: FONT }}>Layout properties</h2>
+            <p style={{ fontSize: "11px", color: T.textMuted, margin: "2px 0 0", fontFamily: FONT }}>
+              {layoutLabel || "Current layout"} — edit props, then save to update the preview
+            </p>
+          </div>
+          <button type="button" onClick={onClose} style={{
+            padding: "6px", borderRadius: "8px",
+            border: `1px solid ${T.border}`, background: T.surfaceAlt,
+            color: T.textSub, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            transition: "all 0.15s",
+          }}>
+            <IconX />
+          </button>
+        </div>
+
+        <div style={{ overflowY: "auto", padding: "20px", display: "flex", flexDirection: "column", gap: "12px" }}>
+          {hasFields ? (
+            regularFields.length > 0 ? (
+              <ManifestPropEditor
+                schema={{ ...schema!, fields: regularFields }}
+                value={draft}
+                onChange={setDraft}
+              />
+            ) : (
+              <ManifestPropEditor schema={schema!} value={draft} onChange={setDraft} />
+            )
+          ) : (
+            <p style={{ margin: 0, fontSize: "12px", color: T.textMuted, fontFamily: FONT, lineHeight: 1.5 }}>
+              No editable layout props for this scene.
+            </p>
+          )}
+        </div>
+
+        <div style={{
+          padding: "14px 20px", borderTop: `1px solid ${T.border}`, flexShrink: 0,
+          display: "flex", justifyContent: "flex-end", gap: "8px",
+        }}>
+          <button type="button" onClick={onClose} className="btn-ghost">
+            Cancel
+          </button>
+          <button type="button" onClick={handleSave} className="btn-primary" disabled={!hasFields}>
+            <IconSave />
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PropDefRow({
+  prop,
+  onChange,
+  onRemove,
+}: {
+  prop: PropDef;
+  onChange: (p: PropDef) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div
+      style={{
+        border: `1px solid ${T.border}`,
+        borderRadius: "8px",
+        padding: "10px",
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px",
+        background: T.surfaceAlt,
+        position: "relative",
+      }}
+    >
+      {/* Remove button */}
+      <button
+        type="button"
+        onClick={onRemove}
+        style={{
+          position: "absolute",
+          top: "-15px",
+          right: "-12px",
+          padding: "4px 7px",
+          border: "none",
+          borderRadius: "6px",
+          background: "#fee2e2",
+          color: "#dc2626",
+          fontSize: "11px",
+          cursor: "pointer",
+        }}
+      >
+        ✕
+      </button>
+
+      {/* Name */}
+      <input
+        className="studio-input"
+        placeholder="prop_name"
+        value={prop.name}
+        onChange={(e) =>
+          onChange({
+            ...prop,
+            name: e.target.value.replace(/[^a-zA-Z0-9_]/g, ""),
+          })
+        }
+        style={{ ...inputBase, padding: "6px 8px", fontSize: "12px" }}
+      />
+
+      {/* Type */}
+      <select
+        className="studio-input"
+        value={prop.type}
+        onChange={(e) => onChange({ ...prop, type: e.target.value })}
+        style={{ ...inputBase, padding: "6px 8px", fontSize: "12px" }}
+      >
+        {SUPPORTED_PROP_TYPES.map((t) => (
+          <option key={t} value={t}>
+            {t}
+          </option>
+        ))}
+      </select>
+
+      {/* Description */}
+      <input
+        className="studio-input"
+        placeholder="Description (optional)"
+        value={prop.description}
+        onChange={(e) => onChange({ ...prop, description: e.target.value })}
+        style={{ ...inputBase, padding: "6px 8px", fontSize: "11px" }}
+      />
+
+      {/* Default value */}
+      {prop.type === "boolean" ? (
+        <select
+          className="studio-input"
+          value={
+            prop.default === "true" ||
+            prop.default === "1" ||
+            prop.default === "yes"
+              ? "true"
+              : "false"
+          }
+          onChange={(e) => onChange({ ...prop, default: e.target.value })}
+          style={{ ...inputBase, padding: "6px 8px", fontSize: "11px" }}
+        >
+          <option value="false">false</option>
+          <option value="true">true</option>
+        </select>
+      ) : prop.type === "number" ? (
+        <input
+          type="number"
+          className="studio-input"
+          placeholder="Default (optional)"
+          value={prop.default ?? ""}
+          onChange={(e) =>
+            onChange({ ...prop, default: e.target.value || undefined })
+          }
+          style={{ ...inputBase, padding: "6px 8px", fontSize: "11px" }}
+        />
+      ) : prop.type === "string_array" ? (
+        <input
+          className="studio-input"
+          placeholder="Comma-separated, e.g. 1,2,3"
+          value={prop.default ?? ""}
+          onChange={(e) =>
+            onChange({ ...prop, default: e.target.value || undefined })
+          }
+          style={{ ...inputBase, padding: "6px 8px", fontSize: "11px" }}
+        />
+      ) : prop.type === "object_array" ? (
+        <input
+          className="studio-input"
+          placeholder="Jan:100, Feb:200 or JSON"
+          value={prop.default ?? ""}
+          onChange={(e) =>
+            onChange({ ...prop, default: e.target.value || undefined })
+          }
+          style={{ ...inputBase, padding: "6px 8px", fontSize: "11px" }}
+        />
+      ) : prop.type === "color" ? (
+        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          <input
+            type="color"
+            value={
+              prop.default && /^#[0-9A-Fa-f]{6}$/.test(prop.default)
+                ? prop.default
+                : "#9333ea"
+            }
+            onChange={(e) => onChange({ ...prop, default: e.target.value })}
+            style={{
+              width: 36,
+              height: 28,
+              padding: 2,
+              border: `1px solid ${T.border}`,
+              borderRadius: 6,
+              cursor: "pointer",
+            }}
+          />
+          <input
+            className="studio-input"
+            placeholder="#hex or color name"
+            value={prop.default ?? ""}
+            onChange={(e) =>
+              onChange({ ...prop, default: e.target.value || undefined })
+            }
+            style={{ ...inputBase, flex: 1, padding: "6px 8px", fontSize: "11px" }}
+          />
+        </div>
+      ) : (
+        <input
+          className="studio-input"
+          placeholder="Default (optional)"
+          value={prop.default ?? ""}
+          onChange={(e) =>
+            onChange({ ...prop, default: e.target.value || undefined })
+          }
+          style={{ ...inputBase, padding: "6px 8px", fontSize: "11px" }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+export default function TemplateStudio() {
+  const [templates, setTemplates]             = useState<TemplateMeta[]>([]);
+  const [loading, setLoading]                 = useState(true);
+  const [error, setError]                     = useState<string | null>(null);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
+  const [selectedLayout, setSelectedLayout]   = useState<string>("");
+  const [title, setTitle]                     = useState<string>("Hello World!");
+  const [narration, setNarration]             = useState<string>("Edit props live and preview exactly how this layout renders.");
+  const [aspectRatio, setAspectRatio]         = useState<AspectRatio>("landscape");
+  const [durationSeconds, setDurationSeconds] = useState<number>(5);
+  const [imageUrl, setImageUrl]               = useState<string>("");
+  const [imageFocusX, setImageFocusX]         = useState<number>(50);
+  const [imageFocusY, setImageFocusY]         = useState<number>(50);
+  const [imageZoom, setImageZoom]             = useState<number>(1);
+  const [accentColor, setAccentColor]         = useState<string>("#9333ea");
+  const [bgColor, setBgColor]                 = useState<string>("#ffffff");
+  const [textColor, setTextColor]             = useState<string>("#111827");
+  const [layoutProps, setLayoutProps]         = useState<Record<string, unknown>>({});
+  const [savingSource, setSavingSource]       = useState(false);
+  const [saveMessage, setSaveMessage]         = useState<string>("");
+  const [fetchedImageUrl, setFetchedImageUrl] = useState<string>("");
+  const [imageFetching, setImageFetching]     = useState(false);
+  const [imageError, setImageError]           = useState<string>("");
+  const [sceneModalOpen, setSceneModalOpen]   = useState(false);
+  const [propsModalOpen, setPropsModalOpen]   = useState(false);
+
+  const [imageAdjustOpen, setImageAdjustOpen] = useState(false);
+  const [imageAdjustSrc, setImageAdjustSrc]   = useState<string | null>(null);
+  const [imageAdjustAspectRatio, setImageAdjustAspectRatio] = useState("16 / 9");
+  const [imageAdjustCircular, setImageAdjustCircular] = useState(false);
+  const [imageAdjustFocusX, setImageAdjustFocusX] = useState(50);
+  const [imageAdjustFocusY, setImageAdjustFocusY] = useState(50);
+  const [imageAdjustZoom, setImageAdjustZoom] = useState(1);
+  const [isAdjustDragging, setIsAdjustDragging] = useState(false);
+  const imageAdjustPreviewRef = useRef<HTMLDivElement>(null);
+  const imageAdjustFocusRef = useRef({ x: 50, y: 50 });
+  const imageAdjustPanRef = useRef<{
+    startX: number;
+    startY: number;
+    startFx: number;
+    startFy: number;
+  } | null>(null);
+  const [aiInstruction, setAiInstruction]     = useState("");
+  const [aiLayoutImage, setAiLayoutImage]     = useState<File | null>(null);
+  const [aiLoading, setAiLoading]             = useState(false);
+  const [aiApplying, setAiApplying]           = useState(false);
+  const [aiDiscarding, setAiDiscarding]       = useState(false);
+  const [aiError, setAiError]                 = useState("");
+  const [aiStatus, setAiStatus]               = useState("");
+  const [aiPreviewSessionId, setAiPreviewSessionId] = useState("");
+  const [aiPreviewVersions, setAiPreviewVersions]   = useState<string[]>([]);
+  const [aiPreviewVersion, setAiPreviewVersion]     = useState<string | null>(null);
+  const [aiSwitchingVersion, setAiSwitchingVersion] = useState(false);
+  const previewSelectionRef = useRef("");
+  const [viewSource, setViewSource] = useState<"frontend" | "remotion">("frontend");
+  const [layoutRendering, setLayoutRendering] = useState(false);
+  const [layoutRenderError, setLayoutRenderError] = useState<string>("");
+  const [playAllLayouts, setPlayAllLayouts] = useState(false);
+
+  // ── Rebuild mode state ──────────────────────────────────────────────────────
+  const [aiMode, setAiMode]             = useState<"code-only" | "rebuild">("code-only");
+  const [rebuildProps, setRebuildProps] = useState<PropDef[]>([]);
+  const [rebuildHtml, setRebuildHtml]   = useState("");
+  const [rebuildSvg, setRebuildSvg]     = useState("");
+  const [rebuildSvgUsage, setRebuildSvgUsage] = useState("");
+  const [rebuildLoading, setRebuildLoading] = useState(false);
+  const [rebuildError, setRebuildError]     = useState("");
+  const [rebuildStatus, setRebuildStatus]   = useState("");
+
+  // ── New layout tab state ────────────────────────────────────────────────────
+  const [rightTab, setRightTab]           = useState<"edit" | "new-layout" | "new-template">("edit");
+  const [newLayoutId, setNewLayoutId]     = useState("");
+  const [newBaseLayoutId, setNewBaseLayoutId] = useState("");
+  const [newLayoutDesc, setNewLayoutDesc] = useState("");
+  const [newLayoutProps, setNewLayoutProps] = useState<PropDef[]>([]);
+  const [newLayoutLoading, setNewLayoutLoading] = useState(false);
+  const [newLayoutError, setNewLayoutError]     = useState("");
+  const [newLayoutStatus, setNewLayoutStatus]   = useState("");
+
+  // ── New template (from design doc) tab state ────────────────────────────────
+  const [newTemplateId, setNewTemplateId]       = useState("");
+  const [newTemplateDoc, setNewTemplateDoc]     = useState("");
+  const [newTemplateDocFileName, setNewTemplateDocFileName] = useState("");
+  const [newTemplateError, setNewTemplateError]   = useState("");
+  const [newTemplateStatus, setNewTemplateStatus] = useState("");
+  const [newTemplateBusy, setNewTemplateBusy]     = useState<null | "analyze" | "create">(null);
+  /** After POST /template/plan — user verifies layout list before POST /template/create. */
+  const [newTemplateReview, setNewTemplateReview] = useState<{
+    templateId: string;
+    normalizedDoc: string;
+    plan: TemplatePlan;
+    layoutOrder: string[];
+  } | null>(null);
+  const [newTemplateKeepLayoutIds, setNewTemplateKeepLayoutIds] = useState<string[]>([]);
+  const newTemplateDocFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [newTemplateDocExtracting, setNewTemplateDocExtracting] = useState(false);
+
+  const handleNewTemplateDocFileSelect = async (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      setNewTemplateError("Design doc file is too large (max 10 MB).");
+      return;
+    }
+    try {
+      setNewTemplateDocExtracting(true);
+      setNewTemplateError("");
+      const result = await extractDesignDocFile(file);
+      setNewTemplateDoc(result.data.text);
+      setNewTemplateDocFileName(file.name);
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+        : "Failed to extract text from the file.";
+      setNewTemplateError(String(msg || "Failed to extract text from the file."));
+    } finally {
+      setNewTemplateDocExtracting(false);
+    }
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        setLoading(true);
+        const response = await getTemplates();
+        if (!mounted) return;
+        const items = response.data;
+        setTemplates(items);
+        // Prefer Nightfall as the default template when available.
+        const preferred =
+          items.find((tpl) => normalizeTemplateId(tpl.id) === "nightfall") ||
+          items[0];
+        if (preferred) {
+          const templateId  = normalizeTemplateId(preferred.id);
+          const firstLayout = preferred.hero_layout || preferred.valid_layouts?.[0] || Object.keys(preferred.layout_prop_schema ?? {})[0] || "";
+          setSelectedTemplateId(templateId);
+          setSelectedLayout(firstLayout);
+          setAccentColor(preferred.preview_colors?.accent || "#9333ea");
+          setBgColor(preferred.preview_colors?.bg         || "#ffffff");
+          setTextColor(preferred.preview_colors?.text     || "#111827");
+        } else {
+          setError("No templates were found.");
+        }
+      } catch {
+        if (mounted) setError("Failed to load templates.");
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  const selectedTemplate = useMemo(
+    () => templates.find((tpl) => normalizeTemplateId(tpl.id) === selectedTemplateId) || null,
+    [templates, selectedTemplateId],
+  );
+
+  const schema = useMemo(
+    () => getSchema(selectedTemplate, selectedLayout),
+    [selectedTemplate, selectedLayout],
+  );
+
+  const layouts = useMemo(() => {
+    const raw =
+      selectedTemplate?.valid_layouts || Object.keys(selectedTemplate?.layout_prop_schema ?? {});
+    const base = [...new Set((Array.isArray(raw) ? raw : []).filter(Boolean))];
+    // Expand each layout into its visual variants, base first. Variants are not
+    // in `valid_layouts` (the LLM must never pick one) but Studio renders every
+    // declared layout directly — same treatment as `studio_only_layouts`.
+    const variantMap = selectedTemplate?.layout_variants ?? {};
+    const list = base.flatMap((id) => {
+      const variants = variantMap[id];
+      return Array.isArray(variants) && variants.length > 1 ? variants : [id];
+    });
+    if (normalizeTemplateId(selectedTemplateId) === "bloomberg") {
+      return list.filter((id) => BLOOMBERG_LAYOUT_IDS.has(id));
+    }
+    return list;
+  }, [selectedTemplate, selectedTemplateId]);
+
+  useEffect(() => {
+    if (!selectedTemplate) return;
+    if (!layouts.length) return;
+    // Validate against `layouts`, NOT raw `valid_layouts`: the latter deliberately
+    // omits `__vN` visual variants (the LLM must never pick one), so checking it
+    // here would reset the user's variant selection the instant they make it.
+    if (!layouts.includes(selectedLayout)) setSelectedLayout(layouts[0]);
+  }, [selectedTemplate, selectedLayout, layouts]);
+
+  useEffect(() => {
+    if (!schema) return;
+    const defaults = (schema.defaults ?? {}) as Record<string, unknown>;
+    // sample_props are Studio-only stress-test values (e.g. a long explainer);
+    // the render path ignores them, so they can never leak into real videos.
+    setLayoutProps({ ...defaults, ...(schema.sample_props ?? {}) });
+    const sd = schema.scene_defaults ?? {};
+    if (sd.title)                   setTitle(sd.title);
+    if (sd.narration !== undefined) setNarration(sd.narration);
+    if (sd.durationSeconds)         setDurationSeconds(sd.durationSeconds);
+    const iz = defaults.imageZoom;
+    if (typeof iz === "number" && !Number.isNaN(iz)) {
+      setImageZoom(Math.max(IMAGE_ADJUST_ZOOM_MIN, Math.min(IMAGE_ADJUST_ZOOM_MAX, iz)));
+    } else {
+      setImageZoom(1);
+    }
+  }, [schema]);
+
+  const config = useMemo(
+    () => getTemplateConfig(selectedTemplateId || "default", viewSource),
+    [selectedTemplateId, viewSource],
+  );
+  const Composition = config.component as unknown as ComponentType<Record<string, unknown>>;
+  const isPortrait  = aspectRatio === "portrait";
+  const layoutSupportsImage = useMemo(
+    // Resolves `__vN` variants to their base, which is what layouts_without_image
+    // is keyed by.
+    () => layoutSupportsImageForTemplate(selectedTemplate, selectedLayout),
+    [selectedTemplate, selectedLayout],
+  );
+
+  useEffect(() => {
+    if (layouts.length <= 1 && playAllLayouts) setPlayAllLayouts(false);
+  }, [layouts.length, playAllLayouts]);
+
+  useEffect(() => {
+    const url = imageUrl.trim();
+    if (!url) { setFetchedImageUrl(""); setImageError(""); return; }
+    let cancelled = false;
+    setImageFetching(true); setImageError(""); setFetchedImageUrl("");
+    (async () => {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        const reader = new FileReader();
+        reader.onload  = () => { if (!cancelled) { setFetchedImageUrl(reader.result as string); setImageFetching(false); } };
+        reader.onerror = () => { if (!cancelled) { setImageError("Failed to read image."); setImageFetching(false); } };
+        reader.readAsDataURL(blob);
+      } catch (e: unknown) {
+        if (!cancelled) { setImageError(e instanceof Error ? e.message : "Failed to fetch."); setImageFetching(false); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [imageUrl]);
+
+  const openTemplateImageAdjust = () => {
+    if (!fetchedImageUrl || imageFetching) return;
+    const templateCfg = getTemplateConfig(selectedTemplateId || "default");
+    const ar = getImageBoxAspectRatio(
+      selectedLayout ? normalizeLayoutId(selectedLayout) : null,
+      aspectRatio,
+      templateCfg.baseWidth,
+      templateCfg.baseHeight,
+    );
+    setImageAdjustAspectRatio(ar);
+    setImageAdjustCircular(isImageBoxCircular(selectedLayout));
+    setImageAdjustFocusX(imageFocusX);
+    setImageAdjustFocusY(imageFocusY);
+    setImageAdjustZoom(
+      Math.min(IMAGE_ADJUST_ZOOM_MAX, Math.max(IMAGE_ADJUST_ZOOM_MIN, imageZoom)),
+    );
+    setImageAdjustSrc(fetchedImageUrl);
+    setIsAdjustDragging(false);
+    imageAdjustPanRef.current = null;
+    setImageAdjustOpen(true);
+  };
+
+  const closeTemplateImageAdjust = () => {
+    setImageAdjustOpen(false);
+    setImageAdjustSrc(null);
+    setIsAdjustDragging(false);
+    imageAdjustPanRef.current = null;
+  };
+
+  const saveTemplateImageAdjust = () => {
+    setImageFocusX(clampFocusPct(imageAdjustFocusX));
+    setImageFocusY(clampFocusPct(imageAdjustFocusY));
+    setImageZoom(
+      Math.max(IMAGE_ADJUST_ZOOM_MIN, Math.min(IMAGE_ADJUST_ZOOM_MAX, imageAdjustZoom)),
+    );
+    closeTemplateImageAdjust();
+  };
+
+  const handleAdjustMouseDown = (e: ReactMouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    imageAdjustPanRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startFx: imageAdjustFocusRef.current.x,
+      startFy: imageAdjustFocusRef.current.y,
+    };
+    setIsAdjustDragging(true);
+  };
+
+  const handleAdjustTouchStart = (e: ReactTouchEvent<HTMLDivElement>) => {
+    const touch = e.touches[0];
+    if (!touch) return;
+    e.preventDefault();
+    imageAdjustPanRef.current = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      startFx: imageAdjustFocusRef.current.x,
+      startFy: imageAdjustFocusRef.current.y,
+    };
+    setIsAdjustDragging(true);
+  };
+
+  useEffect(() => {
+    imageAdjustFocusRef.current = { x: imageAdjustFocusX, y: imageAdjustFocusY };
+  }, [imageAdjustFocusX, imageAdjustFocusY]);
+
+  useEffect(() => {
+    if (!isAdjustDragging || !imageAdjustOpen || !imageAdjustSrc) return;
+    const pan = imageAdjustPanRef.current;
+    if (!pan) return;
+
+    const clamp = (v: number) => Math.max(0, Math.min(100, v));
+
+    const applyPan = (clientX: number, clientY: number) => {
+      const el = imageAdjustPreviewRef.current;
+      if (!el || !imageAdjustPanRef.current) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const { startX, startY, startFx, startFy } = imageAdjustPanRef.current;
+      const dxPct = ((clientX - startX) / rect.width) * 100;
+      const dyPct = ((clientY - startY) / rect.height) * 100;
+      setImageAdjustFocusX(clamp(startFx - dxPct));
+      setImageAdjustFocusY(clamp(startFy - dyPct));
+    };
+
+    const onMouseMove = (e: MouseEvent) => applyPan(e.clientX, e.clientY);
+    const onTouchMove = (e: TouchEvent) => {
+      const touch = e.touches[0];
+      if (!touch) return;
+      e.preventDefault();
+      applyPan(touch.clientX, touch.clientY);
+    };
+    const endPan = () => {
+      setIsAdjustDragging(false);
+      imageAdjustPanRef.current = null;
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("mouseup", endPan);
+    window.addEventListener("touchend", endPan);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("mouseup", endPan);
+      window.removeEventListener("touchend", endPan);
+    };
+  }, [isAdjustDragging, imageAdjustOpen, imageAdjustSrc]);
+
+  useLayoutEffect(() => {
+    if (!imageAdjustOpen || !imageAdjustSrc) return;
+    const el = imageAdjustPreviewRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const delta = e.deltaY;
+      setImageAdjustZoom((z) => {
+        const factor = delta > 0 ? 0.97 : 1.03;
+        const next = Math.min(
+          IMAGE_ADJUST_ZOOM_MAX,
+          Math.max(IMAGE_ADJUST_ZOOM_MIN, z * factor),
+        );
+        return Math.round(next * 100) / 100;
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [imageAdjustOpen, imageAdjustSrc]);
+
+  const resolvedLayoutProps = useMemo(() => {
+    if (!schema) return layoutProps;
+    const next: Record<string, unknown> = { ...layoutProps };
+    schema.fields.forEach((field) => {
+      if (field.type === "number" && field.responsive) {
+        const raw = layoutProps[field.key];
+        if (isResponsiveValue(raw)) next[field.key] = isPortrait ? raw.portrait : raw.landscape;
+      }
+    });
+    if (layoutSupportsImage && imageUrl.trim()) {
+      next.imageFocusX = Math.max(0, Math.min(100, imageFocusX));
+      next.imageFocusY = Math.max(0, Math.min(100, imageFocusY));
+      next.imageZoom = Math.max(IMAGE_ADJUST_ZOOM_MIN, Math.min(IMAGE_ADJUST_ZOOM_MAX, imageZoom));
+    } else {
+      delete next.imageFocusX;
+      delete next.imageFocusY;
+      delete next.imageZoom;
+    }
+    // Auto-fitting layouts pin their shrink floor to the chosen size only when
+    // these flags are set; without them the fitter treats a slider value as a
+    // mere starting point and shrinks it straight back down to fit the space,
+    // so the typography sliders looked inert in this editor. The app's other
+    // entry points already derive them the same way (remotion.py,
+    // mergeLayoutSchemaDefaults.ts, OldDocumentaryReelVideo.tsx).
+    for (const key of ["titleFontSize", "descriptionFontSize"]) {
+      if (next[key] !== undefined) next[`${key}IsUserSet`] = true;
+    }
+    return next;
+  }, [schema, layoutProps, isPortrait, layoutSupportsImage, imageUrl, imageFocusX, imageFocusY, imageZoom]);
+
+  const inputProps = useMemo(() => {
+    const effectiveImageUrl =
+      layoutSupportsImage && fetchedImageUrl && !imageFetching ? fetchedImageUrl : undefined;
+
+    const multiSceneList =
+      selectedTemplate && layouts.length > 1 && playAllLayouts
+      ? layouts.map((layoutId, index) => {
+        const trimmed = imageUrl.trim();
+        // Each scene shows its own layout's dummy content from meta.json
+        // (scene_defaults), not the editor's single shared title/narration.
+        // Fall back to the editor values for layouts without scene_defaults.
+        const sd = getSchema(selectedTemplate, layoutId)?.scene_defaults ?? {};
+        const lp = buildResolvedLayoutPropsForPreview(
+          selectedTemplate,
+          layoutId,
+          isPortrait,
+          trimmed,
+          fetchedImageUrl,
+          imageFetching,
+          imageFocusX,
+          imageFocusY,
+          imageZoom,
+        );
+        const sceneImageUrl =
+          layoutSupportsImageForTemplate(selectedTemplate, layoutId) &&
+          fetchedImageUrl &&
+          !imageFetching &&
+          trimmed
+            ? fetchedImageUrl
+            : undefined;
+        return {
+          id: index + 1,
+          order: index + 1,
+          title: sd.title ?? title,
+          narration: sd.narration ?? narration,
+          layout: layoutId,
+          layoutProps: lp,
+          durationSeconds: sd.durationSeconds ?? durationSeconds,
+          imageUrl: sceneImageUrl,
+          voiceoverUrl: undefined,
+        };
+      })
+        : null;
+
+    const sequentialBloombergStudio =
+      Boolean(
+        selectedTemplate &&
+          layouts.length > 1 &&
+          playAllLayouts &&
+          selectedTemplateId === "bloomberg",
+      );
+
+    return {
+      scenes: multiSceneList
+        ? multiSceneList
+        : [
+            {
+              id: 1,
+              order: 1,
+              title,
+              narration,
+              layout: selectedLayout || config.heroLayout,
+              layoutProps: resolvedLayoutProps,
+              durationSeconds,
+              imageUrl: effectiveImageUrl,
+              voiceoverUrl: undefined,
+            },
+          ],
+      accentColor,
+      bgColor,
+      textColor,
+      logo: null,
+      logoPosition: "bottom_right",
+      logoOpacity: 0.9,
+      logoSize: 100,
+      aspectRatio,
+      ...(sequentialBloombergStudio ? { interSceneHalfFrames: 0 } : {}),
+    };
+  }, [
+    title,
+    narration,
+    selectedLayout,
+    config.heroLayout,
+    resolvedLayoutProps,
+    durationSeconds,
+    layoutSupportsImage,
+    fetchedImageUrl,
+    imageFetching,
+    accentColor,
+    bgColor,
+    textColor,
+    aspectRatio,
+    selectedTemplate,
+    layouts,
+    playAllLayouts,
+    selectedTemplateId,
+    isPortrait,
+    imageUrl,
+    imageFocusX,
+    imageFocusY,
+    imageZoom,
+  ]);
+
+  const [studioResolution, setStudioResolution] = useState<"1080p" | "720p">(
+    () => (selectedTemplateId === "whiteboard" || selectedTemplateId === "newscast" ||selectedTemplateId === "newspaper" ? "720p" : "1080p"),
+  );
+
+  // Default resolution per template: Stickman/Whiteboard/Newspaper => 720p, others => 1080p
+  useEffect(() => {
+    if (!selectedTemplateId) return;
+    if (selectedTemplateId === "whiteboard" || selectedTemplateId === "newscast" || selectedTemplateId === "newspaper") {
+      setStudioResolution("720p");
+    } else {
+      setStudioResolution("1080p");
+    }
+  }, [selectedTemplateId]);
+  const baseWidth = studioResolution === "720p" ? 1280 : 1920;
+  const baseHeight = studioResolution === "720p" ? 720 : 1080;
+  const canvasW          = isPortrait ? baseHeight : baseWidth;
+  const canvasH          = isPortrait ? baseWidth : baseHeight;
+  const sceneDurationFrames = Math.max(30, Math.round(durationSeconds * 30));
+  const sequentialPreview =
+    Boolean(selectedTemplate && layouts.length > 1 && playAllLayouts);
+  /** Match each template composition’s total frame count so the Player doesn’t clip or show a brown tail. */
+  const durationInFrames = useMemo(() => {
+    if (!sequentialPreview) return sceneDurationFrames;
+    const fps = 30;
+    const speed = getPlaybackSpeed(undefined);
+    const n = layouts.length;
+    if (n <= 1) return sceneDurationFrames;
+    if (selectedTemplateId === "bloomberg") {
+      const per =
+        viewSource === "remotion"
+          ? Math.max(1, Math.round(durationSeconds * fps))
+          : getSceneDurationFrames(durationSeconds, fps, speed);
+      return n * per;
+    }
+    if (selectedTemplateId === "magazine") {
+      // Black-bridged TransitionSeries: each boundary ADDS a black bridge and removes
+      // the transition overlaps, so the total is NOT just n×per. Use the SAME planner
+      // the composition uses so the Player's declared duration matches the composition
+      // exactly (otherwise the Player clips/races the scenes).
+      const per = Math.max(1, Math.round(durationSeconds * fps));
+      const layoutKeys = layouts.map(resolveMagazineLayout);
+      const { totalFrames } = planMagazineBoundaries(
+        layoutKeys,
+        layoutKeys.map(() => per),
+        accentColor,
+      );
+      return Math.max(totalFrames, fps * 2);
+    }
+    if (selectedTemplateId === "sakura") {
+      // Sakura is a TransitionSeries whose neighbouring scenes OVERLAP by the transition
+      // length, so its real length is the raw sum MINUS the overlaps. Use the SAME
+      // calculator the composition uses, otherwise the Player's declared duration is
+      // longer than the content and the scenes race by / a tail is clipped.
+      const per = getSceneDurationFrames(durationSeconds, fps, speed);
+      const sakuraScenes = layouts.map((layout, i) => ({
+        id: i,
+        order: i,
+        title: "",
+        narration: "",
+        layout,
+        layoutProps: {},
+        durationSeconds: per / fps,
+      }));
+      return Math.max(computeSakuraVideoTotalFrames(sakuraScenes), fps * 2);
+    }
+    return n * getSceneDurationFrames(durationSeconds, fps, speed);
+  }, [
+    sequentialPreview,
+    sceneDurationFrames,
+    durationSeconds,
+    layouts,
+    layouts.length,
+    selectedTemplateId,
+    viewSource,
+    isPortrait,
+    accentColor,
+  ]);
+
+  const responsiveFields = schema?.fields.filter((f) => f.responsive) ?? [];
+  const regularFields    = schema?.fields.filter((f) => !f.responsive) ?? [];
+  const hasEditableProps = Boolean(schema && (regularFields.length > 0 || responsiveFields.length === 0));
+  const currentLayoutLabel =
+    selectedTemplate?.layout_prop_schema?.[selectedLayout]?.label || humanize(selectedLayout);
+
+  // Dropdown option arrays
+  const templateOptions = templates.map((tpl) => ({
+    value: normalizeTemplateId(tpl.id),
+    label: tpl.name,
+  }));
+
+  const layoutOptions = layouts.map((layoutId) => {
+    // Variants share their base layout's schema entry, so the label resolves
+    // through the base and gets the style name appended: "News Headline — Broadsheet".
+    const baseId = baseLayoutId(layoutId);
+    const baseLabel =
+      selectedTemplate?.layout_prop_schema?.[baseId]?.label || humanize(baseId);
+    const styleLabel = selectedTemplate?.layout_variant_labels?.[layoutId];
+    return {
+      value: layoutId,
+      label: styleLabel && layoutId !== baseId ? `${baseLabel} — ${styleLabel}` : baseLabel,
+    };
+  });
+
+  const handleSaveSource = async () => {
+    if (!selectedTemplateId || !selectedLayout) return;
+    const titleValue = layoutProps.titleFontSize;
+    const descValue  = layoutProps.descriptionFontSize;
+    if (!isResponsiveValue(titleValue) && !isResponsiveValue(descValue)) {
+      setSaveMessage("No responsive font-size values to save for this layout.");
+      return;
+    }
+    try {
+      setSavingSource(true); setSaveMessage("");
+      const result = await saveTemplateSourceDefaults({
+        template_id: selectedTemplateId, layout_id: selectedLayout,
+        ...(isResponsiveValue(titleValue) ? { title_font_size: titleValue }      : {}),
+        ...(isResponsiveValue(descValue)  ? { description_font_size: descValue } : {}),
+      });
+      const updatedFiles = result.data.updated_files?.length
+        ? result.data.updated_files.join(", ") : result.data.updated_file;
+      const metaNote = result.data.updated_meta_file ? ` Meta: ${result.data.updated_meta_file}.` : "";
+      setSaveMessage(`Saved: ${updatedFiles}.${metaNote}`);
+      setTemplates((prev) => prev.map((tpl) => {
+        if (normalizeTemplateId(tpl.id) !== selectedTemplateId) return tpl;
+        const s = tpl.layout_prop_schema ?? {};
+        // The backend writes defaults to the EXACT selected layout id (see
+        // _update_meta_defaults), so a variant gets its own entry. Seed from the
+        // base entry when the variant has none yet, otherwise this bails out and
+        // the freshly-saved sizes never reach the local cache — leaving Studio
+        // showing stale values until a full reload.
+        const baseId = baseLayoutId(selectedLayout) || selectedLayout;
+        const ls = s[selectedLayout] ?? s[baseId];
+        if (!ls) return tpl;
+        const defaults = { ...(ls.defaults ?? {}) };
+        if (isResponsiveValue(titleValue)) defaults.titleFontSize = titleValue;
+        if (isResponsiveValue(descValue))  defaults.descriptionFontSize = descValue;
+        return { ...tpl, layout_prop_schema: { ...s, [selectedLayout]: { ...ls, defaults } } };
+      }));
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+        : "Failed to save source defaults.";
+      setSaveMessage(String(msg || "Failed to save source defaults."));
+    } finally {
+      setSavingSource(false);
+    }
+  };
+
+  const handleGenerateAiEdit = async () => {
+    if (!selectedTemplateId || !selectedLayout) return;
+    if (!aiInstruction.trim()) { setAiError("Add an instruction first."); setAiStatus(""); return; }
+    try {
+      setAiLoading(true); setAiError(""); setAiStatus("");
+      const result = aiLayoutImage
+        ? await startTemplateAiPreviewFile({
+            template_id: selectedTemplateId,
+            layout_id: selectedLayout,
+            instruction: aiInstruction.trim(),
+            image: aiLayoutImage,
+          })
+        : await startTemplateAiPreview({
+            template_id: selectedTemplateId,
+            layout_id: selectedLayout,
+            instruction: aiInstruction.trim(),
+          });
+      const data = result.data as StartTemplateAiPreviewResponse;
+      setAiPreviewSessionId(data.session_id);
+      const versions = data.versions && data.versions.length ? data.versions : ["original", "v1"];
+      setAiPreviewVersions(versions);
+      setAiPreviewVersion(data.active_version_id ?? versions[versions.length - 1] ?? null);
+      setAiStatus("Preview is using AI-generated code. Switch versions to compare, then apply or discard.");
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+        : "Failed to start AI preview.";
+      setAiError(String(msg || "Failed to start AI preview.")); setAiStatus("");
+    } finally { setAiLoading(false); }
+  };
+
+  const handleApplyAiEdit = async () => {
+    if (!aiPreviewSessionId) return;
+    try {
+      setAiApplying(true); setAiError(""); setAiStatus("");
+      const result = await applyTemplateAiPreview({ session_id: aiPreviewSessionId });
+      setAiStatus(`Applied to: ${result.data.updated_files.join(", ")}`);
+      setAiPreviewSessionId("");
+      setAiPreviewVersions([]);
+      setAiPreviewVersion(null);
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail : "Failed to apply.";
+      setAiError(String(msg || "Failed to apply.")); setAiStatus("");
+    } finally { setAiApplying(false); }
+  };
+
+  const handleSwitchAiPreviewVersion = async (version: string) => {
+    if (!aiPreviewSessionId || aiSwitchingVersion) return;
+    if (aiPreviewVersion === version) return;
+    try {
+      setAiSwitchingVersion(true); setAiError("");
+      await switchTemplateAiPreviewVersion({ session_id: aiPreviewSessionId, version });
+      setAiPreviewVersion(version);
+      setAiStatus(`Showing ${version} version. Preview will update.`);
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail : "Failed to switch.";
+      setAiError(String(msg || "Failed to switch version."));
+    } finally { setAiSwitchingVersion(false); }
+  };
+
+  const handleDiscardAiEdit = async () => {
+    if (!aiPreviewSessionId) return;
+    try {
+      setAiDiscarding(true); setAiError(""); setAiStatus("");
+      await discardTemplateAiPreview({ session_id: aiPreviewSessionId });
+      setAiPreviewSessionId("");
+      setAiPreviewVersions([]);
+      setAiPreviewVersion(null);
+      setAiStatus("Discarded AI preview. Original files restored.");
+      // Refresh templates (discard may have removed a created layout)
+      const refreshed = await getTemplates();
+      setTemplates(refreshed.data);
+      // If current layout was removed from selected template, pick another
+      const tpl = refreshed.data.find((t) => normalizeTemplateId(t.id) === selectedTemplateId);
+      // Include `__vN` visual variants, or a selected variant would be treated as
+      // "removed from the template" and reset. The reset TARGET stays a base layout.
+      const _variantMap = tpl?.layout_variants ?? {};
+      const layoutIds = new Set(
+        (tpl?.valid_layouts ?? []).flatMap((id) => {
+          const v = _variantMap[id];
+          return Array.isArray(v) && v.length > 1 ? v : [id];
+        }),
+      );
+      if (selectedLayout && !layoutIds.has(selectedLayout)) {
+        setSelectedLayout(tpl?.valid_layouts?.[0] ?? refreshed.data[0]?.valid_layouts?.[0] ?? "");
+      }
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail : "Failed to discard.";
+      setAiError(String(msg || "Failed to discard.")); setAiStatus("");
+    } finally { setAiDiscarding(false); }
+  };
+
+  // ── Rebuild handler ────────────────────────────────────────────────────────
+  const handleRebuildLayout = async () => {
+    if (!selectedTemplateId || !selectedLayout || !aiInstruction.trim()) {
+      setRebuildError("Select a layout and provide an instruction.");
+      return;
+    }
+    try {
+      setRebuildLoading(true); setRebuildError(""); setRebuildStatus("");
+      const htmlExample = rebuildHtml.trim() || undefined;
+      const svgExample = rebuildSvg.trim() || undefined;
+      const svgUsage = svgExample ? (rebuildSvgUsage.trim() || undefined) : undefined;
+      const result = aiLayoutImage
+        ? await rebuildTemplateLayoutFile({
+            template_id: selectedTemplateId,
+            layout_id: selectedLayout,
+            instruction: aiInstruction.trim(),
+            extra_props: rebuildProps,
+            image: aiLayoutImage,
+            html_example: htmlExample,
+            svg_example: svgExample,
+            svg_usage: svgUsage,
+          })
+        : await rebuildTemplateLayout({
+            template_id: selectedTemplateId,
+            layout_id: selectedLayout,
+            instruction: aiInstruction.trim(),
+            extra_props: rebuildProps,
+            html_example: htmlExample,
+            svg_example: svgExample,
+            svg_usage: svgUsage,
+          });
+      const data = result.data;
+      setAiPreviewSessionId(data.session_id);
+      setAiPreviewVersions(data.versions ?? ["original", "v1"]);
+      setAiPreviewVersion(data.active_version_id ?? "v1");
+      setAiStatus("Rebuild complete. Switch versions to compare, then apply or discard.");
+      setRebuildStatus(`Rebuilt ${data.layout_id}. Updated: ${data.updated_files?.join(", ") ?? ""}`);
+      const refreshed = await getTemplates();
+      setTemplates(refreshed.data);
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+        : "Rebuild failed.";
+      setRebuildError(String(msg || "Rebuild failed."));
+    } finally { setRebuildLoading(false); }
+  };
+
+  // ── New layout handler ─────────────────────────────────────────────────────
+  const handleCreateLayout = async () => {
+    if (!selectedTemplateId || !newLayoutId.trim() || !newBaseLayoutId || !newLayoutDesc.trim()) {
+      setNewLayoutError("Fill in all required fields.");
+      return;
+    }
+    if (newLayoutDesc.trim().length < LAYOUT_DESC_MIN) {
+      setNewLayoutError(`Layout description must be at least ${LAYOUT_DESC_MIN} characters.`);
+      return;
+    }
+    if (newLayoutDesc.length > LAYOUT_DESC_MAX) {
+      setNewLayoutError(`Layout description is too long (max ${LAYOUT_DESC_MAX.toLocaleString()} characters).`);
+      return;
+    }
+    try {
+      setNewLayoutLoading(true); setNewLayoutError(""); setNewLayoutStatus("");
+      const result = await createTemplateLayout({
+        template_id: selectedTemplateId,
+        base_layout_id: newBaseLayoutId,
+        new_layout_id: newLayoutId.trim(),
+        layout_description: newLayoutDesc.trim(),
+        props: newLayoutProps,
+      });
+      const data = result.data;
+      setAiPreviewSessionId(data.session_id);
+      setAiPreviewVersions(data.versions ?? ["v1"]);
+      setAiPreviewVersion(data.active_version_id ?? "v1");
+      setAiStatus("New layout created. Apply to keep or discard to revert.");
+      setNewLayoutStatus(`Created '${data.new_layout_id}'. Files: ${data.created_files?.join(", ") ?? ""}`);
+      const refreshed = await getTemplates();
+      setTemplates(refreshed.data);
+      setSelectedLayout(data.new_layout_id);
+      setRightTab("edit");
+      setNewLayoutId(""); setNewLayoutDesc(""); setNewLayoutProps([]);
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+        : "Create failed.";
+      setNewLayoutError(String(msg || "Create failed."));
+    } finally { setNewLayoutLoading(false); }
+  };
+
+  // ── New template (from design doc): analyze plan → verify layouts → create ─
+  const resetNewTemplateReview = () => {
+    setNewTemplateReview(null);
+    setNewTemplateKeepLayoutIds([]);
+  };
+
+  const toggleNewTemplateLayoutKeep = (layoutId: string) => {
+    if (!newTemplateReview) return;
+    const { layoutOrder } = newTemplateReview;
+    setNewTemplateKeepLayoutIds((prev) => {
+      if (prev.includes(layoutId)) {
+        return prev.filter((x) => x !== layoutId);
+      }
+      const nextSet = new Set([...prev, layoutId]);
+      return layoutOrder.filter((x) => nextSet.has(x));
+    });
+  };
+
+  const handleAnalyzeTemplateDoc = async () => {
+    const id = newTemplateId.trim().toLowerCase();
+    if (!id || !/^[a-z][a-z0-9_]*$/.test(id)) {
+      setNewTemplateError("Template id must be snake_case starting with a letter.");
+      return;
+    }
+    if (newTemplateDoc.trim().length < DESIGN_DOC_MIN) {
+      setNewTemplateError("Design doc is too short. Describe the visual style and layouts.");
+      return;
+    }
+    if (newTemplateDoc.length > DESIGN_DOC_MAX) {
+      setNewTemplateError(`Design doc is too long (max ${DESIGN_DOC_MAX.toLocaleString()} characters).`);
+      return;
+    }
+    try {
+      setNewTemplateBusy("analyze");
+      setNewTemplateError("");
+      resetNewTemplateReview();
+      setNewTemplateStatus(`Analyzing the design doc for '${id}'…`);
+      const planRes = await planTemplateFromDoc({
+        template_id: id,
+        design_doc: newTemplateDoc.trim(),
+      });
+      const planData = planRes.data;
+      const order = planData.layout_ids.slice();
+      setNewTemplateReview({
+        templateId: id,
+        normalizedDoc: planData.normalized_doc,
+        plan: planData.plan,
+        layoutOrder: order,
+      });
+      setNewTemplateKeepLayoutIds(order.slice());
+      const warn = planData.warnings?.length ? ` Warnings: ${planData.warnings.join("; ")}` : "";
+      setNewTemplateStatus(
+        `Plan ready — ${order.length} layout(s). Uncheck any you do not want, then create.${warn}`,
+      );
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { detail?: string } }; code?: string };
+      const msg =
+        e?.response?.data?.detail ||
+        (e?.code === "ECONNABORTED"
+          ? "Plan timed out — the design doc may be long. It can take several minutes; retry, or shorten the doc."
+          : "Plan failed.");
+      setNewTemplateError(String(msg));
+      setNewTemplateStatus("");
+    } finally {
+      setNewTemplateBusy(null);
+    }
+  };
+
+  const handleCreateVerifiedTemplate = async () => {
+    if (!newTemplateReview) return;
+    if (newTemplateKeepLayoutIds.length < 2) {
+      setNewTemplateError("Keep at least two layouts (minimum for a template).");
+      return;
+    }
+    const { templateId, normalizedDoc, plan } = newTemplateReview;
+    try {
+      setNewTemplateBusy("create");
+      setNewTemplateError("");
+      setNewTemplateStatus(
+        `Generating ${newTemplateKeepLayoutIds.length} verified layout(s) for '${templateId}' — this may take several minutes…`,
+      );
+      const result = await createTemplateFromDoc({
+        template_id: templateId,
+        normalized_doc: normalizedDoc,
+        plan,
+        keep_layout_ids: newTemplateKeepLayoutIds,
+      });
+      const data = result.data;
+      const v = data.verification;
+      const verifyLine = v
+        ? ` Verification: ${v.ok ? "passed" : "issues found"}` +
+          (v.repaired.length ? `, repaired ${v.repaired.join(", ")}` : "") +
+          (v.stubbed.length ? `, stubbed ${v.stubbed.join(", ")}` : "") +
+          "."
+        : "";
+      const summary =
+        `Created '${data.template_id}' (${data.layout_ids.length} layouts).` +
+        verifyLine +
+        (data.warnings && data.warnings.length > 0
+          ? ` Warnings: ${data.warnings.join("; ")}`
+          : " No warnings.");
+      setNewTemplateStatus(summary);
+      const refreshed = await getTemplates();
+      setTemplates(refreshed.data);
+      setSelectedTemplateId(data.template_id);
+      setSelectedLayout(data.hero_layout);
+      setRightTab("edit");
+      resetNewTemplateReview();
+      setNewTemplateId("");
+      setNewTemplateDoc("");
+      setNewTemplateDocFileName("");
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+        : "Template creation failed.";
+      setNewTemplateError(String(msg || "Template creation failed."));
+      setNewTemplateStatus("");
+    } finally {
+      setNewTemplateBusy(null);
+    }
+  };
+
+  const newTemplateReviewRows = useMemo(() => {
+    if (!newTemplateReview) return [];
+    return planLayoutRowsForReview(newTemplateReview.plan, newTemplateReview.layoutOrder);
+  }, [newTemplateReview]);
+
+  const handleRenderSingleLayout = async () => {
+    if (!selectedTemplateId || !selectedLayout) return;
+    try {
+      setLayoutRendering(true);
+      setLayoutRenderError("");
+      // When "All Scenes" is active, render every layout back-to-back by passing
+      // the same per-layout scene array the preview Player uses. Otherwise render
+      // just the selected layout as a single scene.
+      const renderAllScenes = sequentialPreview && inputProps.scenes.length > 1;
+      const res = await renderTemplateLayout({
+        template_id: selectedTemplateId,
+        layout_id: selectedLayout,
+        aspect_ratio: aspectRatio,
+        duration_seconds: durationSeconds,
+        layout_props: resolvedLayoutProps,
+        resolution: studioResolution,
+        ...(renderAllScenes
+          ? {
+              scenes: inputProps.scenes.map((s) => ({
+                id: s.id,
+                order: s.order,
+                title: s.title,
+                narration: s.narration,
+                layout: s.layout,
+                layoutProps: s.layoutProps,
+                durationSeconds: s.durationSeconds,
+                imageUrl: s.imageUrl,
+              })),
+            }
+          : {}),
+      });
+      const blob = res.data as unknown as Blob;
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = renderAllScenes
+        ? `${selectedTemplateId}_all-scenes.mp4`
+        : `${selectedTemplateId}_${selectedLayout}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      setLayoutRenderError("Failed to render layout. Please try again.");
+    } finally {
+      setLayoutRendering(false);
+    }
+  };
+
+  // Restore existing AI versions for the selected template/layout on change or refresh.
+  useEffect(() => {
+    if (!selectedTemplateId || !selectedLayout) {
+      setAiPreviewSessionId("");
+      setAiPreviewVersions([]);
+      setAiPreviewVersion(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getTemplateAiVersions({
+          template_id: selectedTemplateId,
+          layout_id: selectedLayout,
+        });
+        if (cancelled) return;
+        const data = res.data as ListTemplateAiVersionsResponse;
+        if (!data.ok || !data.versions.length || !data.session_id) {
+          setAiPreviewSessionId("");
+          setAiPreviewVersions([]);
+          setAiPreviewVersion(null);
+          return;
+        }
+        setAiPreviewSessionId(data.session_id);
+        setAiPreviewVersions(data.versions);
+        setAiPreviewVersion(
+          data.active_version_id ?? data.versions[data.versions.length - 1] ?? null,
+        );
+      } catch {
+        if (cancelled) return;
+        // On failure, just leave AI preview state untouched for this selection.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTemplateId, selectedLayout]);
+
+  // ─── Render ───────────────────────────────────────────────────────────────
+  return (
+    <>
+      <style>{`
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        .studio-root {
+          font-family: ${FONT};
+          background: ${T.surfaceAlt};
+          color: ${T.text};
+          height: 100vh;
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+        }
+
+        .studio-input:focus {
+          border-color: ${T.accent} !important;
+          box-shadow: 0 0 0 3px ${T.accentLight} !important;
+          background: #fff !important;
+          outline: none;
+        }
+
+        input[type="range"].studio-range {
+          -webkit-appearance: none; appearance: none;
+          width: 100%; height: 3px; border-radius: 3px; outline: none; cursor: pointer;
+        }
+        input[type="range"].studio-range::-webkit-slider-thumb {
+          -webkit-appearance: none; appearance: none;
+          width: 16px; height: 16px; border-radius: 50%;
+          background: #fff; border: 2px solid ${T.accent};
+          box-shadow: 0 1px 4px rgba(147,51,234,0.22), 0 0 0 3px ${T.accentLight};
+          cursor: pointer; transition: box-shadow 0.13s;
+        }
+        input[type="range"].studio-range::-webkit-slider-thumb:hover {
+          box-shadow: 0 1px 6px rgba(147,51,234,0.35), 0 0 0 5px ${T.accentLight};
+        }
+
+        input[type="color"].color-swatch {
+          -webkit-appearance: none; appearance: none;
+          width: 100%; height: 100%; border: none; padding: 0; cursor: pointer;
+        }
+        input[type="color"].color-swatch::-webkit-color-swatch-wrapper { padding: 0; }
+        input[type="color"].color-swatch::-webkit-color-swatch { border: none; border-radius: 7px; }
+
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: ${T.borderStrong}; border-radius: 4px; }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+        .studio-grid { animation: fadeInUp 0.3s ease both; }
+
+        .glass-card {
+          background: ${T.bg};
+          border: 1px solid ${T.border};
+          border-radius: 12px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        }
+
+        .btn-primary {
+          display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+          padding: 8px 14px; width: 100%;
+          background: ${T.accent}; color: #fff;
+          border: none; border-radius: 8px;
+          font-size: 12px; font-weight: 500; font-family: ${FONT};
+          cursor: pointer; transition: background 0.15s;
+        }
+        .btn-primary:hover:not(:disabled) { background: ${T.accentDark}; }
+        .btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+
+        .btn-ghost {
+          display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+          padding: 8px 14px; width: 100%;
+          background: transparent; color: ${T.textSub};
+          border: 1px solid ${T.border}; border-radius: 8px;
+          font-size: 12px; font-weight: 500; font-family: ${FONT};
+          cursor: pointer; transition: all 0.15s;
+        }
+        .btn-ghost:hover:not(:disabled) { border-color: ${T.accent}; color: ${T.accent}; background: ${T.accentLight}; }
+        .btn-ghost:disabled { opacity: 0.55; cursor: not-allowed; }
+
+        /* Edit button — compact for preview chrome (single row with toggles) */
+        .btn-edit {
+          display: inline-flex; align-items: center; gap: 4px;
+          padding: 4px 6px;
+          background: transparent; color: ${T.textMuted};
+          border: none; border-radius: 7px;
+          font-size: 10px; font-weight: 500; font-family: ${FONT};
+          cursor: pointer; transition: color 0.13s, background 0.13s;
+          flex-shrink: 0;
+        }
+        .btn-edit:hover { color: ${T.accent}; background: ${T.accentLight}; }
+
+        .aspect-btn {
+          flex: 1; display: flex; flex-direction: column; align-items: center; gap: 5px;
+          padding: 9px 8px; border-radius: 8px;
+          border: 1px solid ${T.border}; background: ${T.surfaceAlt};
+          color: ${T.textSub}; font-size: 11px; font-family: ${FONT};
+          cursor: pointer; transition: all 0.13s ease;
+        }
+        .aspect-btn:hover  { border-color: ${T.accentMid}; color: ${T.accent}; }
+        .aspect-btn.active { border-color: ${T.accent}; background: ${T.accentLight}; color: ${T.accent}; font-weight: 600; }
+
+        .left-section {
+          padding-bottom: 14px;
+          margin-bottom: 14px;
+          border-bottom: 1px solid ${T.border};
+        }
+        .left-section:last-child {
+          padding-bottom: 0;
+          margin-bottom: 0;
+          border-bottom: none;
+        }
+      `}</style>
+
+      <div className="studio-root">
+
+        {/* ── Top bar ── */}
+        <header style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "0 20px", height: "52px",
+          borderBottom: `1px solid ${T.border}`,
+          background: T.bg, flexShrink: 0, zIndex: 50,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <span style={{ fontSize: "15px", fontWeight: 600, color: T.text, fontFamily: FONT }}>Template Studio</span>
+
+            {selectedTemplate && (
+              <>
+                <div style={{ width: "1px", height: "14px", background: T.border }} />
+                <span style={{ fontSize: "13px", fontWeight: 500, color: T.textSub, fontFamily: FONT }}>{selectedTemplate.name}</span>
+                {selectedLayout && (
+                  <>
+                    <span style={{ color: T.border }}>·</span>
+                    <span style={{
+                      fontSize: "12px", color: T.accent, fontWeight: 500,
+                      background: T.accentLight, padding: "1px 8px", borderRadius: "100px",
+                      border: `1px solid ${T.accentMid}33`, fontFamily: FONT,
+                    }}>
+                      {humanize(selectedLayout)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleRenderSingleLayout}
+                      disabled={!selectedTemplateId || !selectedLayout || layoutRendering}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        marginLeft: "8px",
+                        padding: "4px 9px",
+                        borderRadius: "999px",
+                        border: `1px solid ${T.border}`,
+                        background: T.surfaceAlt,
+                        color: T.textSub,
+                        fontSize: "11px",
+                        fontWeight: 500,
+                        fontFamily: FONT,
+                        cursor: layoutRendering ? "default" : "pointer",
+                        opacity: layoutRendering ? 0.7 : 1,
+                      }}
+                    >
+                      <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      <span>{layoutRendering ? "Rendering…" : "Render"}</span>
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <span style={{ fontSize: "12px", color: T.textMuted, fontFamily: FONT }}>
+              {isPortrait ? "9:16" : "16:9"} · {durationSeconds}s
+            </span>
+            <div style={{
+              display: "flex", alignItems: "center", gap: "5px",
+              padding: "4px 10px", borderRadius: "100px",
+              background: T.greenBg, border: `1px solid ${T.greenBorder}`,
+            }}>
+              <div style={{ width: "6px", height: "6px", borderRadius: "50%", background: T.green }} />
+              <span style={{ fontSize: "10px", color: T.green, fontWeight: 700, letterSpacing: "0.08em", fontFamily: FONT }}>LIVE</span>
+            </div>
+          </div>
+        </header>
+
+        {/* ── Main ── */}
+        <main style={{ padding: "14px 16px 16px", flex: 1, minHeight: 0, overflow: "hidden" }}>
+
+          {loading && (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "300px", gap: "12px" }}>
+              <div style={{ width: "28px", height: "28px", border: `2px solid ${T.border}`, borderTopColor: T.accent, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
+              <span style={{ fontSize: "12px", color: T.textMuted, fontFamily: FONT }}>Loading templates…</span>
+            </div>
+          )}
+
+          {error && (
+            <div style={{ padding: "12px 16px", borderRadius: "8px", background: "#fef2f2", border: "1px solid #fecaca", color: "#dc2626", fontSize: "13px", fontFamily: FONT }}>
+              {error}
+            </div>
+          )}
+
+          {!loading && !error && selectedTemplate && (
+            <div
+              className="studio-grid"
+              style={{
+                display: "grid",
+                gridTemplateColumns: "264px 1fr 276px",
+                gap: "12px",
+                height: "100%",
+                alignItems: "start",
+              }}
+            >
+              {/* ══ LEFT panel ══ */}
+              <aside className="glass-card" style={{ padding: "16px", overflowY: "auto", maxHeight: "calc(100vh - 80px)" }}>
+
+                {/* Template dropdown */}
+                <div className="left-section">
+                  <StudioDropdown
+                    sectionLabel="Template"
+                    value={selectedTemplateId}
+                    onChange={(nextId) => {
+                      const next = templates.find((t) => normalizeTemplateId(t.id) === nextId) || null;
+                      setSelectedTemplateId(nextId);
+                      if (next) {
+                        const nl = next.hero_layout || next.valid_layouts?.[0] || Object.keys(next.layout_prop_schema ?? {})[0] || "";
+                        setSelectedLayout(nl);
+                        setAccentColor(next.preview_colors?.accent || accentColor);
+                        setBgColor(next.preview_colors?.bg || bgColor);
+                        setTextColor(next.preview_colors?.text || textColor);
+                      }
+                    }}
+                    options={templateOptions}
+                  />
+                </div>
+
+                {/* Layout dropdown */}
+                <div className="left-section">
+                  <StudioDropdown
+                    sectionLabel="Layout"
+                    value={selectedLayout}
+                    onChange={setSelectedLayout}
+                    options={layoutOptions}
+                  />
+                  {selectedLayout && (
+                    <p
+                      style={{
+                        marginTop: "6px",
+                        fontSize: "10px",
+                        color: layoutSupportsImage ? T.textSub : T.textMuted,
+                        fontFamily: FONT,
+                      }}
+                    >
+                      {layoutSupportsImage
+                        ? "This layout supports images. Use the Edit Modal to add an image and make it appear in the layout."
+                        : "This layout does not render scene images."}
+                    </p>
+                  )}
+                </div>
+
+                {/* Format — aspect ratio only */}
+                <div className="left-section">
+                  <SectionLabel icon={<IconLayout />}>Format</SectionLabel>
+                  <FieldLabel>Aspect ratio</FieldLabel>
+                  <div style={{ display: "flex", gap: "8px" }}>
+                    {(["landscape", "portrait"] as AspectRatio[]).map((ar) => (
+                      <button key={ar} type="button" className={`aspect-btn${aspectRatio === ar ? " active" : ""}`} onClick={() => setAspectRatio(ar)}>
+                        <div style={{
+                          width: ar === "landscape" ? "22px" : "12px", height: ar === "landscape" ? "12px" : "22px",
+                          borderRadius: "2px", border: `2px solid ${aspectRatio === ar ? T.accent : T.borderStrong}`,
+                          background: aspectRatio === ar ? T.accentLight : "transparent", transition: "all 0.13s",
+                        }} />
+                        {ar === "landscape" ? "16:9" : "9:16"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Typography */}
+                {responsiveFields.length > 0 && (
+                  <div className="left-section">
+                    <SectionLabel icon={<IconType />}>Typography</SectionLabel>
+                    {responsiveFields.map((field) => (
+                      <ResponsiveFieldRow
+                        key={field.key}
+                        field={field}
+                        value={layoutProps[field.key]}
+                        aspectRatio={aspectRatio}
+                        onChange={(key, val) => setLayoutProps((prev) => ({ ...prev, [key]: val }))}
+                      />
+                    ))}
+                    <div style={{ display: "flex", flexDirection: "column", gap: "7px", marginTop: "4px" }}>
+                      <button type="button" className="btn-ghost" onClick={() => {
+                        const defaults = (schema?.defaults ?? {}) as Record<string, unknown>;
+                        setLayoutProps(defaults);
+                        const sd = schema?.scene_defaults;
+                        if (sd?.title) setTitle(sd.title);
+                        if (sd?.narration !== undefined) setNarration(sd.narration);
+                      }}>
+                        <IconReset />
+                        Reset to defaults
+                      </button>
+                      <button type="button" className="btn-primary" disabled={savingSource} onClick={handleSaveSource}>
+                        <IconSave />
+                        {savingSource ? "Saving…" : "Save font defaults"}
+                      </button>
+                      {saveMessage && (
+                        <p style={{ margin: 0, fontSize: "11px", color: T.textSub, background: T.accentLight, border: `1px solid ${T.accentMid}33`, borderRadius: "8px", padding: "8px 10px", lineHeight: "1.5", wordBreak: "break-all", fontFamily: FONT }}>
+                          {saveMessage}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+              </aside>
+
+              {/* ══ CENTER: Preview ══ */}
+              <section style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                <div className="glass-card" style={{ overflow: "hidden" }}>
+
+                  {/* Chrome bar */}
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "8px",
+                        flexWrap: "nowrap",
+                        padding: "6px 10px",
+                        borderBottom: `1px solid ${T.border}`,
+                        background: T.surfaceAlt,
+                        minWidth: 0,
+                      }}
+                    >
+                      {/* Left: traffic dots + Edit + Toggle */}
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "5px",
+                          minWidth: 0,
+                          flex: "1 1 auto",
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: "5px" }}>
+                          {["#ff5f56", "#ffbd2e", "#27c93f"].map((c, i) => (
+                            <div
+                              key={i}
+                              style={{
+                                width: "8px",
+                                height: "8px",
+                                borderRadius: "50%",
+                                background: c,
+                                opacity: 0.6,
+                              }}
+                            />
+                          ))}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => setSceneModalOpen(true)}
+                          className="btn-edit"
+                          title="Edit scene"
+                        >
+                          <IconEdit />
+                          Edit
+                        </button>
+
+                        {/* Toggle moved here */}
+                        <div
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            padding: "2px",
+                            borderRadius: "10px",
+                            background: T.surfaceAlt,
+                            border: `1px solid ${T.border}`,
+                            gap: "2px",
+                          }}
+                        >
+                          {(
+                            [
+                              { id: "frontend", label: "Frontend", full: "Frontend file" },
+                              { id: "remotion", label: "Remotion", full: "Remotion build" },
+                            ] as const
+                          ).map((opt) => {
+                            const active = viewSource === opt.id;
+                            return (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                title={opt.full}
+                                onClick={() =>
+                                  setViewSource(
+                                    opt.id === "frontend" ? "frontend" : "remotion",
+                                  )
+                                }
+                                style={{
+                                  border: "none",
+                                  borderRadius: "7px",
+                                  padding: "3px 6px",
+                                  fontSize: "9px",
+                                  fontWeight: active ? 600 : 500,
+                                  fontFamily: FONT,
+                                  cursor: "pointer",
+                                  background: active ? T.accent : "transparent",
+                                  color: active ? "#ffffff" : T.textSub,
+                                  transition: "background 0.15s, color 0.15s",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        <div
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            padding: "2px",
+                            borderRadius: "10px",
+                            background: T.surfaceAlt,
+                            border: `1px solid ${T.border}`,
+                            gap: "2px",
+                          }}
+                          title={
+                            layouts.length <= 1
+                              ? "This template only has one layout"
+                              : "Preview every layout back-to-back in the player"
+                          }
+                        >
+                          <button
+                            type="button"
+                            disabled={layouts.length <= 1}
+                            title="One layout — preview only the selected layout"
+                            onClick={() => layouts.length > 1 && setPlayAllLayouts(false)}
+                            style={{
+                              border: "none",
+                              borderRadius: "7px",
+                              padding: "3px 6px",
+                              fontSize: "9px",
+                              fontWeight: !playAllLayouts ? 600 : 500,
+                              fontFamily: FONT,
+                              cursor: layouts.length <= 1 ? "not-allowed" : "pointer",
+                              opacity: layouts.length <= 1 ? 0.45 : 1,
+                              background: !playAllLayouts ? T.accent : "transparent",
+                              color: !playAllLayouts ? "#ffffff" : T.textSub,
+                              transition: "background 0.15s, color 0.15s",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            Single Scene
+                          </button>
+                          <button
+                            type="button"
+                            disabled={layouts.length <= 1}
+                            title="All layouts — play every layout in order"
+                            onClick={() => layouts.length > 1 && setPlayAllLayouts(true)}
+                            style={{
+                              border: "none",
+                              borderRadius: "7px",
+                              padding: "3px 6px",
+                              fontSize: "9px",
+                              fontWeight: playAllLayouts ? 600 : 500,
+                              fontFamily: FONT,
+                              cursor: layouts.length <= 1 ? "not-allowed" : "pointer",
+                              opacity: layouts.length <= 1 ? 0.45 : 1,
+                              background: playAllLayouts ? T.accent : "transparent",
+                              color: playAllLayouts ? "#ffffff" : T.textSub,
+                              transition: "background 0.15s, color 0.15s",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            All Scenes
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Center: resolution + canvas pill (styled like toggle) */}
+                      <div
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          padding: "2px 4px 2px 2px",
+                          borderRadius: "10px",
+                          background: T.surfaceAlt,
+                          gap: "4px",
+                          flexShrink: 0,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            padding: "2px",
+                            borderRadius: "10px",
+                            background: T.surfaceAlt,
+                            border: `1px solid ${T.border}`,
+                            gap: "2px",
+                          }}
+                        >
+                          {(["720p", "1080p"] as const).map((res) => {
+                            const active = res === studioResolution;
+                            return (
+                              <button
+                                key={res}
+                                type="button"
+                                onClick={() => setStudioResolution(res)}
+                                style={{
+                                  border: "none",
+                                  borderRadius: "7px",
+                                  padding: "3px 6px",
+                                  fontSize: "9px",
+                                  fontWeight: active ? 600 : 500,
+                                  fontFamily: FONT,
+                                  cursor: "pointer",
+                                  background: active ? T.accent : "transparent",
+                                  color: active ? "#ffffff" : T.textSub,
+                                  transition: "background 0.15s, color 0.15s",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {res}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <span
+                          style={{
+                            fontSize: "9px",
+                            color: T.textMuted,
+                            fontFamily: FONT,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {canvasW}×{canvasH} {durationInFrames}f 30fps
+                        </span>
+                      </div>
+
+                      {/* Right: Rendering badge */}
+                      <div style={{ display: "flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
+                        <div
+                          style={{
+                            width: "5px",
+                            height: "5px",
+                            borderRadius: "50%",
+                            background: T.green,
+                          }}
+                        />
+                        <span
+                          style={{
+                            fontSize: "8px",
+                            color: T.green,
+                            fontWeight: 700,
+                            letterSpacing: "0.04em",
+                            fontFamily: FONT,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          RENDERING
+                        </span>
+                      </div>
+                    </div>
+
+                  {/* Player */}
+                  <div style={{
+                    padding: "24px 20px",
+                    background: `radial-gradient(ellipse at 50% -10%, ${T.accentLight} 0%, ${T.surfaceAlt} 60%, ${T.bg} 100%)`,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>
+                    <div style={{
+                      // Portrait is sized from its HEIGHT, landscape from its
+                      // width. `width:100%` for both looked right for 16:9 but
+                      // broke 9:16: a full-width box at a 9:16 ratio computes an
+                      // enormous height, `maxHeight` then clamps the BOX without
+                      // narrowing it, and the player letterboxes the video into a
+                      // thin strip inside a mostly-empty white panel. Fixing the
+                      // height and letting width follow the ratio (`width:auto`)
+                      // makes the box hug the video in both orientations.
+                      height: isPortrait ? "min(70vh, 620px)" : "auto",
+                      width: isPortrait ? "auto" : "100%",
+                      aspectRatio: isPortrait ? "9/16" : "16/9",
+                      maxWidth: "100%",
+                      maxHeight: isPortrait ? "none" : "540px",
+                      borderRadius: "8px", overflow: "hidden",
+                      boxShadow: `0 0 0 1px ${T.border}, 0 4px 16px rgba(147,51,234,0.07), 0 16px 48px rgba(0,0,0,0.08)`,
+                    }}>
+                      <Player
+                        key={
+                          sequentialPreview
+                            ? `seq-${selectedTemplateId}-${layouts.join("|")}-${durationSeconds}`
+                            : `one-${selectedTemplateId}-${selectedLayout}-${durationSeconds}-${viewSource}`
+                        }
+                        component={Composition}
+                        inputProps={inputProps}
+                        durationInFrames={durationInFrames}
+                        compositionWidth={canvasW}
+                        compositionHeight={canvasH}
+                        fps={30}
+                        controls
+                        style={{ width: "100%", height: "100%" }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Layout props — single-line bar */}
+                <div
+                  className="glass-card"
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "auto 1fr auto",
+                    alignItems: "center",
+                    gap: "10px",
+                    padding: "10px 14px",
+                    minHeight: "44px",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: "12px",
+                      fontWeight: 600,
+                      color: T.text,
+                      fontFamily: FONT,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Layout props
+                  </span>
+                  <span
+                    style={{
+                      fontSize: "11px",
+                      color: T.textMuted,
+                      fontFamily: FONT,
+                      textAlign: "center",
+                      lineHeight: 1.35,
+                    }}
+                  >
+                    {hasEditableProps
+                      ? "Open the props list to change them"
+                      : "No props for this layout"}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={!hasEditableProps}
+                    onClick={() => setPropsModalOpen(true)}
+                    style={{
+                      padding: "4px 8px",
+                      fontSize: "10px",
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                      width: "auto",
+                      minWidth: 0,
+                    }}
+                  >
+                    View props
+                  </button>
+                </div>
+              </section>
+
+              {/* ══ RIGHT: AI panel (tabbed) ══ */}
+              <aside className="glass-card" style={{ padding: "0", overflowY: "auto", maxHeight: "calc(100vh - 80px)", display: "flex", flexDirection: "column" }}>
+
+                {/* Tab bar */}
+                <div style={{
+                  display: "grid", gridTemplateColumns: "repeat(3, 1fr)",
+                  borderBottom: `1px solid ${T.border}`,
+                  background: T.surfaceAlt, borderRadius: "12px 12px 0 0", flexShrink: 0,
+                }}>
+                  {(["edit", "new-layout", "new-template"] as const).map((tab) => {
+                    const label = tab === "edit"
+                      ? "Edit"
+                      : tab === "new-layout"
+                        ? "New Layout"
+                        : "New Template";
+                    const isActive = rightTab === tab;
+                    return (
+                      <button
+                        key={tab} type="button"
+                        onClick={() => setRightTab(tab)}
+                        style={{
+                          padding: "10px 8px", border: "none",
+                          borderBottom: isActive ? `2px solid ${T.accent}` : "2px solid transparent",
+                          background: "transparent",
+                          fontSize: "11px", fontWeight: isActive ? 700 : 500, fontFamily: FONT,
+                          color: isActive ? T.accent : T.textSub,
+                          cursor: "pointer", transition: "all 0.13s",
+                          whiteSpace: "nowrap",
+                          textAlign: "center",
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* ── Tab: AI Edit ── */}
+                {rightTab === "edit" && (
+                <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "10px", flex: 1 }}>
+
+                  {/* Mode toggle — matches BlogUrlForm tab style */}
+                  <div>
+                    <FieldLabel>Mode</FieldLabel>
+                    <div className="flex gap-1 p-1 bg-gray-100/60 rounded-xl w-fit mt-1">
+                      {(["code-only", "rebuild"] as const).map((m) => {
+                        const label = m === "code-only" ? "Edit Layout" : "Rebuild layout";
+                        const isActive = aiMode === m;
+                        return (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => { setAiMode(m); setRebuildError(""); setRebuildStatus(""); }}
+                            className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                              isActive ? "bg-white text-purple-600 shadow-sm" : "text-gray-400 hover:text-gray-600"
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <FieldLabel>Instruction</FieldLabel>
+                    <textarea
+                      className="studio-input"
+                      placeholder={aiMode === "code-only"
+                        ? "Describe the edit — e.g. 'move the title higher, make the subtitle lighter.'"
+                        : "Describe the rebuild — e.g. 'Add a progress bar and highlight color support.'"}
+                      value={aiInstruction}
+                      onChange={(e) => setAiInstruction(e.target.value)}
+                      rows={aiMode === "rebuild" ? 6 : 9}
+                      style={{ ...inputBase, resize: "vertical" as const, lineHeight: "1.6", background: T.surfaceAlt }}
+                    />
+                  </div>
+
+                  <ImageAttachRow
+                    image={aiLayoutImage}
+                    onImageChange={setAiLayoutImage}
+                    label="Reference image (optional)"
+                  />
+
+                  {/* Rebuild: HTML + SVG design references */}
+                  {aiMode === "rebuild" && (
+                    <>
+                      <MarkupExampleRow
+                        value={rebuildHtml}
+                        onChange={setRebuildHtml}
+                        label="HTML example (optional)"
+                        accept=".html,text/html"
+                        uploadLabel="Upload .html"
+                        placeholder="Paste HTML to redesign this layout to match it…"
+                      />
+                      <MarkupExampleRow
+                        value={rebuildSvg}
+                        onChange={setRebuildSvg}
+                        label="SVG example (optional)"
+                        accept=".svg,image/svg+xml"
+                        uploadLabel="Upload .svg"
+                        placeholder="Paste an SVG graphic to embed in this layout…"
+                      />
+                      {rebuildSvg.trim() && (
+                        <div style={{ marginBottom: "10px" }}>
+                          <FieldLabel>How should this SVG be used? (optional)</FieldLabel>
+                          <input
+                            className="studio-input"
+                            placeholder="e.g. use as a full-bleed background"
+                            value={rebuildSvgUsage}
+                            onChange={(e) => setRebuildSvgUsage(e.target.value.slice(0, 600))}
+                            maxLength={600}
+                            style={{ ...inputBase, background: T.surfaceAlt, marginTop: "4px" }}
+                          />
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "6px" }}>
+                            {[
+                              { label: "Background", phrase: "Use as a full-bleed background behind the content." },
+                              { label: "Icon", phrase: "Use as an icon accompanying the title." },
+                              { label: "Corner accent", phrase: "Place as a decorative accent in a corner." },
+                              { label: "Divider", phrase: "Use as a divider between sections." },
+                            ].map((preset) => (
+                              <button
+                                key={preset.label}
+                                type="button"
+                                onClick={() => setRebuildSvgUsage(preset.phrase)}
+                                style={{
+                                  padding: "4px 10px", fontSize: "10px", fontFamily: FONT,
+                                  background: T.surfaceAlt, border: `1px solid ${T.border}`,
+                                  borderRadius: "999px", color: T.textSub, cursor: "pointer",
+                                }}
+                              >
+                                {preset.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* Rebuild: extra props editor */}
+                  {aiMode === "rebuild" && (
+                    <div>
+                      <FieldLabel>Extra props to add</FieldLabel>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "4px" }}>
+                        {rebuildProps.map((p, i) => (
+                          <PropDefRow
+                            key={i} prop={p}
+                            onChange={(updated) => setRebuildProps((prev) => prev.map((x, j) => j === i ? updated : x))}
+                            onRemove={() => setRebuildProps((prev) => prev.filter((_, j) => j !== i))}
+                          />
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => setRebuildProps((prev) => [...prev, { name: "", type: "string", description: "" }])}
+                          style={{
+                            padding: "6px 10px", border: `1px dashed ${T.border}`, borderRadius: "8px",
+                            background: "transparent", color: T.textSub, fontSize: "11px", fontFamily: FONT,
+                            cursor: "pointer",
+                          }}
+                        >
+                          + Add prop
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {aiMode === "code-only" ? (
+                    <button type="button" className="btn-primary"
+                      disabled={aiLoading || aiApplying || aiDiscarding || !aiInstruction.trim()}
+                      onClick={handleGenerateAiEdit}
+                    >
+                      <IconWand />
+                      {aiLoading ? "Generating preview…" : "Generate"}
+                    </button>
+                  ) : (
+                    <button type="button" className="btn-primary"
+                      disabled={rebuildLoading || !aiInstruction.trim()}
+                      onClick={handleRebuildLayout}
+                    >
+                      <IconWand />
+                      {rebuildLoading ? "Rebuilding…" : "Rebuild layout"}
+                    </button>
+                  )}
+
+                  {aiMode === "rebuild" && rebuildError && (
+                    <div style={{
+                      padding: "8px 10px", borderRadius: "6px",
+                      background: "#fee2e2", border: "1px solid #fecaca",
+                      fontSize: "11px", fontFamily: FONT, color: "#dc2626",
+                    }}>
+                      {rebuildError}
+                    </div>
+                  )}
+
+                  {aiPreviewSessionId && (
+                    <>
+                      <div>
+                        <FieldLabel>Compare versions</FieldLabel>
+                        <div style={{
+                          display: "flex",
+                          flexWrap: "wrap",
+                          gap: "4px",
+                          marginTop: "4px",
+                          background: T.surfaceAlt, border: `1px solid ${T.border}`,
+                          borderRadius: "8px", padding: "2px",
+                        }}>
+                          {aiPreviewVersions.map((ver) => {
+                            const isActive = aiPreviewVersion === ver;
+                            const label =
+                              ver === "original"
+                                ? "Original"
+                                : ver.startsWith("v")
+                                  ? `Version ${ver.slice(1)}`
+                                  : ver;
+                            return (
+                              <button
+                                key={ver}
+                                type="button"
+                                disabled={aiSwitchingVersion || aiApplying || aiDiscarding}
+                                onClick={() => handleSwitchAiPreviewVersion(ver)}
+                                style={{
+                                  flex: "0 0 auto",
+                                  padding: "6px 10px",
+                                  border: "none",
+                                  borderRadius: "6px",
+                                  fontSize: "11px", fontWeight: 500, fontFamily: FONT,
+                                  cursor: aiSwitchingVersion || aiApplying || aiDiscarding ? "not-allowed" : "pointer",
+                                  background: isActive ? T.accent : "transparent",
+                                  color: isActive ? "#fff" : T.textSub,
+                                  opacity: aiSwitchingVersion || aiApplying || aiDiscarding ? 0.6 : 1,
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                        <button
+                          type="button"
+                          disabled={aiApplying || aiDiscarding}
+                          onClick={handleApplyAiEdit}
+                          style={{
+                            display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
+                            padding: "8px 14px", width: "100%",
+                            background: "#111827", color: "#fff",
+                            border: "none", borderRadius: "8px",
+                            fontSize: "12px", fontWeight: 500, fontFamily: FONT,
+                            cursor: aiApplying || aiDiscarding ? "not-allowed" : "pointer",
+                            opacity: aiApplying || aiDiscarding ? 0.7 : 1,
+                            transition: "opacity 0.15s",
+                          }}
+                        >
+                          <IconSave />
+                          {aiApplying ? "Applying…" : "Apply to files"}
+                        </button>
+                        <button type="button" className="btn-ghost" disabled={aiDiscarding || aiApplying} onClick={handleDiscardAiEdit}>
+                          <IconReset />
+                          {aiDiscarding ? "Discarding…" : "Discard preview"}
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  {aiError && (
+                    <div style={{
+                      padding: "8px 10px", borderRadius: "6px",
+                      background: "#fee2e2", border: "1px solid #fecaca",
+                      fontSize: "11px", fontFamily: FONT, color: "#dc2626",
+                    }}>
+                      {aiError}
+                    </div>
+                  )}
+                </div>
+                )}
+
+                {/* ── Tab: New Layout ── */}
+                {rightTab === "new-layout" && (
+                <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "10px", flex: 1 }}>
+
+                  <div className="left-section">
+                    <StudioDropdown
+                      sectionLabel="Base layout"
+                      value={newBaseLayoutId}
+                      onChange={setNewBaseLayoutId}
+                      options={[{ value: "", label: "— select —" }, ...layoutOptions]}
+                    />
+                    <p style={{ margin: "6px 0 0", fontSize: "10px", color: T.textMuted, fontFamily: FONT, lineHeight: "1.5" }}>
+                      Style reference for the new layout. The generated component will match this layout&apos;s visuals and animations.
+                    </p>
+                  </div>
+
+                  <div>
+                    <FieldLabel>New layout ID (snake_case)</FieldLabel>
+                    <input
+                      className="studio-input"
+                      placeholder="e.g. breaking_news"
+                      value={newLayoutId}
+                      onChange={(e) => setNewLayoutId(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_"))}
+                      style={{ ...inputBase, background: T.surfaceAlt }}
+                    />
+                  </div>
+
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                      <FieldLabel>Layout description</FieldLabel>
+                      <span style={{
+                        fontSize: "10px", fontFamily: FONT,
+                        color: (newLayoutDesc.length >= LAYOUT_DESC_MAX ||
+                                (newLayoutDesc.trim().length > 0 && newLayoutDesc.trim().length < LAYOUT_DESC_MIN))
+                          ? "#dc2626" : T.textMuted,
+                      }}>
+                        {newLayoutDesc.length} / {LAYOUT_DESC_MAX}
+                      </span>
+                    </div>
+                    <textarea
+                      className="studio-input"
+                      placeholder="Describe the visual style and purpose of this layout…"
+                      value={newLayoutDesc}
+                      onChange={(e) => setNewLayoutDesc(e.target.value.slice(0, LAYOUT_DESC_MAX))}
+                      maxLength={LAYOUT_DESC_MAX}
+                      rows={4}
+                      style={{ ...inputBase, resize: "vertical" as const, lineHeight: "1.6", background: T.surfaceAlt }}
+                    />
+                    {newLayoutDesc.trim().length > 0 && newLayoutDesc.trim().length < LAYOUT_DESC_MIN && (
+                      <p style={{ margin: "4px 0 0", fontSize: "10px", color: "#dc2626", fontFamily: FONT }}>
+                        Add at least {LAYOUT_DESC_MIN} characters ({newLayoutDesc.trim().length} so far).
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <FieldLabel>Props</FieldLabel>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "4px" }}>
+                      {newLayoutProps.map((p, i) => (
+                        <PropDefRow
+                          key={i} prop={p}
+                          onChange={(updated) => setNewLayoutProps((prev) => prev.map((x, j) => j === i ? updated : x))}
+                          onRemove={() => setNewLayoutProps((prev) => prev.filter((_, j) => j !== i))}
+                        />
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => setNewLayoutProps((prev) => [...prev, { name: "", type: "string", description: "" }])}
+                        style={{
+                          padding: "6px 10px", border: `1px dashed ${T.border}`, borderRadius: "8px",
+                          background: "transparent", color: T.textSub, fontSize: "11px", fontFamily: FONT,
+                          cursor: "pointer",
+                        }}
+                      >
+                        + Add prop
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button" className="btn-primary"
+                    disabled={newLayoutLoading || !newLayoutId.trim() || !newBaseLayoutId || newLayoutDesc.trim().length < LAYOUT_DESC_MIN}
+                    onClick={handleCreateLayout}
+                  >
+                    <IconWand />
+                    {newLayoutLoading ? "Creating…" : "Create layout"}
+                  </button>
+
+                  {newLayoutError && (
+                    <div style={{
+                      padding: "8px 10px", borderRadius: "6px",
+                      background: "#fee2e2", border: "1px solid #fecaca",
+                      fontSize: "11px", fontFamily: FONT, color: "#dc2626",
+                    }}>
+                      {newLayoutError}
+                    </div>
+                  )}
+                </div>
+                )}
+
+                {/* ── Tab: New Template (from design doc) ── */}
+                {rightTab === "new-template" && (
+                <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "10px", flex: 1 }}>
+
+                  <div>
+                    <FieldLabel>Template ID (snake_case)</FieldLabel>
+                    <input
+                      className="studio-input"
+                      placeholder="e.g. neon_grid"
+                      value={newTemplateId}
+                      onChange={(e) => setNewTemplateId(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_"))}
+                      style={{ ...inputBase, background: T.surfaceAlt }}
+                    />
+                  </div>
+
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                      <FieldLabel>Design doc</FieldLabel>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{
+                          fontSize: "10px", fontFamily: FONT,
+                          color: (newTemplateDoc.length >= DESIGN_DOC_MAX ||
+                                  (newTemplateDoc.trim().length > 0 && newTemplateDoc.trim().length < DESIGN_DOC_MIN))
+                            ? "#dc2626" : T.textMuted,
+                        }}>
+                          {newTemplateDoc.length.toLocaleString()} / {DESIGN_DOC_MAX.toLocaleString()}
+                        </span>
+                        {newTemplateDocFileName && (
+                          <span style={{ fontSize: "10px", color: T.textMuted, fontFamily: FONT }}>
+                            {newTemplateDocFileName}
+                          </span>
+                        )}
+                        <input
+                          ref={newTemplateDocFileInputRef}
+                          type="file"
+                          style={{ display: "none" }}
+                          onChange={(e) => {
+                            void handleNewTemplateDocFileSelect(e.target.files?.[0] ?? undefined);
+                            if (e.target) e.target.value = "";
+                          }}
+                        />
+                        <button
+                          type="button"
+                          disabled={newTemplateDocExtracting}
+                          onClick={() => newTemplateDocFileInputRef.current?.click()}
+                          style={{
+                            padding: "4px 8px", border: `1px solid ${T.border}`, borderRadius: 6,
+                            background: T.surfaceAlt, color: T.textSub,
+                            fontSize: "10px", fontFamily: FONT,
+                            cursor: newTemplateDocExtracting ? "wait" : "pointer",
+                            opacity: newTemplateDocExtracting ? 0.6 : 1,
+                          }}
+                        >
+                          {newTemplateDocExtracting ? "Extracting…" : "Upload file"}
+                        </button>
+                      </div>
+                    </div>
+                    <textarea
+                      className="studio-input"
+                      placeholder={`Describe the template.`}
+                      value={newTemplateDoc}
+                      onChange={(e) => { setNewTemplateDoc(e.target.value.slice(0, DESIGN_DOC_MAX)); if (newTemplateDocFileName) setNewTemplateDocFileName(""); }}
+                      maxLength={DESIGN_DOC_MAX}
+                      rows={16}
+                      style={{ ...inputBase, resize: "vertical" as const, lineHeight: "1.55", background: T.surfaceAlt, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "11px" }}
+                    />
+                    <p style={{ margin: "6px 0 0", fontSize: "10px", color: T.textMuted, fontFamily: FONT, lineHeight: "1.5" }}>
+                      Paste your design doc or upload a file — PDF, DOCX, PPTX, MD, TXT, HTML, JSON, etc. Step 1 analyzes the doc and proposes layouts. Step 2: uncheck any layout you do not want (hero/fallback are reassigned automatically if needed), then create only the verified list.
+                    </p>
+                    {newTemplateReview && newTemplateReviewRows.length > 0 && (
+                      <div style={{
+                        marginTop: 10,
+                        padding: "10px 12px",
+                        borderRadius: 8,
+                        border: `1px solid ${T.border}`,
+                        background: T.bg,
+                        maxHeight: 220,
+                        overflowY: "auto",
+                      }}>
+                        <div style={{ fontSize: "11px", fontWeight: 600, fontFamily: FONT, marginBottom: 8, color: T.text }}>
+                          Layouts to create ({newTemplateKeepLayoutIds.length} of {newTemplateReviewRows.length})
+                        </div>
+                        <p style={{ fontSize: "10px", color: T.textMuted, fontFamily: FONT, marginBottom: 8, lineHeight: 1.5 }}>
+                          Planned hero: <code style={{ fontSize: 10 }}>{String((newTemplateReview.plan as { hero_layout?: string }).hero_layout ?? "")}</code>
+                          {" · "}fallback: <code style={{ fontSize: 10 }}>{String((newTemplateReview.plan as { fallback_layout?: string }).fallback_layout ?? "")}</code>
+                          {" — if you remove either, the server picks replacements."}
+                        </p>
+                        {newTemplateReviewRows.map((row) => (
+                          <label
+                            key={row.id}
+                            style={{
+                              display: "flex",
+                              alignItems: "flex-start",
+                              gap: 8,
+                              padding: "6px 0",
+                              borderTop: `1px solid ${T.border}`,
+                              cursor: newTemplateBusy ? "default" : "pointer",
+                              fontSize: "11px",
+                              fontFamily: FONT,
+                              color: T.text,
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={newTemplateKeepLayoutIds.includes(row.id)}
+                              disabled={Boolean(newTemplateBusy)}
+                              onChange={() => toggleNewTemplateLayoutKeep(row.id)}
+                              style={{ marginTop: 2 }}
+                            />
+                            <span>
+                              <strong>{row.id}</strong>
+                              {row.label !== row.id && (
+                                <span style={{ color: T.textMuted }}> — {row.label}</span>
+                              )}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={
+                      Boolean(newTemplateBusy) ||
+                      !newTemplateId.trim() ||
+                      newTemplateDoc.trim().length < DESIGN_DOC_MIN ||
+                      Boolean(newTemplateReview)
+                    }
+                    onClick={handleAnalyzeTemplateDoc}
+                  >
+                    <IconWand />
+                    {newTemplateBusy === "analyze" ? "Analyzing…" : "Analyze design doc"}
+                  </button>
+
+                  {newTemplateReview && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={
+                          Boolean(newTemplateBusy) ||
+                          newTemplateKeepLayoutIds.length < 2
+                        }
+                        onClick={handleCreateVerifiedTemplate}
+                      >
+                        <IconWand />
+                        {newTemplateBusy === "create"
+                          ? "Creating…"
+                          : `Create verified layouts (${newTemplateKeepLayoutIds.length})`}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        disabled={Boolean(newTemplateBusy)}
+                        onClick={() => {
+                          resetNewTemplateReview();
+                          setNewTemplateStatus("");
+                          setNewTemplateError("");
+                        }}
+                      >
+                        Cancel review
+                      </button>
+                    </>
+                  )}
+
+                  {newTemplateStatus && (
+                    <div style={{
+                      padding: "8px 10px", borderRadius: "6px",
+                      background: T.surfaceAlt, border: `1px solid ${T.border}`,
+                      fontSize: "11px", fontFamily: FONT, color: T.textSub,
+                      whiteSpace: "pre-wrap" as const,
+                    }}>
+                      {newTemplateStatus}
+                    </div>
+                  )}
+
+                  {newTemplateError && (
+                    <div style={{
+                      padding: "8px 10px", borderRadius: "6px",
+                      background: "#fee2e2", border: "1px solid #fecaca",
+                      fontSize: "11px", fontFamily: FONT, color: "#dc2626",
+                    }}>
+                      {newTemplateError}
+                    </div>
+                  )}
+
+                </div>
+                )}
+
+              </aside>
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* ── Scene Settings Modal ── */}
+      <SceneSettingsModal
+        open={sceneModalOpen}
+        onClose={() => setSceneModalOpen(false)}
+        title={title} setTitle={setTitle}
+        narration={narration} setNarration={setNarration}
+        imageUrl={imageUrl} setImageUrl={setImageUrl}
+        fetchedImageUrl={fetchedImageUrl}
+        imageFetching={imageFetching}
+        imageError={imageError}
+        accentColor={accentColor} setAccentColor={setAccentColor}
+        bgColor={bgColor} setBgColor={setBgColor}
+        textColor={textColor} setTextColor={setTextColor}
+        durationSeconds={durationSeconds} setDurationSeconds={setDurationSeconds}
+        layoutSupportsImage={layoutSupportsImage}
+        onOpenImageAdjust={openTemplateImageAdjust}
+      />
+
+      <LayoutPropsModal
+        open={propsModalOpen}
+        onClose={() => setPropsModalOpen(false)}
+        schema={schema}
+        regularFields={regularFields}
+        layoutLabel={currentLayoutLabel}
+        layoutProps={layoutProps}
+        onSave={setLayoutProps}
+      />
+
+      {imageAdjustOpen && imageAdjustSrc &&
+        ReactDOM.createPortal(
+          <div className="fixed inset-0 z-[1100] flex items-center justify-center p-2 sm:p-4 min-h-0">
+            <div
+              className="absolute inset-0 bg-black/55 backdrop-blur-sm"
+              onClick={closeTemplateImageAdjust}
+              aria-hidden
+            />
+            <div
+              className="relative w-full max-w-3xl max-h-[calc(100dvh-0.75rem)] sm:max-h-[calc(100dvh-2rem)] flex flex-col rounded-2xl bg-white shadow-2xl overflow-hidden min-h-0"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="shrink-0 px-4 py-3 sm:px-5 sm:py-4 border-b border-gray-200 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h3 className="text-base sm:text-lg font-semibold text-gray-900">Adjust image framing</h3>
+                  <p className="text-xs text-gray-500 mt-0.5 leading-snug">
+                    Drag to pan when zoomed in. Use the slider or scroll wheel to zoom, then save.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeTemplateImageAdjust}
+                  className="shrink-0 w-7 h-7 flex items-center justify-center rounded-full border border-purple-500/80 text-purple-600 hover:bg-purple-600 hover:text-white hover:border-purple-600 transition-colors"
+                  title="Close"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain bg-gray-50">
+                <div className="p-4 sm:p-5">
+                  <div
+                    ref={imageAdjustPreviewRef}
+                    onMouseDown={handleAdjustMouseDown}
+                    onTouchStart={handleAdjustTouchStart}
+                    style={{
+                      aspectRatio: imageAdjustAspectRatio,
+                      maxHeight: "70vh",
+                      maxWidth: `min(100%, 42rem, calc(70vh * ${imageAdjustAspectRatio.split(" / ")[0]} / ${imageAdjustAspectRatio.split(" / ")[1]}))`,
+                      ...(imageAdjustCircular ? { borderRadius: "50%" } : {}),
+                    }}
+                    className={`relative mx-auto ${imageAdjustCircular ? "" : "rounded-xl"} overflow-hidden border-2 border-gray-200 select-none touch-none ${
+                      isAdjustDragging ? "cursor-grabbing" : "cursor-grab"
+                    }`}
+                  >
+                    <img
+                      src={imageAdjustSrc}
+                      alt="Adjust preview"
+                      className="absolute inset-0 w-full h-full"
+                      style={{
+                        objectFit: imageAdjustZoom < 1 ? "contain" : "cover",
+                        objectPosition: imageAdjustZoom < 1 ? "center" : `${imageAdjustFocusX}% ${imageAdjustFocusY}%`,
+                        transform: `scale(${imageAdjustZoom})`,
+                        transformOrigin: imageAdjustZoom < 1 ? "center center" : `${imageAdjustFocusX}% ${imageAdjustFocusY}%`,
+                      }}
+                      draggable={false}
+                    />
+                  </div>
+                  <div className="mt-4 flex flex-col gap-2 max-w-2xl mx-auto w-full">
+                    <label className="flex items-center gap-3 text-sm text-gray-700">
+                      <span className="w-14 shrink-0 tabular-nums">Zoom</span>
+                      <input
+                        type="range"
+                        min={IMAGE_ADJUST_ZOOM_MIN}
+                        max={IMAGE_ADJUST_ZOOM_MAX}
+                        step={0.05}
+                        value={imageAdjustZoom}
+                        onChange={(e) =>
+                          setImageAdjustZoom(
+                            Math.min(
+                              IMAGE_ADJUST_ZOOM_MAX,
+                              Math.max(IMAGE_ADJUST_ZOOM_MIN, Number(e.target.value)),
+                            ),
+                          )
+                        }
+                        className="flex-1 min-w-0 h-1 w-full cursor-pointer appearance-none accent-purple-600 [&::-webkit-slider-runnable-track]:h-0.5 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-gray-200 [&::-webkit-slider-thumb]:-mt-1 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-purple-600 [&::-moz-range-track]:h-0.5 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-gray-200 [&::-moz-range-thumb]:h-2.5 [&::-moz-range-thumb]:w-2.5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-purple-600"
+                      />
+                      <span className="w-12 text-right text-xs text-gray-500 tabular-nums">
+                        {imageAdjustZoom.toFixed(2)}×
+                      </span>
+                    </label>
+                  </div>
+                  <div className="mt-3 text-xs text-gray-500 text-center tabular-nums">
+                    Position: X {Math.round(imageAdjustFocusX)}% · Y {Math.round(imageAdjustFocusY)}% · Zoom{" "}
+                    {imageAdjustZoom.toFixed(2)}×
+                  </div>
+                </div>
+              </div>
+              <div className="shrink-0 px-4 py-3 sm:px-5 sm:py-4 border-t border-gray-200 flex justify-end gap-2 bg-white">
+                <button
+                  type="button"
+                  onClick={closeTemplateImageAdjust}
+                  className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={saveTemplateImageAdjust}
+                  className="px-4 py-2 text-sm font-medium bg-purple-600 text-white rounded-lg hover:bg-purple-700"
+                >
+                  Save framing
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}

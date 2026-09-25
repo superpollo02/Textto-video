@@ -1,0 +1,725 @@
+"""
+TemplateService — Reads template metadata and prompts from backend/templates/.
+
+All template-specific logic lives in meta.json and prompt.md. This service
+is template-agnostic: it discovers templates from the registry and reads
+their files. Unknown IDs fall back to "default".
+
+Custom templates ("custom_N" format) are loaded from the database instead
+of the filesystem, returning the same shapes as built-in templates.
+"""
+
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+
+# Built-in templates that share LaDuc's chart/ticker data-viz contract via their
+# own (chart_layout, ticker_layout) ids. Single source of truth consumed by the
+# pipeline (table classification) AND TemplateSceneGenerator (deterministic
+# table->chart binding). Add a new built-in data-viz template here and both pick
+# it up — no other backend edits. LaDuc / FJ are intentionally excluded (they
+# keep their own dedicated branch / code path).
+# Sentinel ticker id for chart-only templates: a value that is intentionally NOT
+# a real layout. A template using it has a chart scene but no ticker scene, so
+# ticker-like tables never bind to a renderable layout (chartable tables still
+# bind to the chart layout). It is excluded from the derived ticker-id set below
+# so is_builtin_ticker_layout() never matches it.
+_NO_TICKER_SENTINEL = "data_visualisation_ticker__unused"
+
+CHART_TICKER_TEMPLATE_LAYOUTS: dict[str, tuple[str, str]] = {
+    "matrix": ("matrix_data", "matrix_ticker"),
+    "spotlight": ("spotlight_data", "spotlight_table"),
+    "chronicle": ("chronicle_data", "chronicle_table"),
+    "mosaic": ("mosaic_data_visualization", "mosaic_ticker"),
+    "sakura": ("sakura_data_visualization", "sakura_ticker"),
+    "magazine": ("magazine_data_visualization", "magazine_ticker"),
+    "default": ("default_data_visualization", "default_ticker"),
+    "nightfall": ("nightfall_data_visualization", "nightfall_ticker"),
+    # Templates with a single data_visualisation chart scene (line/bar/histogram,
+    # chartType switchable in Studio) and NO ticker scene — ticker slot is the
+    # sentinel above.
+    "whiteboard": ("data_visualisation", _NO_TICKER_SENTINEL),
+    "newspaper": ("data_visualisation", _NO_TICKER_SENTINEL),
+    "blackswan": ("data_visualisation", _NO_TICKER_SENTINEL),
+    "gridcraft": ("data_visualisation", _NO_TICKER_SENTINEL),
+    "stickman_2": ("data_visualisation", _NO_TICKER_SENTINEL),
+    "stickman_football": ("football_data_viz", "football_ticker"),
+}
+
+# Chart/ticker base layout ids derived from the map. One *_data chart layout per
+# template handles line/bar/histogram via chartType; chart matching uses a prefix test. The no-ticker sentinel is filtered out so it is never treated as
+# a real ticker layout.
+CHART_TICKER_CHART_LAYOUT_IDS: frozenset[str] = frozenset(
+    chart for chart, _ticker in CHART_TICKER_TEMPLATE_LAYOUTS.values()
+)
+CHART_TICKER_TICKER_LAYOUT_IDS: frozenset[str] = frozenset(
+    ticker
+    for _chart, ticker in CHART_TICKER_TEMPLATE_LAYOUTS.values()
+    if ticker != _NO_TICKER_SENTINEL
+)
+
+
+def is_builtin_chart_layout(layout: str) -> bool:
+    """True for a built-in data-viz chart layout or its bar/histogram variant.
+
+    NOTE: this is a PREFIX test, so a scene variant of a chart layout
+    (``data_visualisation__v2``, see get_layout_variants) would also match. That
+    is correct today — such a variant IS a chart layout — but it means chart
+    layouts cannot use the ``__vN`` variant suffix to mean anything else.
+    """
+    return any(layout.startswith(chart) for chart in CHART_TICKER_CHART_LAYOUT_IDS)
+
+
+def is_builtin_ticker_layout(layout: str) -> bool:
+    """True for a built-in data-viz ticker / data-table layout."""
+    return layout in CHART_TICKER_TICKER_LAYOUT_IDS
+
+# Path to backend/templates/ (relative to this file: app/services/template_service.py)
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent / "templates"
+
+
+# ─── Custom template helpers ──────────────────────────────────
+
+
+def is_custom_template(template_id: str) -> bool:
+    """Check if a template ID refers to a custom (DB-backed) template."""
+    return isinstance(template_id, str) and template_id.startswith("custom_")
+
+
+def is_crafted_template(template_id: str) -> bool:
+    from app.services.crafted_template_service import is_crafted_template as _is_crafted
+    return _is_crafted(template_id)
+
+
+def _parse_custom_id(template_id: str) -> int | None:
+    """Extract the numeric ID from 'custom_42'. Returns None if invalid."""
+    try:
+        return int(template_id.split("_", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _build_template_result(tpl) -> dict[str, Any]:
+    """Build the template data dict from a CustomTemplate ORM object."""
+    theme = json.loads(tpl.theme) if isinstance(tpl.theme, str) else tpl.theme
+    # Load brand kit data if linked
+    brand_kit_data = None
+    if tpl.brand_kit_id and tpl.brand_kit:
+        bk = tpl.brand_kit
+        brand_kit_data = {
+            "colors": json.loads(bk.colors) if bk.colors else {},
+            "fonts": json.loads(bk.fonts) if bk.fonts else {},
+            "logos": json.loads(bk.logos) if bk.logos else [],
+            "design_language": json.loads(bk.design_language) if bk.design_language else {},
+            "images": json.loads(bk.images) if bk.images else [],
+        }
+
+    # Parse content_codes JSON if present
+    content_codes = None
+    if tpl.content_codes:
+        try:
+            content_codes = json.loads(tpl.content_codes)
+        except (json.JSONDecodeError, TypeError):
+            content_codes = None
+
+    og_image = ""
+    if brand_kit_data and brand_kit_data.get("images"):
+        imgs = brand_kit_data["images"]
+        if imgs and isinstance(imgs[0], str):
+            og_image = imgs[0]
+
+    return {
+        "theme": theme,
+        "generated_prompt": tpl.generated_prompt or "",
+        "name": tpl.name,
+        "category": tpl.category or "blog",
+        "has_generated_code": bool(content_codes),
+        "intro_code": tpl.intro_code,
+        "outro_code": tpl.outro_code,
+        "content_codes": content_codes,
+        "content_archetype_ids": json.loads(tpl.content_archetype_ids) if getattr(tpl, "content_archetype_ids", None) else [],
+        "image_box_aspect_ratios": json.loads(tpl.image_box_aspect_ratios) if getattr(tpl, "image_box_aspect_ratios", None) else None,
+        # P2 design blueprint — drives per-layout image capability in meta.
+        "design_blueprint": json.loads(tpl.design_blueprint) if getattr(tpl, "design_blueprint", None) else None,
+        "layout_prop_schemas": json.loads(tpl.layout_prop_schemas) if getattr(tpl, "layout_prop_schemas", None) else None,
+        # Per-scene default type sizes. Read by the render path's per-scene
+        # defaults merge and folded into meta.layout_prop_schema, which is what
+        # the editor's font sliders resolve their starting values from.
+        "scene_font_defaults": json.loads(tpl.scene_font_defaults) if getattr(tpl, "scene_font_defaults", None) else None,
+        "brand_kit": brand_kit_data,
+        "og_image": og_image,
+    }
+
+
+def _build_crafted_template_result(package: dict[str, Any]) -> dict[str, Any]:
+    """Normalize crafted package payload to template-service shape.
+
+    Crafted templates should behave like built-ins at scene descriptor level
+    (layout/layoutProps), but still expose optional preview/runtime helpers.
+    """
+    return {
+        "theme": package.get("theme") or {},
+        "generated_prompt": package.get("generated_prompt") or package.get("prompt") or "",
+        "name": package.get("name") or package.get("template_key") or "Crafted Template",
+        "category": package.get("category") or "blog",
+        "genres": (package.get("meta") or {}).get("genres") or [],
+        "has_generated_code": bool(package.get("content_codes")),
+        "intro_code": package.get("intro_code"),
+        "outro_code": package.get("outro_code"),
+        "content_codes": package.get("content_codes"),
+        "content_archetype_ids": package.get("content_archetype_ids") or [],
+        "image_box_aspect_ratios": package.get("image_box_aspect_ratios"),
+        "composition_code": package.get("composition_code"),
+        "brand_kit": None,
+        "og_image": package.get("preview_image_url") or "",
+        "meta": package.get("meta") or {},
+        "layout_prompt": package.get("layout_prompt") or "",
+        "remotion_files": package.get("remotion_files") or {},
+        "remotion_entry_rel": package.get("remotion_entry_rel") or "",
+        "remotion_layout_index_rel": package.get("remotion_layout_index_rel") or "",
+        "remotion_mount_id": package.get("remotion_mount_id") or "",
+        "frontend_files": package.get("frontend_files") or {},
+        "frontend_entry_rel": package.get("frontend_entry_rel") or "",
+        "frontend_layout_index_rel": package.get("frontend_layout_index_rel") or "",
+        "frontend_mount_id": package.get("frontend_mount_id") or "",
+        "public_asset_urls": package.get("public_asset_urls") or {},
+        "public_r2_relpaths": package.get("public_r2_relpaths") or [],
+        "crafted_r2_prefix": package.get("crafted_r2_prefix") or "",
+    }
+
+
+def apply_blueprint_to_theme(theme: dict | None, design_blueprint: dict | None) -> dict | None:
+    """Fold the blueprint's design decisions into the theme dict.
+
+    THREE surfaces render a custom template — the Remotion export, the project
+    player, and the template preview — and each reads the theme, not the
+    blueprint. Without this they disagree on the two most visible properties a
+    template has:
+
+      * `motion.transitionFamily` — the blueprint's own choice was written and
+        never read, so every template fell back to a 3-bucket energy preset and
+        each cut used the same transition;
+      * `fonts.heading` / `fonts.body` — theme fonts are free-form names the
+        extractor guessed, often not bundled, which render as the system default.
+        The blueprint's ids are registry-validated.
+
+    Kept here rather than in a router so all three surfaces share ONE
+    implementation; duplicating it is how they drifted in the first place.
+    Returns a new dict — never mutates the caller's theme.
+    """
+    if not theme or not isinstance(design_blueprint, dict):
+        return theme
+
+    out = theme
+    tfam = design_blueprint.get("transition_family")
+    if isinstance(tfam, list) and tfam:
+        motion = dict(out.get("motion") or {})
+        motion["transitionFamily"] = tfam
+        out = {**out, "motion": motion}
+
+    ident = design_blueprint.get("identity") or {}
+    if isinstance(ident, dict) and (ident.get("heading_font") or ident.get("body_font")):
+        fonts = dict(out.get("fonts") or {})
+        if ident.get("heading_font"):
+            fonts["heading"] = ident["heading_font"]
+        if ident.get("body_font"):
+            fonts["body"] = ident["body_font"]
+        out = {**out, "fonts": fonts}
+    return out
+
+
+def _load_custom_template_data(
+    template_id: str, db: Session | None = None, user_id: int | None = None
+) -> dict[str, Any] | None:
+    """
+    Load a custom template's theme + generated_prompt from DB.
+    Returns a dict with keys: theme, generated_prompt, name, category.
+    Returns None if not found.
+
+    If a `db` session is provided, it is used directly (no new connection).
+    Otherwise a short-lived SessionLocal is created and closed automatically.
+    """
+    if is_crafted_template(template_id):
+        from app.services.crafted_template_service import load_crafted_template_package
+        if db is None:
+            from app.database import SessionLocal
+            own_db = SessionLocal()
+            try:
+                package = load_crafted_template_package(
+                    template_id=template_id,
+                    user_id=user_id,
+                    db=own_db,
+                    require_entitlement=user_id is not None,
+                )
+            finally:
+                own_db.close()
+        else:
+            package = load_crafted_template_package(
+                template_id=template_id,
+                user_id=user_id,
+                db=db,
+                require_entitlement=user_id is not None,
+            )
+        if not package:
+            return None
+        return _build_crafted_template_result(package)
+
+    custom_id = _parse_custom_id(template_id)
+    if custom_id is None:
+        return None
+
+    from app.models.custom_template import CustomTemplate
+
+    if db is not None:
+        q = db.query(CustomTemplate).filter(CustomTemplate.id == custom_id)
+        if user_id is not None:
+            q = q.filter(CustomTemplate.user_id == user_id)
+        tpl = q.first()
+        if not tpl:
+            return None
+        return _build_template_result(tpl)
+
+    # No session provided — create a short-lived one
+    from app.database import SessionLocal
+
+    own_db = SessionLocal()
+    try:
+        q = own_db.query(CustomTemplate).filter(CustomTemplate.id == custom_id)
+        if user_id is not None:
+            q = q.filter(CustomTemplate.user_id == user_id)
+        tpl = q.first()
+        if not tpl:
+            return None
+        return _build_template_result(tpl)
+    finally:
+        own_db.close()
+
+
+def _get_custom_meta(template_id: str, db: Session | None = None, user_id: int | None = None) -> dict[str, Any] | None:
+    """Build a meta.json equivalent for a custom template from DB data."""
+    data = _load_custom_template_data(template_id, db=db, user_id=user_id)
+    if not data:
+        return None
+    if is_crafted_template(template_id):
+        meta = data.get("meta")
+        return meta if isinstance(meta, dict) else None
+    from app.services.custom_prompt_builder import build_custom_meta
+    content_codes = data.get("content_codes") or []
+    return build_custom_meta(
+        data["theme"],
+        data["name"],
+        content_codes_count=len(content_codes),
+        content_archetype_ids=data.get("content_archetype_ids"),
+        design_blueprint=data.get("design_blueprint"),
+        layout_prop_schemas=data.get("layout_prop_schemas"),
+        scene_font_defaults=data.get("scene_font_defaults"),
+    )
+
+
+def _get_custom_prompt(template_id: str, db: Session | None = None, user_id: int | None = None) -> str:
+    """Get the generated prompt for a custom template."""
+    data = _load_custom_template_data(template_id, db=db, user_id=user_id)
+    if not data:
+        return ""
+    if data["generated_prompt"]:
+        return data["generated_prompt"]
+    from app.services.custom_prompt_builder import build_custom_prompt
+    return build_custom_prompt(data["theme"], data["name"])
+
+
+# ─── Filesystem helpers ───────────────────────────────────────
+
+
+def _load_registry() -> list[str]:
+    """Load template IDs from registry.json."""
+    path = _TEMPLATES_DIR / "registry.json"
+    if not path.exists():
+        return ["default"]
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, list) else ["default"]
+
+
+def _load_meta(template_id: str, db: Session | None = None, user_id: int | None = None) -> dict[str, Any] | None:
+    """Load meta.json for a template. Returns None if not found."""
+    if is_custom_template(template_id) or is_crafted_template(template_id):
+        return _get_custom_meta(template_id, db=db, user_id=user_id)
+    path = _TEMPLATES_DIR / template_id / "meta.json"
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _load_prompt(template_id: str, db: Session | None = None, user_id: int | None = None) -> str:
+    """Load prompt.md content for a template. Returns empty string if not found."""
+    if is_custom_template(template_id) or is_crafted_template(template_id):
+        return _get_custom_prompt(template_id, db=db, user_id=user_id)
+    path = _TEMPLATES_DIR / template_id / "prompt.md"
+    if not path.exists():
+        return ""
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+# ─── Public API ─────────────────────────────────────────────────────
+
+
+def list_templates() -> list[dict[str, Any]]:
+    """Return list of all built-in templates (meta for each).
+    Genre-based filtering happens client-side; the server returns the full catalog."""
+    registry = _load_registry()
+    result = []
+    for tid in registry:
+        meta = _load_meta(tid)
+        if not meta:
+            continue
+        result.append(meta)
+    return result
+
+
+def get_meta(template_id: str) -> dict[str, Any] | None:
+    """Get meta.json for one template (built-in or custom)."""
+    return _load_meta(template_id)
+
+
+def get_prompt(template_id: str, db: Session | None = None, user_id: int | None = None) -> str:
+    """Get prompt.md content for one template.
+
+    Crafted templates are resolved from R2 package payload (cache-backed).
+    """
+    return _load_prompt(template_id, db=db, user_id=user_id)
+
+
+def get_layout_prompt(template_id: str, db: Session | None = None, user_id: int | None = None) -> str:
+    """
+    Get layout_prompt.md content for one template.
+
+    - For built-in templates, tries backend/templates/<id>/layout_prompt.md first,
+      falling back to prompt.md when not present.
+    - For custom templates (custom_N), falls back to the generated prompt
+      (the full template prompt already contains the layout/arrangement catalog).
+    """
+    if is_crafted_template(template_id):
+        data = _load_custom_template_data(template_id, db=db, user_id=user_id)
+        if data and isinstance(data.get("layout_prompt"), str) and data.get("layout_prompt"):
+            return data["layout_prompt"]
+        return _get_custom_prompt(template_id, db=db, user_id=user_id)
+
+    if is_custom_template(template_id):
+        # Custom templates do not have layout_prompt.md files on disk; use their full prompt.
+        #
+        # But that prompt is `generated_prompt`, STORED AT TEMPLATE-CREATION TIME —
+        # before any scene code exists — so it describes the legacy arrangement
+        # vocabulary (full-center, split-left, grid-3, ...). Meanwhile the
+        # template's real layouts, once code has been generated, are
+        # intro / content_0..N / outro, and those are what get_valid_layouts()
+        # and the renderer actually use.
+        #
+        # Feeding the script LLM the stale catalog made it pick arrangement names
+        # for every scene — names nothing downstream consumes — which is why
+        # project scene lists showed "split-left" and "grid-3" instead of the
+        # template's own layouts. Append the authoritative catalog so the LLM
+        # picks real ids. (Regenerating generated_prompt is not an option: it is
+        # also consumed by the DSPy scene generator for narration/visual hints.)
+        base = _get_custom_prompt(template_id, db=db, user_id=user_id)
+        catalog = _custom_layout_catalog(template_id)
+        return f"{base}\n\n{catalog}" if catalog else base
+
+    layout_path = _TEMPLATES_DIR / template_id / "layout_prompt.md"
+    if layout_path.exists():
+        with open(layout_path, encoding="utf-8") as f:
+            return f.read()
+
+    # Fallback: use full prompt.md
+    return _load_prompt(template_id, db=db, user_id=user_id)
+
+
+def _custom_layout_catalog(template_id: str) -> str:
+    """The authoritative layout catalog for a generated custom template.
+
+    Returns "" for legacy theme-only templates (no generated scene code), whose
+    stored prompt's arrangement vocabulary is still the correct one for them.
+    """
+    meta = _load_meta(template_id)
+    if not meta:
+        return ""
+    layouts = [x for x in (meta.get("valid_layouts") or []) if isinstance(x, str)]
+    # Arrangement-based metas are the legacy shape — leave those alone.
+    if not any(x == "intro" or x.startswith("content_") for x in layouts):
+        return ""
+    studio_only = set(meta.get("studio_only_layouts") or [])
+    names = meta.get("layout_names") or {}
+    # What each layout is BUILT FOR. Without this the catalog listed names only,
+    # so the script LLM was choosing between "Everything List" and "Milestone
+    # Track" on the strength of the words alone — and the layout it picked bore
+    # no relation to the shape of the scene's content. Every downstream stage
+    # then inherited that guess.
+    best_for = meta.get("layout_best_for") or {}
+    # Mirrors a built-in template's layout_prompt.md, which is prose:
+    #
+    #   - `mosaic_stream`
+    #     - Best for: Ordered or grouped lists.
+    #
+    # A taxonomy list ("bullets, steps") could not break a tie: eight layouts in
+    # one template routinely share a content type, so it said only "any of these
+    # three" and the choice fell to position. A sentence distinguishes "a dense
+    # scannable list" from "three items given equal weight", which is what
+    # actually decides where a scene belongs.
+    rows = []
+    for lid in layouts:
+        if lid in studio_only:
+            continue
+        rows.append(f"- `{lid}` — {names.get(lid, lid.replace('_', ' ').title())}")
+        _bf = best_for.get(lid)
+        if isinstance(_bf, list):  # legacy taxonomy list
+            _bf = ", ".join(str(k) for k in _bf) if _bf else ""
+        if isinstance(_bf, str) and _bf.strip():
+            rows.append(f"  - Best for: {_bf.strip()}")
+    if not rows:
+        return ""
+    return (
+        "## Layout catalog (AUTHORITATIVE — overrides any arrangement list above)\n\n"
+        "This template's scenes were generated as code. Its real layouts are the ids\n"
+        "below. Use ONE of these exact ids as each scene's layout. Arrangement names\n"
+        "such as `full-center`, `split-left`, `grid-3` or `stacked` belong to an older\n"
+        "vocabulary, are NOT valid here, and will be discarded.\n\n"
+        + "\n".join(rows)
+        + "\n\n- `intro` is the opening scene and `outro` the closing scene; use each once.\n"
+        "- MATCH THE CONTENT TO THE LAYOUT. Read each layout's \"Best for\" line and pick\n"
+        "  the one whose description fits what THIS scene actually says — its title, its\n"
+        "  narration, how many items it names and how much text each carries. Where two\n"
+        "  layouts could both hold it, the Best for lines are what tell them apart.\n"
+        "  This choice decides which props the scene is given, so a mismatch leaves the\n"
+        "  layout half-empty.\n"
+        "- Prefer not to repeat a layout in consecutive scenes, but NEVER at the cost of\n"
+        "  the match above: two neighbouring list scenes on the same list layout beat one\n"
+        "  of them on a layout built for something else.\n"
+    )
+
+
+def get_valid_layouts(template_id: str) -> set[str]:
+    """Get the set of valid layout IDs for a template.
+
+    Excludes studio_only_layouts — layouts that exist solely for template
+    studio preview and must never be assigned by the LLM during script generation.
+    """
+    meta = _load_meta(template_id)
+    if not meta:
+        return set()
+    layouts = meta.get("valid_layouts", [])
+    all_layouts = set(layouts) if isinstance(layouts, list) else set()
+    studio_only = meta.get("studio_only_layouts", [])
+    studio_only_set = set(studio_only) if isinstance(studio_only, list) else set()
+    return all_layouts - studio_only_set
+
+
+def get_layouts_without_image(template_id: str) -> set[str]:
+    """Get the set of layout IDs that do not support/display images for a template."""
+    meta = _load_meta(template_id)
+    if not meta:
+        return set()
+    layouts = meta.get("layouts_without_image", [])
+    return set(layouts) if isinstance(layouts, list) else set()
+
+
+def get_layout_variants(template_id: str) -> dict[str, list[str]]:
+    """Map each base layout ID to its list of visual variants, base first.
+
+    A variant is a sibling layout ID (``news_headline__v2``) that renders the same
+    scene in a different visual style and shares the base layout's prop schema.
+    Variants are declared in meta.json's ``layout_variants`` and are deliberately
+    NOT in ``valid_layouts`` — the layout planner must only ever pick base IDs.
+    The base is always element 0 of its own list, so "what can this scene be?" is
+    a single dict lookup with no special-casing of the base.
+    """
+    meta = _load_meta(template_id)
+    if not meta:
+        return {}
+    raw = meta.get("layout_variants") or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for base, variants in raw.items():
+        if not isinstance(base, str) or not isinstance(variants, list):
+            continue
+        ids = [v for v in variants if isinstance(v, str) and v.strip()]
+        if base not in ids:
+            ids = [base, *ids]
+        out[base] = ids
+    return out
+
+
+def get_variant_to_base(template_id: str) -> dict[str, str]:
+    """Every variant ID (including each base, mapping to itself) -> base layout ID."""
+    return {
+        variant: base
+        for base, ids in get_layout_variants(template_id).items()
+        for variant in ids
+    }
+
+
+def resolve_base_layout(template_id: str, layout: str) -> str:
+    """Collapse a variant layout ID to its base. Unknown IDs pass through unchanged.
+
+    Every consumer of the per-layout metadata (``layout_prop_schema``,
+    ``layouts_without_image``, image aspect ratios) is keyed by BASE layout, so
+    variants inherit their base's schema by resolving through here rather than
+    duplicating entries. That makes schema drift between a base and its variants
+    structurally impossible.
+    """
+    if not isinstance(layout, str) or "__" not in layout:
+        return layout
+    return get_variant_to_base(template_id).get(layout, layout)
+
+
+def get_all_renderable_layouts(template_id: str) -> set[str]:
+    """Every layout ID the RENDERER can dispatch: valid_layouts plus all variants.
+
+    Distinct from :func:`get_valid_layouts`, which is the smaller set the layout
+    PLANNER may pick from. Anything validating a stored/user-supplied layout ID
+    wants this; anything offering layouts to the LLM wants get_valid_layouts().
+    """
+    return get_valid_layouts(template_id) | set(get_variant_to_base(template_id))
+
+
+def get_hero_layout(template_id: str) -> str:
+    """Get the hero layout ID (scene 0). Default: hero_image."""
+    meta = _load_meta(template_id)
+    if not meta:
+        return "hero_image"
+    return meta.get("hero_layout", "hero_image")
+
+
+def get_fallback_layout(template_id: str) -> str:
+    """Get the fallback layout when DSPy output is invalid."""
+    meta = _load_meta(template_id)
+    if not meta:
+        return "text_narration"
+    return meta.get("fallback_layout", "text_narration")
+
+
+def get_script_style_hint(template_id: str) -> str:
+    """Get the script narration style hint for a template, or empty string if none."""
+    meta = _load_meta(template_id)
+    if not meta:
+        return ""
+    return meta.get("script_style_hint", "")
+
+
+
+
+def get_composition_id(template_id: str) -> str:
+    """Get the Remotion composition ID for rendering."""
+    if is_crafted_template(template_id):
+        # Crafted packages are mounted into GeneratedVideo shim at runtime.
+        return "GeneratedVideo"
+    meta = _load_meta(template_id)
+    if not meta:
+        return "DefaultVideo"
+    return meta.get("composition_id", "DefaultVideo")
+
+
+def get_preview_colors(
+    template_id: str,
+    db: Session | None = None,
+    user_id: int | None = None,
+) -> dict[str, str] | None:
+    """Get preview_colors (accent, bg, text) for template. None = use request defaults.
+
+    `db`/`user_id` are REQUIRED for a custom template: its meta is built from the
+    DB, not read off disk, so without a session `_load_meta` returns None and this
+    reports "no colours" for every custom template. Callers then fell back to the
+    app default accent (#7C3AED) and persisted it on the project — which is how a
+    Careem video rendered purple.
+    """
+    meta = _load_meta(template_id, db=db, user_id=user_id)
+    if not meta:
+        return None
+    pc = meta.get("preview_colors")
+    if not isinstance(pc, dict):
+        return None
+    return pc
+
+
+def validate_template_id(template_id: str | None, db: Session | None = None, user_id: int | None = None) -> str:
+    """Return template_id if valid, else 'default'.
+    Accepts both built-in IDs and 'custom_N' format."""
+    if not template_id or not isinstance(template_id, str):
+        return "default"
+    tid = template_id.strip()
+
+    # Custom templates: validate format and existence in DB
+    if is_custom_template(tid):
+        data = _load_custom_template_data(tid, db=db, user_id=user_id)
+        if data is not None:
+            return tid
+        # Loud fallback, mirroring the crafted-template branch below: a
+        # project whose `template` column names a custom_N id that cannot be
+        # loaded (deleted, not found, a transient DB/session issue) silently
+        # rendered as the generic 'default' template with NO signal anywhere
+        # — every custom-only field (headingFont, bodyFont, layoutConfig,
+        # contentVariantCount, ...) simply never got written, and the only
+        # symptom was the video looking wrong with nothing in the logs to
+        # explain why.
+        logger.warning(
+            "[TEMPLATE] Custom template '%s' could not be loaded (user_id=%s); "
+            "falling back to 'default'. The render will use generic layouts "
+            "and fonts instead of this template's own.",
+            tid,
+            user_id,
+        )
+        return "default"
+
+    if is_crafted_template(tid):
+        from app.services.crafted_template_service import load_crafted_template_package
+        package = None
+        if db is not None:
+            package = load_crafted_template_package(
+                template_id=tid,
+                user_id=user_id,
+                db=db,
+                require_entitlement=user_id is not None,
+            )
+        else:
+            from app.database import SessionLocal
+            own_db = SessionLocal()
+            try:
+                package = load_crafted_template_package(
+                    template_id=tid,
+                    user_id=user_id,
+                    db=own_db,
+                    require_entitlement=user_id is not None,
+                )
+            finally:
+                own_db.close()
+        if package is not None:
+            return tid
+        # Loud fallback: if a crafted template was requested but the package
+        # couldn't be loaded (entitlement, R2 fetch, contract validation, etc.),
+        # the entire pipeline silently switches to the built-in 'default'
+        # template, which is what makes generated videos render with default
+        # layouts rather than the crafted layouts the user picked.
+        logger.warning(
+            "[TEMPLATE] Crafted template '%s' could not be loaded (user_id=%s); "
+            "falling back to 'default'. See [CRAFTED] log lines above for the underlying reason.",
+            tid,
+            user_id,
+        )
+        return "default"
+
+    # Built-in templates
+    tid = tid.lower()
+    if tid == "newsreport":
+        tid = "newscast"
+    registry = _load_registry()
+    if tid in registry:
+        return tid
+    return "default"
