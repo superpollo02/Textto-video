@@ -3826,7 +3826,7 @@ def upload_documents_to_project(
         if file_ext not in _ALLOWED_EXTENSIONS and f.content_type not in _ALLOWED_MIME_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail=f"File '{f.filename}' is not supported. Accepted formats: PDF, DOCX, PPTX, MD, TXT, VTT.",
+                detail=f"File '{f.filename}' is not supported. Accepted formats: PDF, DOCX, PPTX, XLSX, XLS, CSV, MD, TXT, VTT.",
             )
         content = f.file.read()
         if len(content) > _MAX_FILE_SIZE:

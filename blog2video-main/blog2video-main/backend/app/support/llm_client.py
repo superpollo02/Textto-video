@@ -26,7 +26,7 @@ SUMMARY_MODEL = os.environ.get("SUPPORT_SUMMARY_MODEL", "qwen/qwen3.5-9b")
 # All traffic is HTTPS/TLS 1.3; the API key travels inside the encrypted channel.
 _client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key=settings.OPEN_ROUTER_KEY,  # same key DSPy uses
+    api_key=settings.OPEN_ROUTER_KEY or "not-configured",  # same key DSPy uses
     default_headers={
         "HTTP-Referer": os.environ.get("FRONTEND_URL", "https://blog2video.app"),
         "X-Title": "Blog2Video Support",
